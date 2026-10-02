@@ -1,13 +1,18 @@
 ---
 title: Changelog
 description: Release history for kata
-last_edited: 2026-10-01
+last_edited: 2026-10-02
 ---
 
 All notable changes to kata, grouped by release. Versioned releases start with
 0.5.0; earlier entries are a retroactive project history grouped by ISO week.
 
 ## Unreleased
+
+- Replace an issue body from a file or stdin with `kata edit --body-file PATH`
+  or `kata edit --body-stdin`, as `kata create` and `kata comment` already
+  allow. Long bodies with quotes, backticks, or newlines no longer need shell
+  quoting.
 
 - Use OpenAI-compatible embedding servers that reject a `dimensions` field.
   Embedding requests no longer send `"dimensions": 0` unless dimensions are

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -390,4 +393,81 @@ func TestEdit_WithComment_AppendsComment(t *testing.T) {
 	assert.Equal(t, "bumping for incident", got.Comments[0].Body)
 	require.NotNil(t, got.Issue.Priority)
 	assert.Equal(t, int64(1), *got.Issue.Priority)
+}
+
+// issueBodyViaHTTP reads the stored issue body straight from the daemon.
+func issueBodyViaHTTP(t *testing.T, env *testenv.Env, pid int64, ref string) string {
+	t.Helper()
+	got := getJSON[struct {
+		Issue struct {
+			Body string `json:"body"`
+		} `json:"issue"`
+	}](t, env.URL+"/api/v1/projects/"+itoa(pid)+"/issues/"+ref)
+	return got.Issue.Body
+}
+
+func TestEdit_BodyFileReplacesBody(t *testing.T) {
+	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
+	runCLI(t, env, dir, "edit", ref, "--body", "original")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	require.NoError(t, os.WriteFile(bodyFile, []byte("line \"one\"\n`two`\n"), 0o600))
+
+	runCLI(t, env, dir, "edit", ref, "--body-file", bodyFile)
+
+	assert.Equal(t, "line \"one\"\n`two`", issueBodyViaHTTP(t, env, pid, ref))
+}
+
+func TestEdit_BodyStdinReplacesBody(t *testing.T) {
+	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
+	runCLI(t, env, dir, "edit", ref, "--body", "original")
+
+	_, stderr, err := executeRootCaptureWithInput(
+		contextWithBaseURL(context.Background(), env.URL), t, "from stdin\nsecond line\n",
+		"--workspace", dir, "edit", ref, "--body-stdin")
+	require.NoError(t, err, "%s", stderr)
+
+	assert.Equal(t, "from stdin\nsecond line", issueBodyViaHTTP(t, env, pid, ref))
+}
+
+func TestEdit_EmptyBodyFileClearsBody(t *testing.T) {
+	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
+	runCLI(t, env, dir, "edit", ref, "--body", "original")
+	bodyFile := filepath.Join(t.TempDir(), "empty.md")
+	require.NoError(t, os.WriteFile(bodyFile, nil, 0o600))
+
+	runCLI(t, env, dir, "edit", ref, "--body-file", bodyFile)
+
+	assert.Empty(t, issueBodyViaHTTP(t, env, pid, ref))
+}
+
+func TestEdit_BodySourcesAreMutuallyExclusive(t *testing.T) {
+	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
+	runCLI(t, env, dir, "edit", ref, "--body", "original")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	require.NoError(t, os.WriteFile(bodyFile, []byte("from file"), 0o600))
+
+	for _, args := range [][]string{
+		{"--body", "inline", "--body-file", bodyFile},
+		{"--body", "", "--body-stdin"},
+		{"--body-file", bodyFile, "--body-stdin"},
+	} {
+		_, err := runCLICapture(t, env, dir, append([]string{"edit", ref}, args...)...)
+		ce := requireCLIError(t, err, ExitUsage)
+		assert.Equal(t, "must pass exactly one of --body, --body-file, --body-stdin", ce.Message)
+	}
+	assert.Equal(t, "original", issueBodyViaHTTP(t, env, pid, ref))
+}
+
+func TestEdit_MissingBodyFileFailsWithoutEditing(t *testing.T) {
+	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
+	runCLI(t, env, dir, "edit", ref, "--body", "original")
+	missing := filepath.Join(t.TempDir(), "missing.md")
+
+	_, err := runCLICapture(t, env, dir, "edit", ref, "--title", "renamed", "--body-file", missing)
+
+	ce := requireCLIError(t, err, ExitValidation)
+	assert.Contains(t, ce.Message, "read "+missing)
+	got := fetchIssueViaHTTP(t, env, pid, ref)
+	assert.Equal(t, "subject", got.Issue.Title)
+	assert.Equal(t, "original", issueBodyViaHTTP(t, env, pid, ref))
 }

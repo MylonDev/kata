@@ -1,7 +1,7 @@
 ---
 title: CLI reference
 description: Reference Kata's command-line flags, issue relationships, output modes, and administration workflows.
-last_edited: 2026-10-01
+last_edited: 2026-10-02
 ---
 
 # CLI reference
@@ -544,7 +544,7 @@ Edit:
 ```sh
 kata edit <issue-ref> \
   [--title TEXT] \
-  [--body TEXT] \
+  [--body TEXT | --body-file PATH | --body-stdin] \
   [--owner NAME] \
   [--priority 0..4 | --priority -] \
   [--parent <ref>] \
@@ -557,6 +557,10 @@ kata edit <issue-ref> \
   [--remove-related <ref>] \
   [--comment TEXT]
 ```
+
+`--body`, `--body-file`, and `--body-stdin` each replace the whole body, and
+at most one may be passed. A file or stdin body loses its trailing newlines,
+as on `kata create`. An empty file or empty stdin clears the body.
 
 Link flags (`--parent`, `--blocks`, `--blocked-by`, `--related`, and their
 `--remove-*` counterparts) accept `short_id` (same project),

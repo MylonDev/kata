@@ -16,7 +16,7 @@ import (
 func newEditCmd() *cobra.Command {
 	var (
 		title    string
-		body     string
+		src      BodySources
 		owner    string
 		priority string
 
@@ -35,7 +35,9 @@ func newEditCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 	}
 	cmd.Flags().StringVar(&title, "title", "", "new title")
-	cmd.Flags().StringVar(&body, "body", "", "new body")
+	cmd.Flags().StringVar(&src.Body, "body", "", "new body")
+	cmd.Flags().StringVar(&src.File, "body-file", "", "read new body from file")
+	cmd.Flags().BoolVar(&src.Stdin, "body-stdin", false, "read new body from stdin")
 	cmd.Flags().StringVar(&owner, "owner", "", "new owner")
 	cmd.Flags().StringVar(&priority, "priority", "",
 		"new priority (0..4; 0 = highest). Pass '-' to clear.")
@@ -78,7 +80,17 @@ func newEditCmd() *cobra.Command {
 			}
 			payload["title"] = title
 		}
-		if cmd.Flags().Changed("body") {
+		src.BodySet = cmd.Flags().Changed("body")
+		src.FileSet = cmd.Flags().Changed("body-file")
+		if src.BodySet || src.FileSet || src.Stdin {
+			body, err := resolveBody(src, cmd.InOrStdin())
+			if err != nil {
+				code := ExitValidation
+				if strings.HasPrefix(err.Error(), "must pass exactly one of") {
+					code = ExitUsage
+				}
+				return &cliError{Message: err.Error(), Kind: kindForExit(code), ExitCode: code}
+			}
 			payload["body"] = body
 		}
 		if cmd.Flags().Changed("owner") {
@@ -142,7 +154,7 @@ func newEditCmd() *cobra.Command {
 		hasMutation := len(payload) > 0
 		if !hasMutation {
 			return &cliError{
-				Message: "pass at least one of --title, --body, --owner, --priority, " +
+				Message: "pass at least one of --title, --body, --body-file, --body-stdin, --owner, --priority, " +
 					"--parent, --blocks, --blocked-by, --related, " +
 					"--remove-parent, --remove-blocks, --remove-blocked-by, --remove-related",
 				Kind:     kindValidation,
