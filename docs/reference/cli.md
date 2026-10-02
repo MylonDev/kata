@@ -424,11 +424,12 @@ List and inspect:
 ```sh
 kata list [--status open|closed|all] [--sort oldest] [--limit N]
 kata list [--label LABEL] [--no-label LABEL] [--owner NAME] [--unowned]
-kata list [--meta key[=value]]
+kata list [--meta key[=value]] [--parent <ref>]
 kata list --all [--status open|closed|all] [--sort oldest] [--limit N]
               [--priority N | --max-priority N]
               [--owner NAME | --unowned]
               [--label LABEL] [--no-label LABEL] [--meta key[=value]]
+              [--parent <ref>]
 kata show <issue-ref> [--render] [--no-comments]
 kata status <issue-ref>
 kata search <query> [--limit N] [--include-deleted]
@@ -486,6 +487,20 @@ limited. Explicitly sorted human output is flat. An omitted sort keeps the
 scoped default of `updated_at` descending and the cross-project default of
 `created_at` descending, with the existing human tree grouping. The option
 requires daemon API `0.21.0` or newer.
+
+`--parent <ref>` lists only the direct children of one issue, each with its
+status, so a parent's progress takes one call instead of one `kata show` per
+child. Grandchildren are not included. The ref is a `short_id`,
+`project#short_id`, or full ULID; an unknown ref fails as not found. The
+filter combines with the others and applies before `--limit`. As with every
+list, `--status` defaults to `open`; pass `--status all` to include closed
+children.
+
+A scoped `kata list --parent` returns the children in the current project.
+Parent links can cross projects, so use `kata list --all --parent <ref>` to
+include children elsewhere. Outside a bound workspace, `--all --parent` needs
+a `project#short_id` or ULID ref. The option requires daemon API `0.25.0` or
+newer.
 
 `kata list --all` applies the same filters across every non-archived project.
 Its human and agent rows use qualified refs such as

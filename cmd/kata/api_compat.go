@@ -14,6 +14,7 @@ import (
 const (
 	apiVersionSearchStatus          = "0.20.0"
 	apiVersionListSort              = "0.21.0"
+	apiVersionListParent            = "0.25.0"
 	apiVersionMoveDryRun            = "0.23.0"
 	apiVersionReadyAndSearchFilters = "0.8.0"
 	apiVersionGlobalListFilters     = "0.9.0"

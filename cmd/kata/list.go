@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kata/internal/shortid"
 	kataclient "go.kenn.io/kata/pkg/client"
 	"go.kenn.io/kata/pkg/client/generated"
 )
@@ -24,6 +27,7 @@ func newListCmd() *cobra.Command {
 	var labels []string
 	var noLabels []string
 	var meta []string
+	var parent string
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -67,6 +71,17 @@ func newListCmd() *cobra.Command {
 					return err
 				}
 			}
+			var parentUID string
+			if cmd.Flags().Changed("parent") {
+				// Older daemons ignore parent_uid and would return every issue.
+				if err := requireDaemonAPIVersion(ctx, client, baseURL, apiVersionListParent, "list --parent"); err != nil {
+					return err
+				}
+				parentUID, err = resolveListParentUID(cmd, ctx, client, baseURL, parent)
+				if err != nil {
+					return err
+				}
+			}
 			// "all" is a CLI sentinel meaning "no filter"; the server expects
 			// an empty status to return both open and closed.
 			apiStatus := status
@@ -104,11 +119,15 @@ func newListCmd() *cobra.Command {
 			if owner != "" {
 				params.Owner = &owner
 			}
+			if parentUID != "" {
+				params.ParentUID = &parentUID
+			}
 			var bs []byte
 			if all {
 				response, callErr := apiClient.ListAllIssuesWithResponse(ctx, &generated.ListAllIssuesRequestOptions{Query: &generated.ListAllIssuesQuery{
 					Status: new(generated.ListAllIssuesQueryStatus(apiStatus)), Priority: params.Priority, MaxPriority: params.MaxPriority,
 					Limit: params.Limit, Sort: allSort, Unowned: params.Unowned, Owner: params.Owner, Label: labels, ExcludeLabel: noLabels, Meta: meta,
+					ParentUID: params.ParentUID,
 				}})
 				if err := externalCLITransportError(response, callErr); err != nil {
 					return err
@@ -264,7 +283,53 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&noLabels, "no-label", nil, "exclude issues with this label (repeatable)")
 	cmd.Flags().StringArrayVar(&meta, "meta", nil,
 		"filter by metadata key or key=value (repeatable, AND logic)")
+	cmd.Flags().StringVar(&parent, "parent", "",
+		"only direct children of <ref> ("+issueRefHelp+")")
 	return cmd
+}
+
+// resolveListParentUID resolves the --parent ref to the parent's issue UID,
+// which is what the list routes filter on. A ULID is looked up by UID so it
+// works with --all outside a bound workspace; short_id forms resolve like
+// any other issue ref. An unknown parent fails here instead of listing
+// nothing.
+func resolveListParentUID(
+	cmd *cobra.Command, ctx context.Context, client *http.Client, baseURL, ref string,
+) (string, error) {
+	var bs []byte
+	if parsed, err := shortid.Parse(ref); err == nil && parsed.ULID != "" {
+		apiClient, err := kataclient.NewWithHTTPClient(baseURL, client)
+		if err != nil {
+			return "", err
+		}
+		response, callErr := apiClient.ShowIssueByUIDWithResponse(ctx, &generated.ShowIssueByUIDRequestOptions{
+			PathParams: &generated.ShowIssueByUIDPath{UID: parsed.ULID},
+		})
+		if err := externalCLITransportError(response, callErr); err != nil {
+			return "", err
+		}
+		if err := externalCLIResponseError(response.StatusCode, response.Body, callErr); err != nil {
+			return "", err
+		}
+		bs = response.Body
+	} else {
+		refCtx, refBaseURL, pid, resolved, err := resolveIssueRefForCommand(cmd, ref)
+		if err != nil {
+			return "", err
+		}
+		if _, bs, err = fetchMetaIssue(refCtx, client, refBaseURL, pid, resolved.RefForAPI); err != nil {
+			return "", err
+		}
+	}
+	var body struct {
+		Issue struct {
+			UID string `json:"uid"`
+		} `json:"issue"`
+	}
+	if err := json.Unmarshal(bs, &body); err != nil {
+		return "", err
+	}
+	return body.Issue.UID, nil
 }
 
 type agentField struct {

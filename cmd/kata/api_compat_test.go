@@ -226,6 +226,60 @@ func TestListSortDaemonCompatibility(t *testing.T) {
 	}
 }
 
+func TestListParentDaemonCompatibility(t *testing.T) {
+	const parentUID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	tests := []struct {
+		name          string
+		version       string
+		wantError     string
+		wantLookups   int32
+		wantListCalls int32
+		wantParentUID string
+	}{
+		{name: "missing version rejects parent", version: "", wantError: "list --parent requires daemon API 0.25.0 or newer"},
+		{name: "old version rejects parent", version: "0.24.0", wantError: "list --parent requires daemon API 0.25.0 or newer"},
+		{name: "current version sends parent uid", version: "0.25.0", wantLookups: 1, wantListCalls: 1, wantParentUID: parentUID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var lookups, listCalls atomic.Int32
+			var observedParentUID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/health":
+					if tt.version == "" {
+						_, _ = w.Write([]byte(`{"ok":true}`))
+						return
+					}
+					_, _ = w.Write([]byte(`{"ok":true,"api_schema_version":"` + tt.version + `"}`))
+				case "/api/v1/issues/" + parentUID:
+					lookups.Add(1)
+					_, _ = w.Write([]byte(`{"issue":{"uid":"` + parentUID + `"}}`))
+				case "/api/v1/issues":
+					listCalls.Add(1)
+					observedParentUID = r.URL.Query().Get("parent_uid")
+					_, _ = w.Write([]byte(`{"issues":[]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			_, _, err := executeRootCapture(t,
+				contextWithBaseURL(context.Background(), server.URL), "list", "--all", "--parent", parentUID)
+			if tt.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantError)
+			}
+			assert.Equal(t, tt.wantLookups, lookups.Load())
+			assert.Equal(t, tt.wantListCalls, listCalls.Load())
+			assert.Equal(t, tt.wantParentUID, observedParentUID)
+		})
+	}
+}
+
 func TestAPIVersionAtLeast(t *testing.T) {
 	tests := []struct {
 		reported string

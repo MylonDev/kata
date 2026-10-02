@@ -9,6 +9,12 @@ All notable changes to kata, grouped by release. Versioned releases start with
 
 ## Unreleased
 
+- List one issue's direct children and their status with
+  `kata list --parent <ref>`, instead of running `kata show` on each child.
+  It combines with the other list filters and with `--all`, and applies before
+  `--limit`. The issue-list API routes accept the matching `parent_uid` query.
+  Requires daemon API `0.25.0` or newer.
+
 - Read an issue without its comment thread using `kata show --no-comments`.
   Human and agent output report how many comments were omitted. The flag is
   not available with `--json`, which still returns the complete issue.
