@@ -440,6 +440,27 @@ func TestEdit_EmptyBodyFileClearsBody(t *testing.T) {
 	assert.Empty(t, issueBodyViaHTTP(t, env, pid, ref))
 }
 
+func TestEdit_EmptyBodyStdinClearsBody(t *testing.T) {
+	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
+	runCLI(t, env, dir, "edit", ref, "--body", "original")
+
+	_, stderr, err := executeRootCaptureWithInput(
+		contextWithBaseURL(context.Background(), env.URL), t, "",
+		"--workspace", dir, "edit", ref, "--body-stdin")
+	require.NoError(t, err, "%s", stderr)
+
+	assert.Empty(t, issueBodyViaHTTP(t, env, pid, ref))
+}
+
+func TestEdit_NoChangeMessageNamesBodySources(t *testing.T) {
+	env, dir, _, ref := setupWorkspaceWithIssue(t, "subject")
+
+	_, err := runCLICapture(t, env, dir, "edit", ref)
+
+	ce := requireCLIError(t, err, ExitValidation)
+	assert.Contains(t, ce.Message, "pass at least one of --title, --body, --body-file, --body-stdin, --owner")
+}
+
 func TestEdit_BodySourcesAreMutuallyExclusive(t *testing.T) {
 	env, dir, pid, ref := setupWorkspaceWithIssue(t, "subject")
 	runCLI(t, env, dir, "edit", ref, "--body", "original")

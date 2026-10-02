@@ -77,7 +77,7 @@ func newListCmd() *cobra.Command {
 				if err := requireDaemonAPIVersion(ctx, client, baseURL, apiVersionListParent, "list --parent"); err != nil {
 					return err
 				}
-				parentUID, err = resolveListParentUID(cmd, ctx, client, baseURL, parent)
+				parentUID, err = resolveListParentUID(ctx, cmd, client, baseURL, parent)
 				if err != nil {
 					return err
 				}
@@ -294,7 +294,7 @@ func newListCmd() *cobra.Command {
 // any other issue ref. An unknown parent fails here instead of listing
 // nothing.
 func resolveListParentUID(
-	cmd *cobra.Command, ctx context.Context, client *http.Client, baseURL, ref string,
+	ctx context.Context, cmd *cobra.Command, client *http.Client, baseURL, ref string,
 ) (string, error) {
 	var bs []byte
 	if parsed, err := shortid.Parse(ref); err == nil && parsed.ULID != "" {
@@ -328,6 +328,10 @@ func resolveListParentUID(
 	}
 	if err := json.Unmarshal(bs, &body); err != nil {
 		return "", err
+	}
+	// An empty UID would drop the filter and list every issue.
+	if body.Issue.UID == "" {
+		return "", fmt.Errorf("resolve --parent %s: daemon response has no issue uid", ref)
 	}
 	return body.Issue.UID, nil
 }

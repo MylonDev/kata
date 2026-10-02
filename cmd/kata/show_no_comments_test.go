@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,13 +81,36 @@ func TestShow_NoCommentsRejectsJSON(t *testing.T) {
 	assert.Equal(t, "kata show --no-comments is not available with --json", cliErr.Message)
 }
 
-func TestShow_NoCommentsWithRenderOffTerminalMatchesPlain(t *testing.T) {
+// The rendered path receives the response after --no-comments has dropped the
+// comments, so only the description reaches the Markdown renderer and the
+// omitted count still prints.
+func TestShow_NoCommentsRenderedOutputRendersOnlyDescription(t *testing.T) {
+	var response showResponseForCLI
+	response.Issue.ShortID = "abc4"
+	response.Issue.Title = "rendered fields"
+	response.Issue.Status = "open"
+	response.Issue.Author = "user-a"
+	response.Issue.Body = "## Description"
+	response.CommentsOmitted = 2
+	renderer := &recordingShowMarkdownRenderer{}
+	var out bytes.Buffer
+
+	require.NoError(t, renderAndPrintShowHuman(
+		context.Background(), &out, response, "example-project", renderer, 80,
+	))
+
+	require.Len(t, renderer.calls, 1)
+	assert.Equal(t, markdownDescription, renderer.calls[0].kind)
+	assert.Contains(t, out.String(), "\x1b[1mDescription\x1b[0m")
+	assert.Contains(t, out.String(), "\n--- comments: 2 omitted ---\n")
+}
+
+func TestShow_NoCommentsWithRenderFlagKeepsOmittedCount(t *testing.T) {
 	env, dir, pid := setupCLIWorkspace(t)
 	ref := createIssueWithTwoComments(t, env, dir, pid)
 
-	plain := runCLI(t, env, dir, "show", ref, "--no-comments")
-	rendered := runCLI(t, env, dir, "show", ref, "--no-comments", "--render")
+	out := runCLI(t, env, dir, "show", ref, "--no-comments", "--render")
 
-	require.Contains(t, plain, "--- comments: 2 omitted ---")
-	assert.Equal(t, plain, rendered)
+	assert.Contains(t, out, "--- comments: 2 omitted ---")
+	assert.NotContains(t, out, "Reproduced on macOS.")
 }

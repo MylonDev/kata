@@ -110,12 +110,55 @@ func TestList_Parent(t *testing.T) {
 	t.Run("unknown parent is not found", func(t *testing.T) {
 		for _, ref := range []string{"zzzz9", "01ARZ3NDEKTSV4RRFFQ69G5FAV"} {
 			_, err := runCLICapture(t, env, dir, "list", "--parent", ref)
-			requireCLIError(t, err, ExitNotFound)
+			ce := requireCLIError(t, err, ExitNotFound)
+			assert.Equal(t, kindNotFound, ce.Kind, ref)
+		}
+	})
+
+	t.Run("parent in another project", func(t *testing.T) {
+		otherParent, _, err := env.DB.CreateIssue(ctx, db.CreateIssueParams{
+			ProjectID: other.ID, Title: "other parent", Author: "fixture",
+		})
+		require.NoError(t, err)
+		adopted, _, err := env.DB.CreateIssue(ctx, db.CreateIssueParams{
+			ProjectID: projectID, Title: "adopted child", Author: "fixture",
+		})
+		require.NoError(t, err)
+		_, err = env.DB.CreateLink(ctx, db.CreateLinkParams{
+			FromIssueID: adopted.ID, ToIssueID: otherParent.ID, Type: "parent", Author: "fixture",
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"adopted child"},
+			jsonTitles("--json", "list", "--parent", "other-project#"+otherParent.ShortID))
+	})
+
+	t.Run("soft-deleted parent is not found", func(t *testing.T) {
+		deletedParent, _, err := env.DB.CreateIssue(ctx, db.CreateIssueParams{
+			ProjectID: projectID, Title: "deleted parent", Author: "fixture",
+		})
+		require.NoError(t, err)
+		orphan, _, err := env.DB.CreateIssue(ctx, db.CreateIssueParams{
+			ProjectID: projectID, Title: "orphaned child", Author: "fixture",
+		})
+		require.NoError(t, err)
+		_, err = env.DB.CreateLink(ctx, db.CreateLinkParams{
+			FromIssueID: orphan.ID, ToIssueID: deletedParent.ID, Type: "parent", Author: "fixture",
+		})
+		require.NoError(t, err)
+		_, _, _, err = env.DB.SoftDeleteIssue(ctx, deletedParent.ID, "fixture")
+		require.NoError(t, err)
+
+		for _, ref := range []string{deletedParent.ShortID, deletedParent.UID} {
+			_, err := runCLICapture(t, env, dir, "list", "--parent", ref)
+			ce := requireCLIError(t, err, ExitNotFound)
+			assert.Equal(t, kindNotFound, ce.Kind, ref)
 		}
 	})
 
 	t.Run("empty parent is rejected", func(t *testing.T) {
 		_, err := runCLICapture(t, env, dir, "list", "--parent", "")
-		requireCLIError(t, err, ExitValidation)
+		ce := requireCLIError(t, err, ExitValidation)
+		assert.Contains(t, ce.Message, "not a valid issue ref")
 	})
 }

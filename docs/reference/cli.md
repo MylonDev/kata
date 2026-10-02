@@ -498,9 +498,10 @@ children.
 
 A scoped `kata list --parent` returns the children in the current project.
 Parent links can cross projects, so use `kata list --all --parent <ref>` to
-include children elsewhere. Outside a bound workspace, `--all --parent` needs
-a `project#short_id` or ULID ref. The option requires daemon API `0.25.0` or
-newer.
+include children elsewhere. A bare `short_id` resolves in the current
+project, so outside a bound workspace `--all --parent` needs a
+`project#short_id` or ULID ref. A ULID names the parent in any project. The
+option requires daemon API `0.25.0` or newer.
 
 `kata list --all` applies the same filters across every non-archived project.
 Its human and agent rows use qualified refs such as

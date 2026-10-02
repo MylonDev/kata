@@ -209,11 +209,6 @@ positions, and meanings, so `agent_format` stays `1`.
 A daemon without `[search.embeddings]` reports `mode=lexical` and omits
 `degraded=`. It includes the same added issue context.
 
-`kata show <ref> --no-comments --agent` leaves out the `Comments:` section.
-When the issue has comments, a `Comments-Omitted: <count>` line takes that
-section's place after `Body:`, so the reader knows there is more to fetch. An
-issue without comments emits neither. The other fields are unchanged.
-
 #### Single-result `next`
 
 `kata next --agent` is an intentional exception to the usual read shape of a
@@ -315,6 +310,10 @@ Safari can double-submit the callback.
 - A fenced block uses at least three backticks and the `text` info string. If
   the content itself contains a triple-backtick sequence, a longer fence is
   chosen so the block stays valid Markdown.
+- `kata show <ref> --no-comments --agent` leaves out the `Comments:` section
+  on request. When the issue has comments, a `Comments-Omitted: <count>` line
+  takes that section's place after `Body:`, so the reader knows there is more
+  to fetch. An issue without comments emits neither line.
 
 ## Guarantees
 

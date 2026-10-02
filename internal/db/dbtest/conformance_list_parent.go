@@ -45,7 +45,7 @@ func checkListParentFilter(t *testing.T, store db.Storage) error {
 	// ├─ deleted child (soft-deleted)
 	// └─ foreign child (other project)
 	// sibling parent ── sibling child
-	// blocked peer (blocks link to parent, not a child)
+	// blocked peer (its blocks link points at parent; not a child)
 	issues := map[string]db.Issue{}
 	for _, spec := range []struct {
 		name      string
@@ -80,7 +80,7 @@ func checkListParentFilter(t *testing.T, store db.Storage) error {
 		}
 	}
 	if _, err := store.CreateLink(ctx, db.CreateLinkParams{
-		FromIssueID: issues["parent"].ID, ToIssueID: issues["blocked peer"].ID,
+		FromIssueID: issues["blocked peer"].ID, ToIssueID: issues["parent"].ID,
 		Type: "blocks", Author: "conformance-agent",
 	}); err != nil {
 		return fmt.Errorf("link blocks: %w", err)
