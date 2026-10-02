@@ -69,6 +69,9 @@ type ListAllIssuesQuery struct {
 	Label        []string                `json:"label,omitempty"`
 	ExcludeLabel []string                `json:"exclude_label,omitempty"`
 	Meta         []string                `json:"meta,omitempty"`
+
+	// ParentUID only direct children of the issue with this uid, in any listed project; empty = no filter
+	ParentUID *string `json:"parent_uid,omitempty"`
 }
 
 func (l ListAllIssuesQuery) Validate() error {
@@ -156,6 +159,9 @@ type ListIssuesQuery struct {
 	Label        []string             `json:"label,omitempty"`
 	ExcludeLabel []string             `json:"exclude_label,omitempty"`
 	Meta         []string             `json:"meta,omitempty"`
+
+	// ParentUID only direct children of the issue with this uid, in this project; empty = no filter
+	ParentUID *string `json:"parent_uid,omitempty"`
 }
 
 func (l ListIssuesQuery) Validate() error {

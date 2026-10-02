@@ -1053,6 +1053,11 @@ func (d *Store) ListIssues(ctx context.Context, p db.ListIssuesParams) ([]db.Iss
 		q.WriteString(` AND NOT EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label = ?)`)
 		args = append(args, strings.ToLower(label))
 	}
+	// Apply the parent filter (direct children only)
+	if p.ParentUID != "" {
+		q.WriteString(` AND EXISTS (SELECT 1 FROM links pl WHERE pl.type = 'parent' AND pl.from_issue_id = i.id AND pl.to_issue_uid = ?)`)
+		args = append(args, p.ParentUID)
+	}
 	// Apply metadata filters (AND logic). Each predicate iterates only the
 	// top-level keys of the metadata object via json_each, so a flat dotted
 	// key (e.g. "work.branch") is compared as a literal key and never
@@ -1133,6 +1138,10 @@ func (d *Store) ListAllIssues(ctx context.Context, p db.ListAllIssuesParams) ([]
 	for _, label := range p.ExcludeLabels {
 		q.WriteString(` AND NOT EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label = ?)`)
 		args = append(args, strings.ToLower(label))
+	}
+	if p.ParentUID != "" {
+		q.WriteString(` AND EXISTS (SELECT 1 FROM links pl WHERE pl.type = 'parent' AND pl.from_issue_id = i.id AND pl.to_issue_uid = ?)`)
+		args = append(args, p.ParentUID)
 	}
 	for _, mf := range p.Meta {
 		if mf.HasValue {

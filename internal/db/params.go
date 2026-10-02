@@ -116,6 +116,7 @@ type ListIssuesParams struct {
 	Labels        []string     // issues must have ALL these labels (AND logic)
 	ExcludeLabels []string     // issues must NOT have any of these labels
 	Meta          []MetaFilter // metadata key-presence / key=value filters (AND logic)
+	ParentUID     string       // only direct children of this issue UID (empty = no filter)
 	// AllowedIssueIDs is nil for unrestricted callers. A non-nil slice is an
 	// authorization candidate set applied in SQL before ordering and LIMIT.
 	AllowedIssueIDs []int64
@@ -149,6 +150,7 @@ type ListAllIssuesParams struct {
 	Labels          []string
 	ExcludeLabels   []string
 	Meta            []MetaFilter
+	ParentUID       string // only direct children of this issue UID; children may be in any project
 	AllowedIssueIDs []int64
 	IssueScope      *APITokenScope
 }

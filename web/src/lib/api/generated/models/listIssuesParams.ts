@@ -24,4 +24,8 @@ export type ListIssuesParams = {
   label?: string[]
   exclude_label?: string[]
   meta?: string[]
+  /**
+   * only direct children of the issue with this uid, in this project; empty = no filter
+   */
+  parent_uid?: string
 }

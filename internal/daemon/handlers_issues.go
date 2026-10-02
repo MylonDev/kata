@@ -22,6 +22,16 @@ import (
 
 const minIssueUIDPrefixLen = 8
 
+// validateParentUIDQuery rejects a malformed parent_uid list filter. Without
+// it a typo would match no link and read as "this issue has no children".
+func validateParentUIDQuery(raw string) error {
+	if raw == "" || uid.Valid(raw) {
+		return nil
+	}
+	return api.NewError(400, "validation",
+		"parent_uid must be an issue UID", "pass the parent's 26-character uid", nil)
+}
+
 // validateCreateMetadata rejects invalid create-metadata before any write.
 // Reserved keys go through their type validator; unknown keys pass opaquely.
 // A JSON null value is rejected (nothing to clear at creation). Errors surface
@@ -251,6 +261,9 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 		if err != nil {
 			return nil, err
 		}
+		if err := validateParentUIDQuery(in.ParentUID); err != nil {
+			return nil, err
+		}
 		issues, err := cfg.DB.ListIssues(ctx, db.ListIssuesParams{
 			ProjectID:     in.ProjectID,
 			Status:        in.Status,
@@ -263,6 +276,7 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 			Labels:        in.Labels,
 			ExcludeLabels: in.ExcludeLabels,
 			Meta:          metaFilters,
+			ParentUID:     in.ParentUID,
 			IssueScope:    issueScopeFromContext(ctx),
 		})
 		if err != nil {
@@ -323,6 +337,9 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 		if err != nil {
 			return nil, err
 		}
+		if err := validateParentUIDQuery(in.ParentUID); err != nil {
+			return nil, err
+		}
 		issues, err := cfg.DB.ListAllIssues(ctx, db.ListAllIssuesParams{
 			ProjectID:     in.ProjectID,
 			Status:        in.Status,
@@ -335,6 +352,7 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 			Labels:        in.Labels,
 			ExcludeLabels: in.ExcludeLabels,
 			Meta:          metaFilters,
+			ParentUID:     in.ParentUID,
 			IssueScope:    issueScopeFromContext(ctx),
 		})
 		if err != nil {

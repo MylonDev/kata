@@ -92,6 +92,14 @@ var storageScenarios = []scenario{
 		run:     checkListOrdering,
 	},
 	{
+		name: "list parent filter",
+		methods: []string{
+			"CloseIssue", "CreateIssue", "CreateLink", "CreateProject",
+			"ListAllIssues", "ListIssues", "SoftDeleteIssue",
+		},
+		run: checkListParentFilter,
+	},
+	{
 		name:    "lifecycle",
 		methods: []string{"InstanceUID", "Path", "RefreshInstanceUID", "RetryTransient", "SchemaVersion"},
 		run:     checkLifecycle,

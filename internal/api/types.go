@@ -519,7 +519,8 @@ type ListIssuesRequest struct {
 	// in top-level metadata) or "key=value" (the key's JSON string value
 	// equals value); split on the FIRST "=". Multiple entries AND together.
 	// An empty key is a validation error.
-	Meta []string `query:"meta,explode"`
+	Meta      []string `query:"meta,explode"`
+	ParentUID string   `query:"parent_uid,omitempty" doc:"only direct children of the issue with this uid, in this project; empty = no filter"`
 }
 
 // ListAllIssuesRequest is GET /api/v1/issues — the cross-project list. The
@@ -538,6 +539,7 @@ type ListAllIssuesRequest struct {
 	Labels        []string `query:"label,explode"`
 	ExcludeLabels []string `query:"exclude_label,explode"`
 	Meta          []string `query:"meta,explode"`
+	ParentUID     string   `query:"parent_uid,omitempty" doc:"only direct children of the issue with this uid, in any listed project; empty = no filter"`
 
 	// Deprecated query params kept on the struct only to surface a 400 if a
 	// stale client still sends them — the daemon used to honor view= /

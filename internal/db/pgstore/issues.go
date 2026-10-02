@@ -307,6 +307,9 @@ func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]d
 	for _, label := range params.ExcludeLabels {
 		add("NOT EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label = $%d)", strings.ToLower(label))
 	}
+	if params.ParentUID != "" {
+		add("EXISTS (SELECT 1 FROM links pl WHERE pl.type = 'parent' AND pl.from_issue_id = i.id AND pl.to_issue_uid = $%d)", params.ParentUID)
+	}
 	for _, filter := range params.Meta {
 		args = append(args, filter.Key)
 		keyPosition := len(args)
@@ -385,6 +388,9 @@ func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams
 	}
 	for _, label := range params.ExcludeLabels {
 		add("NOT EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label = $%d)", strings.ToLower(label))
+	}
+	if params.ParentUID != "" {
+		add("EXISTS (SELECT 1 FROM links pl WHERE pl.type = 'parent' AND pl.from_issue_id = i.id AND pl.to_issue_uid = $%d)", params.ParentUID)
 	}
 	for _, filter := range params.Meta {
 		args = append(args, filter.Key)
