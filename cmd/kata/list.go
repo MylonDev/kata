@@ -305,8 +305,8 @@ func resolveListParentUID(
 		response, callErr := apiClient.ShowIssueByUIDWithResponse(ctx, &generated.ShowIssueByUIDRequestOptions{
 			PathParams: &generated.ShowIssueByUIDPath{UID: parsed.ULID},
 		})
-		if err := externalCLITransportError(response, callErr); err != nil {
-			return "", err
+		if response == nil {
+			return "", externalCLITransportError(response, callErr)
 		}
 		if err := externalCLIResponseError(response.StatusCode, response.Body, callErr); err != nil {
 			return "", err
