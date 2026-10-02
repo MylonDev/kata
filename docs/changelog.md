@@ -9,6 +9,10 @@ All notable changes to kata, grouped by release. Versioned releases start with
 
 ## Unreleased
 
+- Read an issue without its comment thread using `kata show --no-comments`.
+  Human and agent output report how many comments were omitted. The flag is
+  not available with `--json`, which still returns the complete issue.
+
 - Replace an issue body from a file or stdin with `kata edit --body-file PATH`
   or `kata edit --body-stdin`, as `kata create` and `kata comment` already
   allow. Long bodies with quotes, backticks, or newlines no longer need shell

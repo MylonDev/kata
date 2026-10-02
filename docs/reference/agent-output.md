@@ -1,7 +1,7 @@
 ---
 title: Agent output format
 description: Reference Kata's compact, stable agent output format and its command-specific response contracts.
-last_edited: 2026-09-17
+last_edited: 2026-10-02
 ---
 
 # Agent output format
@@ -208,6 +208,11 @@ List rows append revision after title. Existing fields keep their names,
 positions, and meanings, so `agent_format` stays `1`.
 A daemon without `[search.embeddings]` reports `mode=lexical` and omits
 `degraded=`. It includes the same added issue context.
+
+`kata show <ref> --no-comments --agent` leaves out the `Comments:` section.
+When the issue has comments, a `Comments-Omitted: <count>` line takes that
+section's place after `Body:`, so the reader knows there is more to fetch. An
+issue without comments emits neither. The other fields are unchanged.
 
 #### Single-result `next`
 

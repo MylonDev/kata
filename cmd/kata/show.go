@@ -20,30 +20,43 @@ import (
 
 func newShowCmd() *cobra.Command {
 	var render bool
+	var noComments bool
 	cmd := &cobra.Command{
 		Use:   "show <issue-ref>",
 		Short: "show issue + comments",
 		Long: `Show an issue and its comments.
 
 --render renders only description and comment Markdown when stdout is a terminal.
-Redirects and pipelines, including "| less -R", keep plain output.`,
+Redirects and pipelines, including "| less -R", keep plain output.
+
+--no-comments leaves the comments out and reports how many were omitted.
+It is not available with --json, which always returns the complete issue.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runShow(cmd, args[0], "show", showRunOptions{Render: render})
+			return runShow(cmd, args[0], "show", showRunOptions{Render: render, NoComments: noComments})
 		},
 	}
 	cmd.Flags().BoolVar(&render, "render", false, "render description and comment Markdown on a terminal")
+	cmd.Flags().BoolVar(&noComments, "no-comments", false, "omit comments and report how many were omitted")
 	return cmd
 }
 
 type showRunOptions struct {
-	Render bool
+	Render     bool
+	NoComments bool
 }
 
 func runShow(cmd *cobra.Command, issueRef, agentOperation string, opts showRunOptions) error {
 	if opts.Render && currentOutputMode() != outputHuman {
 		return &cliError{
 			Message:  "kata show --render requires human output",
+			Kind:     kindUsage,
+			ExitCode: ExitUsage,
+		}
+	}
+	if opts.NoComments && currentOutputMode() == outputJSON {
+		return &cliError{
+			Message:  "kata show --no-comments is not available with --json",
 			Kind:     kindUsage,
 			ExitCode: ExitUsage,
 		}
@@ -72,6 +85,10 @@ func runShow(cmd *cobra.Command, issueRef, agentOperation string, opts showRunOp
 	var b showResponseForCLI
 	if err := json.Unmarshal(bs, &b); err != nil {
 		return err
+	}
+	if opts.NoComments {
+		b.CommentsOmitted = len(b.Comments)
+		b.Comments = nil
 	}
 	if mode == outputAgent {
 		return printShowAgent(cmd.OutOrStdout(), b, ref.ProjectName, agentOperation)
@@ -150,6 +167,11 @@ func printShowHuman(
 			if _, err := fmt.Fprintf(out, "%s%s\n", prefix, textsafe.Block(c.Body)); err != nil {
 				return err
 			}
+		}
+	}
+	if b.CommentsOmitted > 0 {
+		if _, err := fmt.Fprintf(out, "\n--- comments: %d omitted ---\n", b.CommentsOmitted); err != nil {
+			return err
 		}
 	}
 	if len(b.Labels) > 0 {
@@ -275,6 +297,9 @@ type showResponseForCLI struct {
 	PendingLeases   []pendingClaimForCLI   `json:"pending_leases"`
 	LeaseHubNow     *time.Time             `json:"lease_hub_now"`
 	LeaseViolations []claimViolationForCLI `json:"lease_violations"`
+	// CommentsOmitted is set by --no-comments: the number of comments the
+	// daemon returned that the renderers leave out. It is never decoded.
+	CommentsOmitted int `json:"-"`
 }
 
 type renderedShowFields struct {
@@ -422,6 +447,11 @@ func printShowAgent(w io.Writer, b showResponseForCLI, subjectProject, operation
 			if _, err := fmt.Fprint(w, agentFencedText(c.Body)); err != nil {
 				return err
 			}
+		}
+	}
+	if b.CommentsOmitted > 0 {
+		if err := writeAgentField(w, "Comments-Omitted", fmt.Sprint(b.CommentsOmitted)); err != nil {
+			return err
 		}
 	}
 	if len(b.Links) > 0 {

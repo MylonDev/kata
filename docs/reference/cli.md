@@ -429,7 +429,7 @@ kata list --all [--status open|closed|all] [--sort oldest] [--limit N]
               [--priority N | --max-priority N]
               [--owner NAME | --unowned]
               [--label LABEL] [--no-label LABEL] [--meta key[=value]]
-kata show <issue-ref> [--render]
+kata show <issue-ref> [--render] [--no-comments]
 kata status <issue-ref>
 kata search <query> [--limit N] [--include-deleted]
 kata search <query> [--lexical | --hybrid | --semantic]
@@ -449,6 +449,12 @@ rendered color through kata's normal output profile.
 pipelines, including `kata show <issue-ref> --render | less -R`, intentionally
 remain plain text. This version has no force-render option for non-terminal
 output.
+
+`kata show --no-comments` prints the issue without its comments, for a reader
+that needs only the description of an issue with a long thread. When comments
+exist, human output ends the description with `--- comments: N omitted ---`
+and agent output adds `Comments-Omitted: N`. `--no-comments` is incompatible
+with `--json`, which always returns the complete issue.
 
 `kata show --json` returns `.issue.labels` as a string array, the same shape
 as `.issues[].labels` from `kata list --json`. On `show` the key is always
