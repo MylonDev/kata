@@ -1,7 +1,7 @@
 ---
 title: CLI reference
 description: Reference Kata's command-line flags, issue relationships, output modes, and administration workflows.
-last_edited: 2026-10-01
+last_edited: 2026-10-02
 ---
 
 # CLI reference
@@ -705,6 +705,59 @@ kata purge <ref> --force --confirm "PURGE <qualified-id>"
 confirmation string is the issue's qualified short ID, for example
 `DELETE kata#abc4`. Agents must not run `delete` or `purge` unless the user
 explicitly asks for that exact operation and ref.
+
+## Batch writes
+
+```sh
+kata batch [--from-line N] < writes.jsonl
+```
+
+`kata batch` runs several write commands in one call. Each line of stdin is a
+JSON array holding one command's arguments, exactly as you would type them
+after `kata`:
+
+```json
+["create", "Retry on 429", "--label", "debt", "--body", "Line one\nline two", "--idempotency-key", "retry-429"]
+["comment", "abc4", "--body", "Deferred the retry work to a follow-up."]
+["close", "abc4", "--done", "--commit", "1a2b3c4", "--message", "Fixed the callback race; the new test passes."]
+```
+
+Bodies are JSON strings, so quotes, backticks, and newlines need no shell
+quoting. Blank lines are skipped and still counted, so line numbers match the
+file.
+
+A line may run `create`, `comment`, `close`, `edit`, `label add`, or
+`label rm`. Every other command is refused, including `comment edit`. Each
+line runs through the same code as the standalone command, with the same
+validation, messages, and exit codes. A close still needs its reason,
+evidence, and message.
+
+A line cannot contain an output flag (`--json`, `--agent`, `--format`,
+`--quiet`), `--body-stdin`, or `--help`. Global flags such as `--project` and
+`--as` work in two places: on `kata batch` itself they apply to every line,
+and inside a line they apply to that line only. Every `create` line must carry
+`--idempotency-key`, so a rerun cannot create a duplicate. A line cannot refer
+to an issue created earlier in the same batch.
+
+`kata batch` checks the form of every line before it runs any of them: each
+must be a JSON array of strings, name an allowed command, use known flags, and
+pass the right number of arguments. Rules about values, such as a close
+without a reason or an empty title, are checked when that line runs.
+
+Lines run in order and the batch stops at the first one that fails. Nothing
+is rolled back. The error names the failed line with that command's own
+message, kind, and exit code, lists the lines already applied with their
+issues, and lists the lines not run. Fix the line and resume with
+`--from-line N`, which skips the lines before N. When the error says a line
+may have been applied, check its issue first: comments are not idempotent, so
+running the line twice adds the comment twice.
+
+Close each issue when its work is verified, as `kata close --help` says. A
+batch does not change that rule or the evidence a close needs, and a daemon
+with `[close.throttle]` enabled can refuse a burst of closes partway through
+a batch.
+
+See [agent output](agent-output.md#batch-writes) for the result rows.
 
 ## Labels, ownership, and claiming
 

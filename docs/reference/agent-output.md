@@ -1,7 +1,7 @@
 ---
 title: Agent output format
 description: Reference Kata's compact, stable agent output format and its command-specific response contracts.
-last_edited: 2026-09-17
+last_edited: 2026-10-02
 ---
 
 # Agent output format
@@ -122,6 +122,38 @@ Undo: kata restore abc4 --agent
 
 An `Undo:` line is emitted only when the follow-up is factual and mechanically
 correct. Generic `Next:` guidance is intentionally not part of the format.
+
+#### Batch writes
+
+`kata batch --agent` runs several mutations, so it reports them as a header
+plus one row per input line instead of one block per issue:
+
+```text
+OK batch count=3
+- line=1 command=create issue=def7 changed=true
+- line=2 command=comment issue=abc4 changed=true
+- line=3 command=close issue=abc4 changed=true
+Reminder: "closing asserts this issue is complete; verify the message and evidence are specific to this issue."
+```
+
+The row fields are `line`, `command`, `issue`, optional `reused=true`,
+`changed` when the command reports it, and optional `dry_run=true`. `line` is
+the line number in the input, counting blank lines. `command` is the resolved
+command, quoted when it has two words (`command="label add"`). `issue` is a
+qualified ref when the line names its own `--project`. The close reminder
+appears once, after the rows, when any line closed an issue.
+
+A failed batch prints nothing on stdout. The one-line error carries the
+failed line, the lines already applied with their issues, and the lines not
+run:
+
+```text
+ERR batch not_found: line 2 (comment): issue not found; line 1 applied (def7); lines 2-3 not run; fix line 2 and rerun with --from-line 2
+```
+
+The kind and exit code are those of the command that failed. In
+`--format json` the same detail is in `error.data` as `failed_line`,
+`applied`, `not_run`, and the failed command's own `error`.
 
 ### Reads
 

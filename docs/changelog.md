@@ -1,13 +1,21 @@
 ---
 title: Changelog
 description: Release history for kata
-last_edited: 2026-10-01
+last_edited: 2026-10-02
 ---
 
 All notable changes to kata, grouped by release. Versioned releases start with
 0.5.0; earlier entries are a retroactive project history grouped by ISO week.
 
 ## Unreleased
+
+- Run several writes in one call with `kata batch`. Each line of stdin is a
+  JSON array of one command's arguments, so issue and comment bodies need no
+  shell quoting. A batch may run `create`, `comment`, `close`, `edit`,
+  `label add`, and `label rm`, each with its usual validation. It checks the
+  form of every line first, stops at the first line that fails, reports which
+  lines were applied, and resumes with `--from-line`. Every `create` line
+  needs `--idempotency-key`.
 
 - Use OpenAI-compatible embedding servers that reject a `dimensions` field.
   Embedding requests no longer send `"dimensions": 0` unless dimensions are

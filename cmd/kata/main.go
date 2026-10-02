@@ -122,6 +122,7 @@ func newRootCmd() *cobra.Command {
 		newMoveCmd(),
 		newCommentCmd(),
 		newCloseCmd(),
+		newBatchCmd(),
 		newReopenCmd(),
 		newDeleteCmd(),
 		newRestoreCmd(),
