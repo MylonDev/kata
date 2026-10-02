@@ -76,13 +76,16 @@ func TestBatch_RejectsMalformedInputBeforeRunningAnything(t *testing.T) {
 			`line 2: "comment edit" is not allowed in a batch`},
 		{"label without a subcommand", batchInput(t, "label", ref, "bug"), `line 2: "label" is not allowed in a batch`},
 		{"only global flags", batchInput(t, "--project", "kata"), "line 2: no command"},
-		{"unknown command", batchInput(t, "cretae", "title"), "line 2:"},
+		{"unknown command", batchInput(t, "cretae", "title"), `line 2: unknown command "cretae" for "kata"`},
+		{"null element", `["comment","` + ref + `","--body",null]` + "\n", "line 2: not a JSON array of strings"},
+		{"blank idempotency key", batchInput(t, "create", "blank key", "--idempotency-key", " "),
+			"line 2: create needs --idempotency-key"},
 		{"output flag", batchInput(t, "comment", ref, "--body", "x", "--json"), "line 2: --json is not allowed in a batch line"},
 		{"quiet flag", batchInput(t, "comment", ref, "--body", "x", "-q"), "line 2: --quiet is not allowed in a batch line"},
 		{"stdin body", batchInput(t, "comment", ref, "--body-stdin"), "line 2: --body-stdin is not allowed in a batch line"},
 		{"help flag", batchInput(t, "create", "--help"), "line 2: --help is not allowed in a batch line"},
 		{"unknown flag", batchInput(t, "comment", ref, "--bodyy", "x"), "line 2: unknown flag: --bodyy"},
-		{"missing argument", batchInput(t, "close"), "line 2:"},
+		{"missing argument", batchInput(t, "close"), "line 2: accepts 1 arg(s), received 0"},
 		{"create without a key", batchInput(t, "create", "no key"), "line 2: create needs --idempotency-key"},
 	}
 	for _, tt := range tests {
@@ -212,20 +215,16 @@ func TestBatch_StopsAtTheFirstFailingLine(t *testing.T) {
 		batchInput(t, "comment", ref, "--body", "must not be applied") +
 		batchInput(t, "label", "add", ref, "bug")
 
-	// The same close run on its own, for the exit code a batch must keep.
-	_, singleErr := runCLICapture(t, env, dir, "close", ref)
-	require.Error(t, singleErr)
-	singleExit := exitCodeForErr(singleErr, true)
-
 	stdout, stderr, err := execBatch(t, env, dir, stdin, []string{"--agent"})
 
-	ce := requireCLIError(t, err, singleExit)
+	// A standalone `kata close <ref>` without a reason exits ExitInternal.
+	ce := requireCLIError(t, err, ExitInternal)
 	assert.Equal(t,
 		"line 2 (close): --reason is required (one of: done, wontfix, duplicate, superseded, audit-no-change)"+
-			"; line 1 applied ("+ref+"); lines 2-4 not run; fix line 2 and rerun with --from-line 2",
+			"; line 1 applied ("+ref+"); lines 3-4 not run; fix line 2 and rerun with --from-line 2",
 		ce.Message)
 	assert.Empty(t, stdout)
-	assert.Regexp(t, `^ERR batch [a-z_]+: line 2 \(close\): --reason is required`, stderr)
+	assert.Regexp(t, `^ERR batch internal: line 2 \(close\): --reason is required`, stderr)
 	assert.Equal(t, []string{"applied before the failure"}, batchCommentBodies(t, env, pid, ref))
 	assert.Empty(t, fetchIssueViaHTTP(t, env, pid, ref).Labels)
 }
@@ -241,7 +240,7 @@ func TestBatch_JSONErrorDataNamesAppliedAndNotRunLines(t *testing.T) {
 
 	ce := requireCLIError(t, err, ExitNotFound)
 	assert.Contains(t, ce.Message, "line 2 (comment): ")
-	assert.Contains(t, ce.Message, "; line 1 applied ("+ref+"); lines 2-3 not run; fix line 2 and rerun with --from-line 2")
+	assert.Contains(t, ce.Message, "; line 1 applied ("+ref+"); line 3 not run; fix line 2 and rerun with --from-line 2")
 	assert.Empty(t, stdout)
 	var got struct {
 		Error struct {
@@ -267,7 +266,7 @@ func TestBatch_JSONErrorDataNamesAppliedAndNotRunLines(t *testing.T) {
 	assert.Equal(t, 1, got.Error.Data.Applied[0].Line)
 	assert.Equal(t, "comment", got.Error.Data.Applied[0].Command)
 	assert.Equal(t, ref, got.Error.Data.Applied[0].Issue)
-	assert.Equal(t, []int{2, 3}, got.Error.Data.NotRun)
+	assert.Equal(t, []int{3}, got.Error.Data.NotRun)
 	assert.Equal(t, "not_found", got.Error.Data.Error.Kind)
 }
 
@@ -320,6 +319,102 @@ func TestBatch_LineCanTargetAnotherProject(t *testing.T) {
 	assert.Regexp(t, `(?m)^- line=1 command=create issue=other-project#[0-9a-z]+ changed=true$`, stdout)
 	assert.Equal(t, []string{"filed elsewhere"}, batchIssueTitles(t, env, other.ID))
 	assert.Empty(t, batchIssueTitles(t, env, pid))
+}
+
+func TestBatch_BatchLevelProjectAppliesAndQualifiesRefs(t *testing.T) {
+	env, dir, pid := setupCLIWorkspace(t)
+	other, err := env.DB.CreateProject(context.Background(), "other-project")
+	require.NoError(t, err)
+	stdin := batchInput(t, "create", "filed elsewhere", "--idempotency-key", "batch-level-project-1")
+
+	stdout, stderr, err := execBatch(t, env, dir, stdin, []string{"--agent", "--project", "other-project"})
+
+	require.NoError(t, err, "%s", stderr)
+	assert.Regexp(t, `(?m)^- line=1 command=create issue=other-project#[0-9a-z]+ changed=true$`, stdout)
+	assert.Equal(t, []string{"filed elsewhere"}, batchIssueTitles(t, env, other.ID))
+	assert.Empty(t, batchIssueTitles(t, env, pid))
+}
+
+func TestBatch_GlobalFlagBeforeTheCommandInALine(t *testing.T) {
+	env, dir, pid := setupCLIWorkspace(t)
+	ref := createIssue(t, env, pid, "existing issue")
+
+	_, stderr, err := execBatch(t, env, dir,
+		batchInput(t, "--as", "line-actor", "comment", ref, "--body", "flag first"), nil)
+
+	require.NoError(t, err, "%s", stderr)
+	comments := fetchIssueViaHTTPWithComments(t, env, pid, ref).Comments
+	require.Len(t, comments, 1)
+	assert.Equal(t, "line-actor", comments[0].Author)
+}
+
+func TestBatch_AcceptsCRLFInput(t *testing.T) {
+	env, dir, pid := setupCLIWorkspace(t)
+	ref := createIssue(t, env, pid, "existing issue")
+	stdin := strings.ReplaceAll(
+		batchInput(t, "comment", ref, "--body", "first")+batchInput(t, "comment", ref, "--body", "second"),
+		"\n", "\r\n")
+
+	_, stderr, err := execBatch(t, env, dir, stdin, nil)
+
+	require.NoError(t, err, "%s", stderr)
+	assert.Equal(t, []string{"first", "second"}, batchCommentBodies(t, env, pid, ref))
+}
+
+func TestBatch_DryCloseIsMarkedAndLeavesTheIssueOpen(t *testing.T) {
+	env, dir, pid := setupCLIWorkspace(t)
+	ref := createIssue(t, env, pid, "existing issue")
+	stdin := batchInput(t, "close", ref, "--done", "--message", batchCloseMessage, "--commit", "deadbeef", "--dry")
+
+	stdout, stderr, err := execBatch(t, env, dir, stdin, []string{"--agent"})
+
+	require.NoError(t, err, "%s", stderr)
+	assert.Equal(t, "OK batch count=1\n- line=1 command=close issue="+ref+" changed=false dry_run=true\n", stdout)
+	assert.Equal(t, "open", fetchIssueViaHTTP(t, env, pid, ref).Issue.Status)
+}
+
+func TestBatch_QuietKeepsTheIssueRefs(t *testing.T) {
+	env, dir, pid := setupCLIWorkspace(t)
+	ref := createIssue(t, env, pid, "existing issue")
+	stdin := batchInput(t, "comment", ref, "--body", "first") +
+		batchInput(t, "close", ref, "--done", "--message", batchCloseMessage, "--commit", "deadbeef")
+
+	agent, stderr, err := execBatch(t, env, dir, stdin, []string{"--agent", "--quiet"})
+	require.NoError(t, err, "%s", stderr)
+	assert.Equal(t, "- line=1 command=comment issue="+ref+" changed=true\n"+
+		"- line=2 command=close issue="+ref+" changed=true\n", agent)
+
+	human, stderr, err := execBatch(t, env, dir, batchInput(t, "comment", ref, "--body", "second"), []string{"--quiet"})
+	require.NoError(t, err, "%s", stderr)
+	assert.Equal(t, ref+"\n", human)
+}
+
+func TestBatchLineError_OutcomeUnknownSaysToCheckBeforeRerunning(t *testing.T) {
+	applied := []batchResult{{Line: 1, Command: "comment", issue: "abc4"}}
+	later := []batchLine{{number: 3, command: "comment"}}
+	failed := batchLine{number: 2, command: "create"}
+
+	for _, cause := range []error{
+		&cliError{Message: "create timed out", Kind: kindDaemonUnavail, Code: "create_outcome_unknown", ExitCode: ExitDaemonUnavail},
+		errBatchResultUnreadable,
+	} {
+		err := batchLineError(failed, cause, true, applied, later)
+
+		var ce *cliError
+		require.ErrorAs(t, err, &ce)
+		assert.Contains(t, ce.Message, "; line 1 applied (abc4); line 3 not run; "+
+			"line 2 may have been applied: check its issue before rerunning")
+		assert.NotContains(t, ce.Message, "--from-line")
+		var data struct {
+			FailedLine     int   `json:"failed_line"`
+			OutcomeUnknown bool  `json:"outcome_unknown"`
+			NotRun         []int `json:"not_run"`
+		}
+		require.NoError(t, json.Unmarshal(ce.Data, &data))
+		assert.Equal(t, 2, data.FailedLine)
+		assert.True(t, data.OutcomeUnknown)
+		assert.Equal(t, []int{3}, data.NotRun)
+	}
 }
 
 func TestBatch_BatchLevelActorAppliesToEveryLine(t *testing.T) {

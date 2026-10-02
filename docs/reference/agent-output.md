@@ -137,23 +137,28 @@ Reminder: "closing asserts this issue is complete; verify the message and eviden
 ```
 
 The row fields are `line`, `command`, `issue`, optional `reused=true`,
-`changed` when the command reports it, and optional `dry_run=true`. `line` is
-the line number in the input, counting blank lines. `command` is the resolved
-command, quoted when it has two words (`command="label add"`). `issue` is a
-qualified ref when the line names its own `--project`. The close reminder
-appears once, after the rows, when any line closed an issue.
+`changed` when the command reports it, and `dry_run=true` for a `close --dry`
+line. `line` is the line number in the input, counting blank lines. `command`
+is the resolved command, quoted when it has two words
+(`command="label add"`). `issue` is a qualified ref when a `--project` flag
+applies to the line, on the line or on `kata batch` itself. The close
+reminder appears once, after the rows, when any line closed an issue.
+`--quiet` drops the header and the reminder and keeps the rows.
 
 A failed batch prints nothing on stdout. The one-line error carries the
-failed line, the lines already applied with their issues, and the lines not
-run:
+failed line, the lines already applied with their issues, and the later lines
+that were not run:
 
 ```text
-ERR batch not_found: line 2 (comment): issue not found; line 1 applied (def7); lines 2-3 not run; fix line 2 and rerun with --from-line 2
+ERR batch not_found: line 2 (comment): issue not found; line 1 applied (def7); lines 3-4 not run; fix line 2 and rerun with --from-line 2
 ```
 
-The kind and exit code are those of the command that failed. In
-`--format json` the same detail is in `error.data` as `failed_line`,
-`applied`, `not_run`, and the failed command's own `error`.
+The kind and exit code are those of the command that failed. When the failed
+line's write may have landed anyway, the error ends with
+`line 2 may have been applied: check its issue before rerunning` instead of
+the rerun advice. In `--format json` the same detail is in `error.data` as
+`failed_line`, `applied`, `not_run`, `outcome_unknown` when it is true, and
+the failed command's own `error`.
 
 ### Reads
 

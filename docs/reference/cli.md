@@ -736,8 +736,11 @@ A line cannot contain an output flag (`--json`, `--agent`, `--format`,
 `--quiet`), `--body-stdin`, or `--help`. Global flags such as `--project` and
 `--as` work in two places: on `kata batch` itself they apply to every line,
 and inside a line they apply to that line only. Every `create` line must carry
-`--idempotency-key`, so a rerun cannot create a duplicate. A line cannot refer
-to an issue created earlier in the same batch.
+a non-blank `--idempotency-key`, so a rerun cannot create a duplicate. A line
+cannot refer to an issue created earlier in the same batch.
+
+Human output prints one line per input line. With `--quiet` it prints only
+each line's issue ref.
 
 `kata batch` checks the form of every line before it runs any of them: each
 must be a JSON array of strings, name an allowed command, use known flags, and
@@ -747,7 +750,7 @@ without a reason or an empty title, are checked when that line runs.
 Lines run in order and the batch stops at the first one that fails. Nothing
 is rolled back. The error names the failed line with that command's own
 message, kind, and exit code, lists the lines already applied with their
-issues, and lists the lines not run. Fix the line and resume with
+issues, and lists the later lines that were not run. Fix the line and resume with
 `--from-line N`, which skips the lines before N. When the error says a line
 may have been applied, check its issue first: comments are not idempotent, so
 running the line twice adds the comment twice.

@@ -33,12 +33,19 @@ var batchRefusedFlags = []string{"json", "agent", "format", "quiet", "body-stdin
 // invocation when the user passed them.
 var batchForwardedFlags = []string{"project", "workspace", "as", "daemon", "teammate"}
 
+// errBatchResultUnreadable marks a line that ran without error but whose
+// output could not be read back. Its write has landed.
+var errBatchResultUnreadable = errors.New("the command succeeded but its result could not be read")
+
 type batchLine struct {
 	number  int
 	args    []string
 	command string
-	// project is the line's own --project value; its results render qualified.
+	// project is the --project that applies to the line, its own or the
+	// batch's. Results of such a line render qualified, because a bare
+	// short_id would resolve against the workspace's project.
 	project string
+	dryRun  bool
 }
 
 type batchResult struct {
@@ -114,17 +121,22 @@ func runBatch(cmd *cobra.Command, fromLine int) error {
 		if err := checkBatchLine(&lines[i]); err != nil {
 			return err
 		}
+		if lines[i].project == "" {
+			lines[i].project = saved.Project
+		}
 	}
 
 	results := make([]batchResult, 0, len(lines))
 	for i, line := range lines {
-		result, err := runBatchLine(cmd, inherited, line)
+		result, runEReached, err := runBatchLine(cmd, inherited, line)
 		if err != nil {
-			return batchLineError(line, err, results, lines[i:])
+			return batchLineError(line, err, runEReached, results, lines[i+1:])
 		}
 		results = append(results, result)
 	}
 
+	// The deferred restore runs too late for the output below, which reads
+	// the batch's own output mode and quiet setting.
 	flags = saved
 	return printBatchResults(cmd.OutOrStdout(), results)
 }
@@ -137,9 +149,17 @@ func readBatchLines(r io.Reader) ([]batchLine, error) {
 	for number := 1; ; number++ {
 		raw, readErr := reader.ReadBytes('\n')
 		if text := bytes.TrimSpace(raw); len(text) > 0 {
-			var args []string
-			if text[0] != '[' || json.Unmarshal(text, &args) != nil {
+			// Decoding into []*string tells a JSON null apart from "".
+			var elements []*string
+			if text[0] != '[' || json.Unmarshal(text, &elements) != nil {
 				return nil, batchUsageError("line %d: not a JSON array of strings", number)
+			}
+			args := make([]string, len(elements))
+			for i, element := range elements {
+				if element == nil {
+					return nil, batchUsageError("line %d: not a JSON array of strings", number)
+				}
+				args[i] = *element
 			}
 			lines = append(lines, batchLine{number: number, args: args})
 		}
@@ -180,11 +200,19 @@ func checkBatchLine(line *batchLine) error {
 	if err := sub.ValidateArgs(sub.Flags().Args()); err != nil {
 		return batchUsageError("line %d: %s", line.number, err)
 	}
-	if line.command == "create" && !sub.Flags().Changed("idempotency-key") {
-		return batchUsageError("line %d: create needs --idempotency-key so a rerun cannot duplicate it", line.number)
+	if line.command == "create" {
+		// create sends the header only for a non-blank key, so a blank one
+		// would not protect a rerun.
+		key, _ := sub.Flags().GetString("idempotency-key")
+		if strings.TrimSpace(key) == "" {
+			return batchUsageError("line %d: create needs --idempotency-key so a rerun cannot duplicate it", line.number)
+		}
 	}
 	if f := sub.Flags().Lookup("project"); f != nil && f.Changed {
 		line.project = f.Value.String()
+	}
+	if f := sub.Flags().Lookup("dry"); f != nil && f.Changed {
+		line.dryRun = f.Value.String() == "true"
 	}
 	return nil
 }
@@ -204,8 +232,10 @@ func batchInheritedArgs(cmd *cobra.Command) []string {
 
 // runBatchLine runs one line through the ordinary command tree, so it gets
 // exactly the validation and behavior of the standalone command. The line's
-// own arguments come last and so override the inherited global flags.
-func runBatchLine(cmd *cobra.Command, inherited []string, line batchLine) (batchResult, error) {
+// own arguments come last and so override the inherited global flags. The
+// bool reports whether the command's RunE was reached, which decides how an
+// untyped error is classified.
+func runBatchLine(cmd *cobra.Command, inherited []string, line batchLine) (batchResult, bool, error) {
 	root := newRootCmd()
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -214,26 +244,28 @@ func runBatchLine(cmd *cobra.Command, inherited []string, line batchLine) (batch
 	args := append([]string{"--json"}, inherited...)
 	root.SetArgs(append(args, line.args...))
 	if err := root.ExecuteContext(cmd.Context()); err != nil {
-		return batchResult{}, cliErrorForErr(err, runEEntered)
+		return batchResult{}, runEEntered, err
 	}
-	result := batchResult{Line: line.number, Command: line.command, Result: jsontext.Value(bytes.TrimSpace(out.Bytes()))}
+	result := batchResult{
+		Line: line.number, Command: line.command,
+		Result: jsontext.Value(bytes.TrimSpace(out.Bytes())), dryRun: line.dryRun,
+	}
 	var decoded struct {
 		Issue struct {
 			ShortID string `json:"short_id"`
 		} `json:"issue"`
 		Changed *bool `json:"changed"`
 		Reused  bool  `json:"reused"`
-		DryRun  bool  `json:"dry_run"`
 	}
 	if err := json.Unmarshal(result.Result, &decoded); err != nil {
-		return batchResult{}, fmt.Errorf("line %d (%s): decode result: %w", line.number, line.command, err)
+		return batchResult{}, true, errBatchResultUnreadable
 	}
 	result.issue = decoded.Issue.ShortID
 	if line.project != "" {
 		result.issue = line.project + "#" + decoded.Issue.ShortID
 	}
-	result.changed, result.reused, result.dryRun = decoded.Changed, decoded.Reused, decoded.DryRun
-	return result, nil
+	result.changed, result.reused = decoded.Changed, decoded.Reused
+	return result, true, nil
 }
 
 // batchLineError reports the line that stopped the batch. kata's error line
@@ -241,8 +273,8 @@ func runBatchLine(cmd *cobra.Command, inherited []string, line batchLine) (batch
 // JSON output carries the same detail in error.data. The failing command's
 // kind and exit code are kept. Its Code is not: agent rendering reads Data by
 // Code, and this Data has the batch's shape with the command's error nested.
-func batchLineError(line batchLine, err error, applied []batchResult, remaining []batchLine) error {
-	failed := cliErrorForErr(err, true)
+func batchLineError(line batchLine, err error, runEReached bool, applied []batchResult, later []batchLine) error {
+	failed := cliErrorForErr(err, runEReached)
 	var message strings.Builder
 	fmt.Fprintf(&message, "line %d (%s): %s", line.number, line.command, firstLine(failed.Message))
 
@@ -252,17 +284,23 @@ func batchLineError(line batchLine, err error, applied []batchResult, remaining 
 		Issue   string `json:"issue"`
 	}
 	data := struct {
-		FailedLine int           `json:"failed_line"`
-		Applied    []appliedLine `json:"applied"`
-		NotRun     []int         `json:"not_run"`
-		Error      struct {
+		FailedLine     int           `json:"failed_line"`
+		OutcomeUnknown bool          `json:"outcome_unknown,omitzero"`
+		Applied        []appliedLine `json:"applied"`
+		NotRun         []int         `json:"not_run"`
+		Error          struct {
 			Kind     errKind        `json:"kind"`
 			Code     string         `json:"code,omitempty"`
 			Message  string         `json:"message"`
 			ExitCode int            `json:"exit_code"`
 			Data     jsontext.Value `json:"data,omitempty"`
 		} `json:"error"`
-	}{FailedLine: line.number, Applied: []appliedLine{}}
+	}{
+		FailedLine:     line.number,
+		OutcomeUnknown: batchOutcomeUnknown(err, failed),
+		Applied:        []appliedLine{},
+		NotRun:         []int{},
+	}
 	data.Error.Kind, data.Error.Code = failed.Kind, failed.Code
 	data.Error.Message, data.Error.ExitCode, data.Error.Data = failed.Message, failed.ExitCode, failed.Data
 
@@ -279,15 +317,17 @@ func batchLineError(line batchLine, err error, applied []batchResult, remaining 
 	default:
 		fmt.Fprintf(&message, "; lines %s applied (%s)", strings.Join(numbers, ", "), strings.Join(issues, ", "))
 	}
-	for _, l := range remaining {
+	for _, l := range later {
 		data.NotRun = append(data.NotRun, l.number)
 	}
-	if last := remaining[len(remaining)-1].number; last == line.number {
-		fmt.Fprintf(&message, "; line %d not run", line.number)
-	} else {
-		fmt.Fprintf(&message, "; lines %d-%d not run", line.number, last)
+	switch len(later) {
+	case 0:
+	case 1:
+		fmt.Fprintf(&message, "; line %d not run", later[0].number)
+	default:
+		fmt.Fprintf(&message, "; lines %d-%d not run", later[0].number, later[len(later)-1].number)
 	}
-	if batchOutcomeUnknown(err, failed) {
+	if data.OutcomeUnknown {
 		// The write may have landed, so rerunning from this line could
 		// apply it twice.
 		fmt.Fprintf(&message, "; line %d may have been applied: check its issue before rerunning", line.number)
@@ -303,17 +343,23 @@ func batchLineError(line batchLine, err error, applied []batchResult, remaining 
 }
 
 // batchOutcomeUnknown reports failures after which the line's write may
-// already exist: a connection lost mid-request, or a mutation whose
-// follow-up --comment failed.
+// already exist: a connection lost mid-request, a mutation whose workspace
+// repair or follow-up --comment failed, or a result that could not be read.
+// The follow-up --comment failure has no type or code, only its message.
 func batchOutcomeUnknown(err error, failed *cliError) bool {
+	if errors.Is(err, errBatchResultUnreadable) {
+		return true
+	}
 	if transportErr, ok := errors.AsType[*daemonTransportError](err); ok && transportErr.mutationOutcomeUnknown() {
 		return true
 	}
-	return failed.Code == "create_outcome_unknown" ||
-		strings.Contains(failed.Message, "mutation result may be unknown") ||
+	return failed.Code == "create_outcome_unknown" || failed.Code == "workspace_repair_failed" ||
 		strings.Contains(failed.Message, "issue mutation succeeded")
 }
 
+// printBatchResults writes one row per applied line. --quiet drops the
+// header and the close reminder but keeps the issue refs, as it does for a
+// single create.
 func printBatchResults(w io.Writer, results []batchResult) error {
 	mode := currentOutputMode()
 	if mode == outputJSON {
@@ -326,11 +372,8 @@ func printBatchResults(w io.Writer, results []batchResult) error {
 		_, err := fmt.Fprint(w, buf.String())
 		return err
 	}
-	if flags.Quiet {
-		return nil
-	}
 	closed := false
-	if mode == outputAgent {
+	if mode == outputAgent && !flags.Quiet {
 		if _, err := fmt.Fprintf(w, "OK batch count=%d\n", len(results)); err != nil {
 			return err
 		}
@@ -338,7 +381,14 @@ func printBatchResults(w io.Writer, results []batchResult) error {
 	for _, r := range results {
 		closed = closed || (r.Command == "close" && !r.dryRun && r.changed != nil && *r.changed)
 		if mode != outputAgent {
-			if _, err := fmt.Fprintf(w, "line %d: %s %s\n", r.Line, r.Command, r.issue); err != nil {
+			text := fmt.Sprintf("line %d: %s %s", r.Line, r.Command, r.issue)
+			if r.dryRun {
+				text += " (dry run)"
+			}
+			if flags.Quiet {
+				text = r.issue
+			}
+			if _, err := fmt.Fprintln(w, text); err != nil {
 				return err
 			}
 			continue
@@ -361,7 +411,7 @@ func printBatchResults(w io.Writer, results []batchResult) error {
 			return err
 		}
 	}
-	if !closed {
+	if !closed || flags.Quiet {
 		return nil
 	}
 	if mode == outputAgent {
