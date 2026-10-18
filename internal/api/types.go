@@ -5,7 +5,9 @@ import (
 	"cmp"
 	"time"
 
+	"go.kenn.io/kata/internal/commentref"
 	"go.kenn.io/kata/internal/db"
+	"go.kenn.io/kata/internal/transcript"
 )
 
 // CloseRetryProtocol marks a close request whose retry headers must be
@@ -45,7 +47,18 @@ type HealthResponse struct {
 		Embeddings       *EmbeddingsHealth       `json:"embeddings,omitempty"`
 		FederationConfig *FederationConfigHealth `json:"federation_config,omitempty"`
 		IdleShutdown     *IdleShutdownHealth     `json:"idle_shutdown,omitempty"`
+		RootSigning      *RootSigningHealth      `json:"root_signing,omitempty"`
 	}
+}
+
+// RootSigningHealth reports root projects whose signed writes this daemon
+// cannot record because federation-root.key is missing, unreadable, or does
+// not match their pin. The block is absent when every local pin is signable.
+type RootSigningHealth struct {
+	KeyFile    string   `json:"key_file,omitempty"`
+	KeyLoaded  bool     `json:"key_loaded"`
+	KeyProblem string   `json:"key_problem,omitempty"`
+	Projects   []string `json:"projects"`
 }
 
 // IdleShutdownHealth advertises effective auto-start idle shutdown behavior. The
@@ -88,6 +101,7 @@ type UISessionResponse struct {
 // an absent block means semantic search is disabled. It mirrors
 // daemon.ReconcilerHealth.
 type EmbeddingsHealth struct {
+	ErrorPresent     bool       `json:"error_present,omitempty,omitzero"`
 	Credential       string     `json:"credential,omitempty" enum:"missing,rejected,ok" doc:"Embedding credential state; an advisory warning that does not change health.ok."`
 	CredentialSource string     `json:"credential_source,omitempty" doc:"Selected credential source: inline, file:<path>, env:<NAME>, or none; never the key value."`
 	CredentialReason string     `json:"credential_reason,omitempty" doc:"Readable missing or rejected credential reason, without provider response bodies."`
@@ -126,14 +140,18 @@ type FederationConfigHealth struct {
 // further calls.
 type InstanceResponse struct {
 	Body struct {
-		InstanceUID          string         `json:"instance_uid"`
-		Version              string         `json:"version"`
-		SchemaVersion        int64          `json:"schema_version"`
-		WebUIContractVersion string         `json:"web_ui_contract_version,omitempty"`
-		WebUICapabilities    UICapabilities `json:"web_ui_capabilities"`
-		IssueStatusSync      bool           `json:"issue_status_sync"`
-		IssueSubtreeTokens   bool           `json:"issue_subtree_tokens"`
-		Auth                 AuthInfoOut    `json:"auth"`
+		InstanceUID                      string         `json:"instance_uid"`
+		Version                          string         `json:"version"`
+		SchemaVersion                    int64          `json:"schema_version"`
+		RelayProtocolVersion             int            `json:"relay_protocol_version,omitempty"`
+		ProvenanceProtocolVersion        int            `json:"provenance_protocol_version,omitempty"`
+		EmbeddingArtifactProtocolVersion int            `json:"embedding_artifact_protocol_version,omitempty"`
+		WebUIContractVersion             string         `json:"web_ui_contract_version,omitempty"`
+		WebUICapabilities                UICapabilities `json:"web_ui_capabilities"`
+		IssueStatusSync                  bool           `json:"issue_status_sync"`
+		IssueSubtreeTokens               bool           `json:"issue_subtree_tokens"`
+		FederationSigningRequired        bool           `json:"federation_signing_required,omitempty" doc:"True when this daemon requires request signatures on its federation transport routes, so a bridge needs a signing source."`
+		Auth                             AuthInfoOut    `json:"auth"`
 	}
 }
 
@@ -172,6 +190,7 @@ type CreateTokenRequest struct {
 		Name             string        `json:"name,omitempty"`
 		Scope            *TokenScopeIn `json:"scope,omitempty"`
 		ExpiresInSeconds int64         `json:"expires_in_seconds,omitempty"`
+		TeamUIDs         []string      `json:"team_uids,omitempty" maxItems:"256"`
 	}
 }
 
@@ -447,6 +466,7 @@ func (p *ProjectNameHeader) SetProjectName(name string) { p.ProjectName = name }
 // Body.ForceNew bypasses look-alike soft-block but is overridden by an
 // idempotent match (idempotency wins per spec §3.7).
 type CreateIssueRequest struct {
+	Surface string `header:"X-Kata-Surface" doc:"Client interface for action telemetry (web, tui, or cli); other values are ignored."`
 	ProjectTarget
 	IdempotencyKey string `header:"Idempotency-Key"`
 	Body           struct {
@@ -505,12 +525,15 @@ type MutationResponse struct {
 // survives Huma's query parsing (which forbids pointer query types). Empty
 // string means no filter; otherwise parsed as 0..4.
 type ListIssuesRequest struct {
+	Cursor       string `query:"cursor,omitempty" doc:"Opaque next_cursor from a matching stable-order page"`
+	IncludeTotal bool   `query:"include_total,omitempty" doc:"Count all matching issues, ignoring cursor and limit"`
+
 	ProjectID     int64    `path:"project_id" required:"true"`
 	Status        string   `query:"status,omitempty" enum:"open,closed,"`
-	Priority      string   `query:"priority,omitempty" doc:"exact priority filter (0..4); empty = no filter"`
-	MaxPriority   string   `query:"max_priority,omitempty" doc:"include only priority <= this value (0..4); empty = no filter"`
+	Priority      string   `query:"priority,omitempty" doc:"exact priority filter (0..4 or none for unset); empty = no filter"`
+	MaxPriority   string   `query:"max_priority,omitempty" doc:"include only priority <= this value (0..4), excluding unset; empty = no filter"`
 	Limit         int      `query:"limit,omitempty"`
-	Sort          string   `query:"sort,omitempty" enum:"oldest," doc:"oldest = created_at ascending, then id ascending; empty preserves the route default"`
+	Sort          string   `query:"sort,omitempty" enum:"oldest,created," doc:"oldest = creation ascending; created = creation descending; both use id as tie-breaker; empty preserves the route default"`
 	Unowned       bool     `query:"unowned,omitempty"`
 	Owner         string   `query:"owner,omitempty"`
 	Labels        []string `query:"label,explode"`
@@ -527,12 +550,17 @@ type ListIssuesRequest struct {
 // that want one trip through this surface; omit it for the all-projects feed.
 // Priority/MaxPriority are encoded the same way as ListIssuesRequest.
 type ListAllIssuesRequest struct {
+	ProjectIDs []int64 `query:"project_ids,explode" doc:"Restrict to these positive project IDs; mutually exclusive with project_id"`
+
+	Cursor       string `query:"cursor,omitempty" doc:"Opaque next_cursor from a matching stable-order page"`
+	IncludeTotal bool   `query:"include_total,omitempty" doc:"Count all matching issues, ignoring cursor and limit"`
+
 	ProjectID     int64    `query:"project_id,omitempty"`
 	Status        string   `query:"status,omitempty" enum:"open,closed,"`
-	Priority      string   `query:"priority,omitempty" doc:"exact priority filter (0..4); empty = no filter"`
-	MaxPriority   string   `query:"max_priority,omitempty" doc:"include only priority <= this value (0..4); empty = no filter"`
+	Priority      string   `query:"priority,omitempty" doc:"exact priority filter (0..4 or none for unset); empty = no filter"`
+	MaxPriority   string   `query:"max_priority,omitempty" doc:"include only priority <= this value (0..4), excluding unset; empty = no filter"`
 	Limit         int      `query:"limit,omitempty"`
-	Sort          string   `query:"sort,omitempty" enum:"oldest," doc:"oldest = created_at ascending, then id ascending; empty preserves the route default"`
+	Sort          string   `query:"sort,omitempty" enum:"oldest,created," doc:"oldest = creation ascending; created = creation descending; both use id as tie-breaker; empty preserves the route default"`
 	Unowned       bool     `query:"unowned,omitempty"`
 	Owner         string   `query:"owner,omitempty"`
 	Labels        []string `query:"label,explode"`
@@ -587,11 +615,21 @@ type IssueOut struct {
 	Blocked bool `json:"blocked,omitempty,omitzero"`
 }
 
+// PageMetadata distinguishes terminal pages from bounded discovery results.
+type PageMetadata struct {
+	NextCursor string `json:"next_cursor,omitempty"`
+	Complete   bool   `json:"complete"`
+	Truncated  bool   `json:"truncated"`
+	Total      *int64 `json:"total,omitempty"`
+}
+
 // ListIssuesResponse is the list payload. Plan 8 commit 5b: each row
 // is now an IssueOut (db.Issue + Labels) so the TUI list view can
 // render label chips without an extra fetch per row.
 type ListIssuesResponse struct {
 	Body struct {
+		PageMetadata
+
 		Issues []IssueOut `json:"issues"`
 	}
 }
@@ -606,6 +644,8 @@ type ListGlobalIssueOut struct {
 // ListAllIssuesResponse is the cross-project list response.
 type ListAllIssuesResponse struct {
 	Body struct {
+		PageMetadata
+
 		Issues []ListGlobalIssueOut `json:"issues"`
 	}
 }
@@ -626,7 +666,18 @@ type IssueRef struct {
 // 26-char ULID; the daemon's path resolver picks the matching column.
 // IncludeDeleted=true allows fetching soft-deleted issues; default returns 404
 // for them.
+type CommentSelectors struct {
+	Thread  string `query:"thread,omitempty"`
+	Inbound string `query:"inbound,omitempty"`
+	Kind    string `query:"kind,omitempty" enum:"reply,confirm,refute,supersede"`
+	Since   string `query:"since,omitempty"`
+}
+
+// CommentOut adds authorized graph annotations to a persisted comment.
+type CommentOut = commentref.Record
+
 type ShowIssueRequest struct {
+	CommentSelectors
 	ProjectID      int64  `path:"project_id" required:"true"`
 	Ref            string `path:"ref" required:"true"`
 	IncludeDeleted bool   `query:"include_deleted,omitempty"`
@@ -635,6 +686,7 @@ type ShowIssueRequest struct {
 // ShowIssueByUIDRequest is GET /api/v1/issues/{uid}. UID is globally unique
 // across projects, so the route does not need a project path segment.
 type ShowIssueByUIDRequest struct {
+	CommentSelectors
 	UID            string `path:"uid" required:"true"`
 	IncludeDeleted bool   `query:"include_deleted,omitempty"`
 }
@@ -749,7 +801,8 @@ type ShowIssueResponse struct {
 type ShowIssueResponseBody struct {
 	WebURL              string              `json:"web_url,omitempty" doc:"Browser URL for this issue in the owning daemon."`
 	Issue               ShowIssueOut        `json:"issue"`
-	Comments            []db.Comment        `json:"comments"`
+	Comments            []CommentOut        `json:"comments"`
+	CommentsTruncated   bool                `json:"comments_truncated,omitempty"`
 	Links               []LinkOut           `json:"links"`
 	Labels              []db.IssueLabel     `json:"labels"`
 	Parent              *IssueRef           `json:"parent,omitempty"`
@@ -880,6 +933,9 @@ type CommentRequest struct {
 		Teammate *string `json:"teammate,omitempty"`
 		Actor    string  `json:"actor,omitempty"`
 		Body     string  `json:"body" required:"true"`
+		ReplyTo  string  `json:"reply_to,omitempty"`
+		Kind     string  `json:"kind,omitempty" enum:"reply,confirm,refute,supersede" doc:"reply is a general response; confirm asserts verification or reproduction"`
+		Force    bool    `json:"force,omitempty"`
 	}
 }
 
@@ -920,6 +976,7 @@ type ActionRequest struct {
 // CloseActionRequest adds retry and optimistic-concurrency headers to the
 // shared issue action body.
 type CloseActionRequest struct {
+	Surface        string `header:"X-Kata-Surface" doc:"Client interface for action telemetry (web, tui, or cli); other values are ignored."`
 	ProjectID      int64  `path:"project_id" required:"true"`
 	Ref            string `path:"ref" required:"true"`
 	IdempotencyKey string `header:"Idempotency-Key"`
@@ -928,11 +985,12 @@ type CloseActionRequest struct {
 }
 
 // CloseActionRequestBody extends the legacy action body with a close-only
-// protocol marker. Older daemons reject the unknown marker before they can
-// ignore retry headers and mutate an issue.
+// protocol marker and optional session provenance. Older daemons reject unknown
+// fields before they can ignore retry headers or provenance and mutate an issue.
 type CloseActionRequestBody struct {
 	ActionRequestBody
-	RetryProtocol string `json:"retry_protocol,omitempty" enum:"close-v1,"`
+	RetryProtocol string                 `json:"retry_protocol,omitempty" enum:"close-v1,"`
+	Transcript    *transcript.Transcript `json:"transcript,omitempty"`
 }
 
 // ActionRequestBody is the shared JSON body for close and reopen actions.
@@ -1358,6 +1416,9 @@ type DigestResponse struct {
 // returns 400, and a vector-leg failure returns 503 rather than silently
 // degrading.
 type SearchRequest struct {
+	Cursor string `query:"cursor,omitempty" doc:"Continuation for explicit lexical search with sort=oldest"`
+	Sort   string `query:"sort,omitempty" enum:"oldest," doc:"oldest selects exhaustive creation-ordered lexical pages; omit for relevance ranking"`
+
 	Status         string   `query:"status,omitempty" enum:"open,closed" doc:"Issue status; omit to search open and closed issues"`
 	ProjectID      int64    `path:"project_id" required:"true"`
 	Query          string   `query:"q" required:"true"`
@@ -1390,6 +1451,8 @@ type SearchHit struct {
 // always-present mode echo.
 type SearchResponse struct {
 	Body struct {
+		PageMetadata
+
 		Query          string      `json:"query"`
 		Mode           string      `json:"mode"`
 		Degraded       bool        `json:"degraded,omitzero"`

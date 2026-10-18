@@ -91,7 +91,8 @@ func checkIssueStatusFederationIntent(t *testing.T, store db.Storage) error {
 	// Historical opposite intent loses to the previously effective restatement.
 	ingest(event("issue.reopened", "open", 15))
 	require.Equal(t, closed.EventUID, read().State.PendingEventUID)
-	reopened := event("issue.reopened", "open", 30)
+	reopened := newRemoteEvent(t, fixture.Project, &fixture.Issue.UID, "issue.reopened", "worker", spoke,
+		base+30, nil)
 	ingest(reopened)
 	require.Equal(t, reopened.EventUID, read().State.PendingEventUID)
 	ingest(event("issue.updated", "open", 40))
@@ -103,7 +104,51 @@ func checkIssueStatusFederationIntent(t *testing.T, store db.Storage) error {
 	latest := event("issue.closed", "closed", 80)
 	ingest(latest, event("issue.reopened", "open", 70))
 	require.Equal(t, latest.EventUID, read().State.PendingEventUID)
-	require.NoError(t, store.MaterializeFederatedProject(ctx, fixture.Project.ID))
+	if err := store.MaterializeFederatedProject(ctx, fixture.Project.ID); err != nil {
+		require.NoError(t, err)
+	}
 	require.Equal(t, latest.EventUID, read().State.PendingEventUID, "manual rebuild cannot manufacture or replace intent")
+
+	issueUID := fixture.Issue.UID
+	reopenedWithoutEnvelope := newRemoteEvent(t, fixture.Project, nil, "issue.reopened", "worker", spoke, base+90,
+		jsontext.Value(`{"issue_uid":"`+issueUID+`","reopened_at":"2026-09-29T12:00:00Z"}`))
+	ingest(reopenedWithoutEnvelope)
+	updatedIssue, err := store.IssueByID(ctx, fixture.Issue.ID)
+	require.NoError(t, err)
+	require.Equal(t, "open", updatedIssue.Status, "payload issue UID must identify the materialized issue")
+	require.Equal(t, reopenedWithoutEnvelope.EventUID, read().State.PendingEventUID,
+		"an effective status event with only a payload issue UID must enqueue and load intent")
+	closedWithoutEnvelope := newRemoteEvent(t, fixture.Project, nil, "issue.closed", "worker", spoke, base+100,
+		jsontext.Value(`{"uid":"`+issueUID+`","reason":"done","closed_at":"2026-09-29T12:00:00Z"}`))
+	ingest(closedWithoutEnvelope)
+	updatedIssue, err = store.IssueByID(ctx, fixture.Issue.ID)
+	require.NoError(t, err)
+	require.Equal(t, "closed", updatedIssue.Status, "payload uid must identify the materialized issue")
+	require.Equal(t, closedWithoutEnvelope.EventUID, read().State.PendingEventUID,
+		"an effective status event with only a payload uid must enqueue and load intent")
+
+	records, err := CollectImportRecords(ctx, store, db.ExportFilter{IncludeDeleted: true})
+	require.NoError(t, err)
+	for _, restore := range []struct {
+		name     string
+		preserve bool
+	}{
+		{"trusted restore retains pending intent", true},
+		{"ordinary restore clears pending intent", false},
+	} {
+		t.Run(restore.name, func(t *testing.T) {
+			require.NoError(t, store.ImportReplay(ctx, records, db.ImportOptions{PreserveIssueSyncBindingEnabled: restore.preserve}))
+			restoredIssue, err := store.IssueByID(ctx, fixture.Issue.ID)
+			require.NoError(t, err)
+			require.Equal(t, "closed", restoredIssue.Status)
+			var pending sql.NullString
+			require.NoError(t, sqlStore.QueryRowContext(ctx, `SELECT pending_event_uid FROM import_mappings WHERE id=$1`, mapping.ID).Scan(&pending))
+			if restore.preserve {
+				require.Equal(t, closedWithoutEnvelope.EventUID, pending.String)
+			} else {
+				require.False(t, pending.Valid)
+			}
+		})
+	}
 	return nil
 }

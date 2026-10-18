@@ -20,6 +20,7 @@ import (
 	"go.kenn.io/kata/internal/storageadmin"
 	"go.kenn.io/kata/internal/version"
 	kataclient "go.kenn.io/kata/pkg/client"
+	"go.kenn.io/kata/pkg/client/generated"
 )
 
 func newMCPCmd() *cobra.Command {
@@ -40,6 +41,7 @@ func newMCPServeCmd() *cobra.Command {
 	var enableTokenAdmin bool
 	var httpAddress string
 	var httpTokenEnv string
+	var httpTokenFile string
 	var trustPrivateNetwork bool
 	command := &cobra.Command{
 		Use:   "serve",
@@ -61,7 +63,7 @@ func newMCPServeCmd() *cobra.Command {
 			if enableTokenAdmin && !allProjects {
 				return errors.New("--enable-token-admin requires --all")
 			}
-			httpToken, err := resolveMCPHTTPToken(httpAddress, httpTokenEnv, trustPrivateNetwork)
+			httpToken, err := resolveMCPHTTPToken(httpAddress, httpTokenFile, httpTokenEnv, trustPrivateNetwork)
 			if err != nil {
 				return err
 			}
@@ -93,6 +95,7 @@ func newMCPServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ctx = context.WithValue(ctx, resolvedDaemonContextKey{}, resolved)
 			baseURL := resolved.BaseURL
 			// Ordinary daemon calls retain the CLI request timeout so a
 			// stalled daemon cannot consume every MCP tool-call slot.
@@ -149,8 +152,11 @@ func newMCPServeCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolve MCP project scope: %w", err)
 			}
+			observe, stopReporting := startMCPAgentUseReporter(ctx, apiClient)
+			defer stopReporting()
 			server, err := mcpserver.New(mcpserver.Options{
 				Client:            apiClient,
+				ObserveToolCall:   observe,
 				LongRunningClient: longRunningAPIClient,
 				Scope:             scope,
 				ProjectID:         projectID,
@@ -197,8 +203,40 @@ func newMCPServeCmd() *cobra.Command {
 	command.Flags().BoolVar(&enableTokenAdmin, "enable-token-admin", false, "enable daemon token administration tools")
 	command.Flags().StringVar(&httpAddress, "http", "", "serve streamable HTTP on host:port instead of stdio")
 	command.Flags().StringVar(&httpTokenEnv, "http-token-env", "", "require an inbound bearer read from this environment variable")
+	command.Flags().StringVar(&httpTokenFile, "http-token-file", "", "require an inbound bearer read from this owner-only secret file (wins over --http-token-env)")
 	command.Flags().BoolVar(&trustPrivateNetwork, "trust-private-network", false, "trust plaintext MCP HTTP on a non-loopback private network")
 	return command
+}
+
+func startMCPAgentUseReporter(ctx context.Context, client *kataclient.Client) (func(), context.CancelFunc) {
+	reportCtx, cancel := context.WithCancel(ctx)
+	queue := make(chan struct{}, 128)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-reportCtx.Done():
+				return
+			case <-queue:
+				if reportCtx.Err() != nil {
+					return
+				}
+				callCtx, stop := context.WithTimeout(reportCtx, time.Second)
+				_, _ = client.CaptureTelemetryEventWithResponse(callCtx, &generated.CaptureTelemetryEventRequestOptions{
+					Body: &generated.CaptureTelemetryEventBody{Event: "agent_active"},
+				})
+				stop()
+			}
+		}
+	}()
+	observe := func() {
+		select {
+		case queue <- struct{}{}:
+		default:
+		}
+	}
+	return observe, func() { cancel(); <-done }
 }
 
 func startMCPIdleKeepalive(

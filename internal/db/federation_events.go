@@ -41,36 +41,55 @@ func ProjectMetadataAdoptionPayload(metadata JSONBlob) (string, error) {
 // ValidateRemoteEventContentHash canonicalizes an incoming payload and verifies
 // the portable event hash before a backend persists it.
 func ValidateRemoteEventContentHash(event RemoteEvent) (jsontext.Value, string, error) {
-	payload := event.Payload
-	if len(payload) == 0 {
-		payload = jsontext.Value(`{}`)
-	}
-	createdAt := event.CreatedAt.UTC().Format(EventTimestampFormat)
-	expectedHash, err := EventContentHash(EventHashInput{
-		UID: event.EventUID, OriginInstanceUID: event.OriginInstanceUID,
-		ProjectUID: event.ProjectUID, ProjectName: event.ProjectName,
-		IssueUID: event.IssueUID, RelatedIssueUID: event.RelatedIssueUID,
-		Type: event.Type, Actor: event.Actor, HLCPhysicalMS: event.HLCPhysicalMS,
-		HLCCounter: event.HLCCounter, CreatedAt: createdAt, Payload: payload,
-	})
+	expectedHash, err := RemoteEventContentHash(event)
 	if err != nil {
-		return nil, "", fmt.Errorf("remote event content hash: %w", err)
+		return nil, "", err
 	}
 	if !strings.EqualFold(expectedHash, event.ContentHash) {
 		return nil, "", fmt.Errorf("%w: event %s", ErrRemoteEventHashMismatch, event.EventUID)
 	}
-	return payload, createdAt, nil
+	return remoteEventPayload(event), remoteEventCreatedAt(event), nil
+}
+
+// RemoteEventContentHash computes the content hash the portable event fields
+// commit to, ignoring the hash the event advertises.
+func RemoteEventContentHash(event RemoteEvent) (string, error) {
+	hash, err := EventContentHash(EventHashInput{
+		UID: event.EventUID, OriginInstanceUID: event.OriginInstanceUID,
+		ProjectUID: event.ProjectUID, ProjectName: event.ProjectName,
+		IssueUID: event.IssueUID, RelatedIssueUID: event.RelatedIssueUID,
+		Type: event.Type, Actor: event.Actor, HLCPhysicalMS: event.HLCPhysicalMS,
+		HLCCounter: event.HLCCounter, CreatedAt: remoteEventCreatedAt(event), Payload: remoteEventPayload(event),
+	})
+	if err != nil {
+		return "", fmt.Errorf("remote event content hash: %w", err)
+	}
+	return hash, nil
+}
+
+func remoteEventPayload(event RemoteEvent) jsontext.Value {
+	if len(event.Payload) == 0 {
+		return jsontext.Value(`{}`)
+	}
+	return event.Payload
+}
+
+func remoteEventCreatedAt(event RemoteEvent) string {
+	return event.CreatedAt.UTC().Format(EventTimestampFormat)
 }
 
 // ValidateFederationEntries checks comment teammate attribution and requires
 // embedded comments and links to be JSON objects on created and snapshot events.
 // Ingest and pull paths must call it before persisting the event.
 func ValidateFederationEntries(eventType, eventUID string, payloadJSON jsontext.Value) error {
-	if eventType == "issue.commented" {
+	if eventType == "issue.commented" || eventType == "issue.comment_edited" {
 		var payload map[string]jsontext.Value
 		if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 			return fmt.Errorf("%w: event %s %s payload is invalid JSON",
 				ErrFederationIngestValidation, eventUID, eventType)
+		}
+		if err := validateCommentEntry(payload); err != nil {
+			return fmt.Errorf("%w: event %s %s: %v", ErrFederationIngestValidation, eventUID, eventType, err)
 		}
 		return validateFederationTeammate(payload["teammate"], eventUID, eventType)
 	}
@@ -94,6 +113,9 @@ func ValidateFederationEntries(eventType, eventUID string, payloadJSON jsontext.
 					ErrFederationIngestValidation, eventUID, eventType, field)
 			}
 			if field == "comments" {
+				if err := validateCommentEntry(entry); err != nil {
+					return fmt.Errorf("%w: event %s %s: %v", ErrFederationIngestValidation, eventUID, eventType, err)
+				}
 				if err := validateFederationTeammate(entry["teammate"], eventUID, eventType); err != nil {
 					return err
 				}
@@ -126,7 +148,7 @@ func validateFederationTeammate(raw jsontext.Value, eventUID, eventType string) 
 // embedded authors to its bound actor and recomputes the portable hash.
 func CanonicalizeFederationSnapshotAuthors(event RemoteEvent, boundActor string) (RemoteEvent, error) {
 	boundActor = strings.TrimSpace(boundActor)
-	if event.Type != "issue.snapshot" || boundActor == "" {
+	if (event.Type != "issue.snapshot" && event.Type != "cron.job.snapshot" && event.Type != "cron.workflow.snapshot") || boundActor == "" {
 		return event, nil
 	}
 	var payload map[string]jsontext.Value
@@ -188,7 +210,7 @@ func CanonicalizeFederationSnapshotAuthors(event RemoteEvent, boundActor string)
 // LocalEchoMatchesCanonicalSnapshot reports whether a pulled hash mismatch is
 // exactly the allowed canonical-author rewrite of one local adoption snapshot.
 func LocalEchoMatchesCanonicalSnapshot(existing Event, remote RemoteEvent) (bool, error) {
-	if existing.Type != "issue.snapshot" || remote.Type != "issue.snapshot" {
+	if existing.Type != remote.Type || (existing.Type != "issue.snapshot" && existing.Type != "cron.job.snapshot" && existing.Type != "cron.workflow.snapshot") {
 		return false, nil
 	}
 	if existing.UID != remote.EventUID ||

@@ -1,5 +1,30 @@
 components:
   schemas:
+    AccessAdministrationResponseBody:
+      properties:
+        changed:
+          type: boolean
+        event:
+          $ref: "#/components/schemas/Event"
+      required:
+        - changed
+      type: object
+    Action:
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+        message:
+          type: string
+        prompt:
+          type: string
+        recipient:
+          type: string
+        workflow_uid:
+          type: string
+      required:
+        - kind
+      type: object
     ActionRequestBody:
       additionalProperties: false
       properties:
@@ -27,6 +52,21 @@ components:
             - tui
             - ""
           type: string
+      type: object
+    ActionResponse:
+      properties:
+        kind:
+          type: string
+        message:
+          type: string
+        prompt:
+          type: string
+        recipient:
+          type: string
+        workflow_uid:
+          type: string
+      required:
+        - kind
       type: object
     AddLabelRequestBody:
       additionalProperties: false
@@ -66,6 +106,57 @@ components:
       required:
         - identity
         - kind
+      type: object
+    ArtifactIdentity:
+      properties:
+        dimensions:
+          format: int64
+          type: integer
+        encoding:
+          type: string
+        input_hash:
+          type: string
+        input_type:
+          type: string
+        issue_uid:
+          type: string
+        model:
+          type: string
+        model_revision:
+          type: string
+        normalization:
+          type: string
+        preprocessing:
+          type: string
+        producer_instance_uid:
+          type: string
+        project_uid:
+          type: string
+        provider:
+          type: string
+        recipe_fingerprint:
+          type: string
+        recipe_version:
+          format: int64
+          type: integer
+        split_max_runes:
+          format: int64
+          type: integer
+        split_overlap:
+          format: int64
+          type: integer
+      required:
+        - recipe_fingerprint
+        - provider
+        - model
+        - dimensions
+        - input_type
+        - normalization
+        - preprocessing
+        - recipe_version
+        - split_max_runes
+        - split_overlap
+        - encoding
       type: object
     AssignRequestBody:
       additionalProperties: false
@@ -157,6 +248,28 @@ components:
         - connector
         - external
       type: object
+    CaptureTelemetryEventRequestBody:
+      additionalProperties: false
+      properties:
+        event:
+          minLength: 1
+          type: string
+        properties:
+          additionalProperties: true
+          type: object
+      required:
+        - event
+      type: object
+    CaptureTelemetryEventResponseBody:
+      properties:
+        status:
+          enum:
+            - queued
+            - disabled
+          type: string
+      required:
+        - status
+      type: object
     ChildCounts:
       properties:
         open:
@@ -168,6 +281,43 @@ components:
       required:
         - open
         - total
+      type: object
+    ChunkArtifact:
+      additionalProperties: false
+      properties:
+        index:
+          format: int64
+          type: integer
+        input_hash:
+          type: string
+        vector_bytes:
+          format: base64
+          type: string
+        vector_digest:
+          type: string
+      required:
+        - index
+        - input_hash
+        - vector_digest
+        - vector_bytes
+      type: object
+    ChunkArtifactResponse:
+      properties:
+        index:
+          format: int64
+          type: integer
+        input_hash:
+          type: string
+        vector_bytes:
+          format: base64
+          type: string
+        vector_digest:
+          type: string
+      required:
+        - index
+        - input_hash
+        - vector_digest
+        - vector_bytes
       type: object
     ClaimActionBody:
       additionalProperties: true
@@ -339,14 +489,23 @@ components:
             - tui
             - ""
           type: string
+        transcript:
+          $ref: "#/components/schemas/Transcript"
       type: object
     Comment:
       properties:
+        accountable_actor:
+          type: string
         author:
+          type: string
+        authority_uid:
           type: string
         body:
           type: string
         created_at:
+          format: date-time
+          type: string
+        edited_at:
           format: date-time
           type: string
         id:
@@ -355,9 +514,124 @@ components:
         issue_id:
           format: int64
           type: integer
+        reply_kind:
+          type: string
+        reply_to_uid:
+          type: string
+        source_actor:
+          type: string
         teammate:
           type: string
         uid:
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
+          type: string
+      required:
+        - id
+        - uid
+        - issue_id
+        - author
+        - body
+        - created_at
+      type: object
+    CommentLink:
+      properties:
+        author:
+          type: string
+        body:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        edited_at:
+          format: date-time
+          type: string
+        handle:
+          type: string
+        issue_short_id:
+          type: string
+        issue_uid:
+          type: string
+        kind:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        project_uid:
+          type: string
+        status:
+          type: string
+        target_edited:
+          type: boolean
+        teammate:
+          type: string
+        uid:
+          type: string
+      required:
+        - kind
+      type: object
+    CommentOut:
+      properties:
+        accountable_actor:
+          type: string
+        author:
+          type: string
+        authority_uid:
+          type: string
+        backlinks:
+          items:
+            $ref: "#/components/schemas/CommentLink"
+          type: array
+        backlinks_truncated:
+          type: boolean
+        body:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        edited_at:
+          format: date-time
+          type: string
+        handle:
+          type: string
+        id:
+          format: int64
+          type: integer
+        issue_id:
+          format: int64
+          type: integer
+        issue_short_id:
+          type: string
+        issue_uid:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        project_name:
+          type: string
+        project_uid:
+          type: string
+        reply:
+          $ref: "#/components/schemas/CommentLink"
+        reply_kind:
+          type: string
+        reply_to_uid:
+          type: string
+        source_actor:
+          type: string
+        teammate:
+          type: string
+        uid:
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
       required:
         - id
@@ -373,6 +647,18 @@ components:
         actor:
           type: string
         body:
+          type: string
+        force:
+          type: boolean
+        kind:
+          description: reply is a general response; confirm asserts verification or reproduction
+          enum:
+            - reply
+            - confirm
+            - refute
+            - supersede
+          type: string
+        reply_to:
           type: string
         teammate:
           type: string
@@ -394,6 +680,51 @@ components:
         - comment
         - event
         - changed
+      type: object
+    ConfigureFederationSigningRequestBody:
+      additionalProperties: false
+      properties:
+        hub_url:
+          type: string
+        key_env:
+          type: string
+        key_file:
+          type: string
+        key_id:
+          type: string
+      required:
+        - key_id
+      type: object
+    ConnectFederationBridgeRequestBody:
+      additionalProperties: false
+      properties:
+        actor:
+          type: string
+        hub_catalog:
+          minLength: 1
+          type: string
+        hub_project:
+          minLength: 1
+          type: string
+        preflight:
+          type: boolean
+        project_name:
+          minLength: 1
+          type: string
+        serve_downstream:
+          type: boolean
+        signing_key_env:
+          description: Daemon environment variable holding the signing secret.
+          type: string
+        signing_key_file:
+          description: Absolute path of an owner-only signing secret file on the daemon.
+          type: string
+        signing_key_id:
+          type: string
+      required:
+        - hub_catalog
+        - hub_project
+        - project_name
       type: object
     ConnectorFieldsResponseBody:
       properties:
@@ -444,12 +775,18 @@ components:
           type: string
         allow_adoption_snapshot_authors:
           type: boolean
+        allow_insecure:
+          type: boolean
         capabilities:
+          type: string
+        hub_url:
           type: string
         project_id:
           format: int64
           nullable: true
           type: integer
+        relay:
+          $ref: "#/components/schemas/RelayEnrollmentOptions"
         spoke_instance_uid:
           type: string
         token:
@@ -487,6 +824,12 @@ components:
         replay_horizon_event_id:
           format: int64
           type: integer
+        signing_key_env:
+          type: string
+        signing_key_file:
+          type: string
+        signing_key_id:
+          type: string
         token:
           type: string
       required:
@@ -623,6 +966,16 @@ components:
       required:
         - recurrence
       type: object
+    CreateTeamRequestBody:
+      additionalProperties: false
+      properties:
+        name:
+          maxLength: 256
+          minLength: 1
+          type: string
+      required:
+        - name
+      type: object
     CreateTokenRequestBody:
       additionalProperties: false
       properties:
@@ -635,6 +988,11 @@ components:
           type: string
         scope:
           $ref: "#/components/schemas/TokenScopeIn"
+        team_uids:
+          items:
+            type: string
+          maxItems: 256
+          type: array
       required:
         - actor
       type: object
@@ -647,6 +1005,393 @@ components:
       required:
         - token
         - plaintext
+      type: object
+    CronCapabilitiesResponseBody:
+      properties:
+        event_features:
+          items:
+            type: string
+          type: array
+        project_uid:
+          type: string
+      required:
+        - project_uid
+        - event_features
+      type: object
+    CronDefinitionActionBody:
+      additionalProperties: false
+      properties:
+        actor:
+          type: string
+        expected_event_uid:
+          type: string
+      required:
+        - expected_event_uid
+      type: object
+    CronJob:
+      properties:
+        author:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        definition:
+          $ref: "#/components/schemas/CronJobDefinitionResponse"
+        definition_event_uid:
+          type: string
+        definition_hlc:
+          $ref: "#/components/schemas/HLC"
+        deleted_at:
+          format: date-time
+          type: string
+        id:
+          format: int64
+          type: integer
+        name:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        revision:
+          format: int64
+          type: integer
+        uid:
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+      required:
+        - definition
+        - id
+        - uid
+        - project_id
+        - name
+        - definition_event_uid
+        - definition_hlc
+        - author
+        - revision
+        - created_at
+        - updated_at
+      type: object
+    CronJobDefinition:
+      additionalProperties: false
+      properties:
+        action:
+          $ref: "#/components/schemas/Action"
+        catchup:
+          type: string
+        checkout_key:
+          type: string
+        enabled:
+          type: boolean
+        grace_seconds:
+          format: int64
+          type: integer
+        issue:
+          $ref: "#/components/schemas/IssuePolicy"
+        kind:
+          type: string
+        options:
+          additionalProperties: true
+          type: object
+        overlap:
+          type: string
+        secret_refs:
+          additionalProperties:
+            type: string
+          type: object
+        timeout_seconds:
+          format: int64
+          type: integer
+        trigger:
+          $ref: "#/components/schemas/Trigger"
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - kind
+        - enabled
+        - trigger
+        - action
+        - overlap
+        - catchup
+      type: object
+    CronJobDefinitionResponse:
+      properties:
+        action:
+          $ref: "#/components/schemas/ActionResponse"
+        catchup:
+          type: string
+        checkout_key:
+          type: string
+        enabled:
+          type: boolean
+        grace_seconds:
+          format: int64
+          type: integer
+        issue:
+          $ref: "#/components/schemas/IssuePolicyResponse"
+        kind:
+          type: string
+        options:
+          additionalProperties: true
+          type: object
+        overlap:
+          type: string
+        secret_refs:
+          additionalProperties:
+            type: string
+          type: object
+        timeout_seconds:
+          format: int64
+          type: integer
+        trigger:
+          $ref: "#/components/schemas/TriggerResponse"
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - kind
+        - enabled
+        - trigger
+        - action
+        - overlap
+        - catchup
+      type: object
+    CronJobResponseBody:
+      properties:
+        events:
+          items:
+            $ref: "#/components/schemas/Event"
+          type: array
+        job:
+          $ref: "#/components/schemas/CronJob"
+      required:
+        - job
+      type: object
+    CronRun:
+      properties:
+        actor:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        definition_event_uid:
+          type: string
+        ended_at:
+          format: date-time
+          type: string
+        executor_label:
+          type: string
+        id:
+          format: int64
+          type: integer
+        issue_uid:
+          type: string
+        job_uid:
+          type: string
+        occurrence_key:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        revision:
+          format: int64
+          type: integer
+        started_at:
+          format: date-time
+          type: string
+        status:
+          type: string
+        summary:
+          $ref: "#/components/schemas/SummaryResponse"
+        teammate:
+          type: string
+        uid:
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+        workflow_definition_event_uid:
+          type: string
+        workflow_uid:
+          type: string
+      required:
+        - id
+        - uid
+        - project_id
+        - actor
+        - status
+        - summary
+        - revision
+        - created_at
+        - updated_at
+      type: object
+    CronRunResponseBody:
+      properties:
+        run:
+          $ref: "#/components/schemas/CronRun"
+      required:
+        - run
+      type: object
+    CronRunsResponseBody:
+      properties:
+        next_before_uid:
+          type: string
+        runs:
+          items:
+            $ref: "#/components/schemas/CronRun"
+          type: array
+      required:
+        - runs
+      type: object
+    CronWorkflow:
+      properties:
+        author:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        definition:
+          $ref: "#/components/schemas/CronWorkflowDefinitionResponse"
+        definition_event_uid:
+          type: string
+        definition_hlc:
+          $ref: "#/components/schemas/HLC"
+        deleted_at:
+          format: date-time
+          type: string
+        id:
+          format: int64
+          type: integer
+        name:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        revision:
+          format: int64
+          type: integer
+        uid:
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+      required:
+        - definition
+        - id
+        - uid
+        - project_id
+        - name
+        - definition_event_uid
+        - definition_hlc
+        - author
+        - revision
+        - created_at
+        - updated_at
+      type: object
+    CronWorkflowDefinition:
+      additionalProperties: false
+      properties:
+        about:
+          type: string
+        input:
+          type: string
+        options:
+          additionalProperties: true
+          type: object
+        steps:
+          items:
+            $ref: "#/components/schemas/CronWorkflowStep"
+          type: array
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - steps
+      type: object
+    CronWorkflowDefinitionResponse:
+      properties:
+        about:
+          type: string
+        input:
+          type: string
+        options:
+          additionalProperties: true
+          type: object
+        steps:
+          items:
+            $ref: "#/components/schemas/CronWorkflowStepResponse"
+          type: array
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - steps
+      type: object
+    CronWorkflowResponseBody:
+      properties:
+        events:
+          items:
+            $ref: "#/components/schemas/Event"
+          type: array
+        workflow:
+          $ref: "#/components/schemas/CronWorkflow"
+      required:
+        - workflow
+      type: object
+    CronWorkflowStep:
+      additionalProperties: false
+      properties:
+        after:
+          items:
+            type: string
+          type: array
+        command:
+          type: string
+        key:
+          type: string
+        kind:
+          type: string
+        options:
+          additionalProperties: true
+          type: object
+        prompt:
+          type: string
+        retries:
+          format: int64
+          type: integer
+      required:
+        - key
+        - kind
+      type: object
+    CronWorkflowStepResponse:
+      properties:
+        after:
+          items:
+            type: string
+          type: array
+        command:
+          type: string
+        key:
+          type: string
+        kind:
+          type: string
+        options:
+          additionalProperties: true
+          type: object
+        prompt:
+          type: string
+        retries:
+          format: int64
+          type: integer
+      required:
+        - key
+        - kind
       type: object
     DestructiveActionRequestBody:
       additionalProperties: false
@@ -808,6 +1553,36 @@ components:
     DisableIssueSyncRequestBody:
       additionalProperties: false
       type: object
+    DisconnectFederationBridgeRequestBody:
+      additionalProperties: false
+      properties:
+        local_only:
+          type: boolean
+        preflight:
+          type: boolean
+      type: object
+    DisconnectRelayRequestBody:
+      additionalProperties: false
+      properties:
+        spoke_instance_uid:
+          type: string
+      required:
+        - spoke_instance_uid
+      type: object
+    DisconnectRelayResponseBody:
+      properties:
+        revoked:
+          type: boolean
+      required:
+        - revoked
+      type: object
+    DoctorResponseBody:
+      properties:
+        hooks:
+          $ref: "#/components/schemas/Hooks"
+      required:
+        - hooks
+      type: object
     EditCommentRequestBody:
       additionalProperties: false
       properties:
@@ -857,6 +1632,125 @@ components:
         - event
         - changed
       type: object
+    EmbeddingArtifact:
+      additionalProperties: false
+      properties:
+        chunks:
+          items:
+            $ref: "#/components/schemas/ChunkArtifact"
+          type: array
+        digest:
+          type: string
+        dimensions:
+          format: int64
+          type: integer
+        encoding:
+          type: string
+        input_hash:
+          type: string
+        input_type:
+          type: string
+        issue_uid:
+          type: string
+        model:
+          type: string
+        model_revision:
+          type: string
+        normalization:
+          type: string
+        preprocessing:
+          type: string
+        producer_instance_uid:
+          type: string
+        project_uid:
+          type: string
+        provider:
+          type: string
+        recipe_fingerprint:
+          type: string
+        recipe_version:
+          format: int64
+          type: integer
+        split_max_runes:
+          format: int64
+          type: integer
+        split_overlap:
+          format: int64
+          type: integer
+      required:
+        - chunks
+        - digest
+        - recipe_fingerprint
+        - provider
+        - model
+        - dimensions
+        - input_type
+        - normalization
+        - preprocessing
+        - recipe_version
+        - split_max_runes
+        - split_overlap
+        - encoding
+      type: object
+    EmbeddingArtifactResponse:
+      properties:
+        chunks:
+          items:
+            $ref: "#/components/schemas/ChunkArtifactResponse"
+          type: array
+        digest:
+          type: string
+        dimensions:
+          format: int64
+          type: integer
+        encoding:
+          type: string
+        input_hash:
+          type: string
+        input_type:
+          type: string
+        issue_uid:
+          type: string
+        model:
+          type: string
+        model_revision:
+          type: string
+        normalization:
+          type: string
+        preprocessing:
+          type: string
+        producer_instance_uid:
+          type: string
+        project_uid:
+          type: string
+        provider:
+          type: string
+        recipe_fingerprint:
+          type: string
+        recipe_version:
+          format: int64
+          type: integer
+        split_max_runes:
+          format: int64
+          type: integer
+        split_overlap:
+          format: int64
+          type: integer
+      required:
+        - chunks
+        - digest
+        - recipe_fingerprint
+        - provider
+        - model
+        - dimensions
+        - input_type
+        - normalization
+        - preprocessing
+        - recipe_version
+        - split_max_runes
+        - split_overlap
+        - encoding
+      type: object
     EmbeddingsHealth:
       properties:
         backlog:
@@ -880,6 +1774,8 @@ components:
         embedded:
           format: int64
           type: integer
+        error_present:
+          type: boolean
         eta_seconds:
           format: int64
           type: integer
@@ -1323,6 +2219,115 @@ components:
         - created_at
         - updated_at
       type: object
+    FederationBridgeBody:
+      properties:
+        direction:
+          enum:
+            - bidirectional
+          type: string
+        hub_catalog:
+          type: string
+        hub_instance_uid:
+          type: string
+        hub_project_id:
+          format: int64
+          type: integer
+        hub_project_uid:
+          type: string
+        hub_url:
+          type: string
+        local_account:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        project_name:
+          type: string
+        status:
+          enum:
+            - ready
+            - connected
+          type: string
+        upstream_account:
+          type: string
+      required:
+        - hub_catalog
+        - hub_url
+        - hub_instance_uid
+        - hub_project_uid
+        - hub_project_id
+        - project_name
+        - local_account
+        - upstream_account
+        - direction
+        - status
+      type: object
+    FederationBridgeDisconnectResult:
+      properties:
+        local_only:
+          type: boolean
+        project_name:
+          type: string
+        project_uid:
+          type: string
+        status:
+          enum:
+            - ready
+            - disconnected
+          type: string
+        warning:
+          type: string
+      required:
+        - project_name
+        - status
+      type: object
+    FederationBridgeStatusBody:
+      properties:
+        credential_status:
+          type: string
+        direction:
+          enum:
+            - bidirectional
+            - pull_only
+          type: string
+        federation:
+          $ref: "#/components/schemas/FederationProjectStatus"
+        hub_catalog:
+          type: string
+        hub_url:
+          type: string
+        local_account:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        project_name:
+          type: string
+        project_uid:
+          type: string
+        relay:
+          $ref: "#/components/schemas/RelayBindingConfig"
+        state:
+          enum:
+            - connected
+            - enrollment_pending
+            - paused
+            - offline
+            - revoked
+            - signing_rejected
+          type: string
+        upstream_account:
+          type: string
+      required:
+        - project_uid
+        - project_name
+        - hub_url
+        - local_account
+        - upstream_account
+        - direction
+        - state
+        - credential_status
+      type: object
     FederationConfigHealth:
       properties:
         configured:
@@ -1354,6 +2359,48 @@ components:
         - pending
         - conflicted
       type: object
+    FederationEmbeddingArtifactStatus:
+      properties:
+        digest:
+          type: string
+        issue_uid:
+          type: string
+        reason:
+          type: string
+        state:
+          type: string
+      required:
+        - issue_uid
+        - digest
+        - state
+      type: object
+    FederationEmbeddingStatus:
+      properties:
+        artifact_limit:
+          format: int64
+          type: integer
+        artifacts:
+          items:
+            $ref: "#/components/schemas/FederationEmbeddingArtifactStatus"
+          type: array
+        last_error:
+          description: Last failed producer check on this daemon, such as an unreachable upstream hub or a missing federation credential.
+          type: string
+        limited:
+          type: boolean
+        producer:
+          $ref: "#/components/schemas/ProjectEmbeddingProducer"
+        reason:
+          description: "Why this daemon cannot generate for the project. producer_recipe_changed: this daemon is the selected producer, but its configured recipe differs from the selected recipe; select the producer again at the root. producer_unavailable: this daemon's last check as the selected producer failed; see last_error."
+          type: string
+        state:
+          type: string
+      required:
+        - state
+        - artifact_limit
+        - limited
+        - artifacts
+      type: object
     FederationEnrollmentOut:
       properties:
         actor:
@@ -1366,10 +2413,14 @@ components:
         id:
           format: int64
           type: integer
+        join:
+          $ref: "#/components/schemas/FederationJoinInstructions"
         project_id:
           format: int64
           nullable: true
           type: integer
+        relay:
+          $ref: "#/components/schemas/RelayHandshake"
         revoked_at:
           format: date-time
           type: string
@@ -1470,6 +2521,56 @@ components:
       required:
         - schema_version
       type: object
+    FederationJoinInstructions:
+      properties:
+        actor:
+          type: string
+        adopt_existing:
+          type: boolean
+        allow_insecure:
+          type: boolean
+        baseline_through_event_id:
+          format: int64
+          type: integer
+        capabilities:
+          type: string
+        hub_project_id:
+          format: int64
+          type: integer
+        hub_project_uid:
+          type: string
+        hub_url:
+          type: string
+          x-oapi-codegen-extra-tags:
+            validate: omitempty
+        join_command:
+          type: string
+          x-oapi-codegen-extra-tags:
+            validate: omitempty
+        project_name:
+          type: string
+        push_enabled:
+          type: boolean
+        replay_horizon_event_id:
+          format: int64
+          type: integer
+        token:
+          type: string
+      required:
+        - hub_url
+        - hub_project_id
+        - hub_project_uid
+        - project_name
+        - baseline_through_event_id
+        - replay_horizon_event_id
+        - token
+        - actor
+        - capabilities
+        - push_enabled
+        - adopt_existing
+        - allow_insecure
+        - join_command
+      type: object
     FederationProjectStatus:
       properties:
         active_quarantine_count:
@@ -1490,6 +2591,8 @@ components:
           type: string
         credential_status:
           type: string
+        embedding:
+          $ref: "#/components/schemas/FederationEmbeddingStatus"
         enabled:
           type: boolean
         enrollment_count:
@@ -1564,9 +2667,25 @@ components:
           items:
             $ref: "#/components/schemas/FederationViolationSummary"
           type: array
+        relay_checkpoint_bytes:
+          description: Measured size in bytes of the signed relay reset checkpoint this root would build for the project now. Present only for hub projects rooted on this daemon.
+          format: int64
+          type: integer
+        relay_checkpoint_capacity_bytes:
+          description: Largest relay reset checkpoint this root builds. New relay enrollments are refused with 409 relay_project_too_large once relay_checkpoint_bytes exceeds it. Present only for hub projects rooted on this daemon.
+          format: int64
+          type: integer
+        relay_checkpoint_error:
+          description: Why the relay checkpoint could not be measured for this status read. The size fields are omitted while it is set.
+          type: string
         reset_blocker:
           type: string
         role:
+          type: string
+        root_signing_key:
+          enum:
+            - available
+            - unavailable
           type: string
         unresolved_violation_count:
           format: int64
@@ -1635,6 +2754,47 @@ components:
         - id
         - uid
         - name
+      type: object
+    FederationRootKeyRepinResult:
+      properties:
+        active_relay_enrollments:
+          format: int64
+          type: integer
+        consequence:
+          type: string
+        creates_key_file:
+          type: boolean
+        key_file:
+          type: string
+        key_id:
+          type: string
+        method:
+          enum:
+            - none
+            - pin
+            - signed_rotation
+            - unsigned_repin
+          type: string
+        previous_key_id:
+          type: string
+        project_name:
+          type: string
+        project_uid:
+          type: string
+        status:
+          enum:
+            - ready
+            - current
+            - pinned
+            - repinned
+            - rotated
+          type: string
+      required:
+        - project_name
+        - project_uid
+        - status
+        - method
+        - active_relay_enrollments
       type: object
     FederationStatusBody:
       properties:
@@ -1706,6 +2866,25 @@ components:
       required:
         - issue
       type: object
+    HLC:
+      properties:
+        counter:
+          format: int64
+          type: integer
+        origin_instance_uid:
+          type: string
+        physical_ms:
+          format: int64
+          type: integer
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - physical_ms
+        - counter
+        - origin_instance_uid
+      type: object
     HealthResponseBody:
       properties:
         api_schema_version:
@@ -1720,6 +2899,8 @@ components:
           $ref: "#/components/schemas/IdleShutdownHealth"
         ok:
           type: boolean
+        root_signing:
+          $ref: "#/components/schemas/RootSigningHealth"
         schema_version:
           format: int64
           type: integer
@@ -1736,6 +2917,65 @@ components:
         - version
         - uptime
         - started_at
+      type: object
+    Hook:
+      properties:
+        command:
+          type: string
+        executable_available:
+          type: boolean
+        index:
+          format: int64
+          type: integer
+        working_directory_available:
+          type: boolean
+      required:
+        - index
+        - command
+        - executable_available
+        - working_directory_available
+      type: object
+    Hooks:
+      properties:
+        available:
+          type: boolean
+        dropped:
+          format: int64
+          type: integer
+        history_incomplete:
+          type: boolean
+        history_truncated:
+          type: boolean
+        hooks:
+          items:
+            $ref: "#/components/schemas/Hook"
+          type: array
+        in_flight:
+          format: int32
+          type: integer
+        queue_capacity:
+          format: int64
+          type: integer
+        queue_length:
+          format: int64
+          type: integer
+        recent_failures:
+          format: int64
+          type: integer
+        recent_runs:
+          format: int64
+          type: integer
+      required:
+        - available
+        - hooks
+        - queue_length
+        - queue_capacity
+        - in_flight
+        - dropped
+        - recent_runs
+        - recent_failures
+        - history_incomplete
+        - history_truncated
       type: object
     IdleShutdownHealth:
       properties:
@@ -1953,12 +3193,24 @@ components:
       properties:
         auth:
           $ref: "#/components/schemas/AuthInfoOut"
+        embedding_artifact_protocol_version:
+          format: int64
+          type: integer
+        federation_signing_required:
+          description: True when this daemon requires request signatures on its federation transport routes, so a bridge needs a signing source.
+          type: boolean
         instance_uid:
           type: string
         issue_status_sync:
           type: boolean
         issue_subtree_tokens:
           type: boolean
+        provenance_protocol_version:
+          format: int64
+          type: integer
+        relay_protocol_version:
+          format: int64
+          type: integer
         schema_version:
           format: int64
           type: integer
@@ -1979,10 +3231,14 @@ components:
       type: object
     Issue:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         body:
           type: string
@@ -2023,7 +3279,11 @@ components:
           type: integer
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -2031,6 +3291,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
       required:
         - id
@@ -2130,10 +3396,14 @@ components:
       type: object
     IssueOut:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         blocked:
           type: boolean
@@ -2198,7 +3468,11 @@ components:
           type: integer
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -2206,6 +3480,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
         web_url:
           description: Browser URL for this issue in the owning daemon.
@@ -2224,6 +3504,122 @@ components:
         - revision
         - created_at
         - updated_at
+      type: object
+    IssuePlanningDate:
+      additionalProperties: false
+      properties:
+        field:
+          type: string
+        instant:
+          format: date-time
+          type: string
+        timezone:
+          type: string
+        value:
+          type: string
+      required:
+        - field
+        - value
+        - timezone
+        - instant
+      type: object
+    IssuePlanningDates:
+      properties:
+        deadline_on:
+          nullable: true
+          properties:
+            field:
+              type: string
+            instant:
+              format: date-time
+              type: string
+            timezone:
+              type: string
+            value:
+              type: string
+          required:
+            - field
+            - value
+            - timezone
+            - instant
+          type: object
+          x-omitempty: false
+        issue_uid:
+          type: string
+        project_id:
+          format: int64
+          type: integer
+        revision:
+          format: int64
+          type: integer
+        scheduled_on:
+          nullable: true
+          properties:
+            field:
+              type: string
+            instant:
+              format: date-time
+              type: string
+            timezone:
+              type: string
+            value:
+              type: string
+          required:
+            - field
+            - value
+            - timezone
+            - instant
+          type: object
+          x-omitempty: false
+      required:
+        - project_id
+        - issue_uid
+        - revision
+        - scheduled_on
+        - deadline_on
+      type: object
+    IssuePolicy:
+      additionalProperties: false
+      properties:
+        body:
+          type: string
+        deadline_offset_seconds:
+          format: int64
+          type: integer
+        kind:
+          type: string
+        parent_uid:
+          type: string
+        scheduled_offset_seconds:
+          format: int64
+          type: integer
+        title:
+          type: string
+        uid:
+          type: string
+      required:
+        - kind
+      type: object
+    IssuePolicyResponse:
+      properties:
+        body:
+          type: string
+        deadline_offset_seconds:
+          format: int64
+          type: integer
+        kind:
+          type: string
+        parent_uid:
+          type: string
+        scheduled_offset_seconds:
+          format: int64
+          type: integer
+        title:
+          type: string
+        uid:
+          type: string
+      required:
+        - kind
       type: object
     IssueRef:
       properties:
@@ -2554,12 +3950,41 @@ components:
       type: object
     ListAllIssuesResponseBody:
       properties:
+        complete:
+          type: boolean
         issues:
           items:
             $ref: "#/components/schemas/ListGlobalIssueOut"
           type: array
+        next_cursor:
+          type: string
+        total:
+          format: int64
+          type: integer
+        truncated:
+          type: boolean
       required:
         - issues
+        - complete
+        - truncated
+      type: object
+    ListCronJobsResponseBody:
+      properties:
+        jobs:
+          items:
+            $ref: "#/components/schemas/CronJob"
+          type: array
+      required:
+        - jobs
+      type: object
+    ListCronWorkflowsResponseBody:
+      properties:
+        workflows:
+          items:
+            $ref: "#/components/schemas/CronWorkflow"
+          type: array
+      required:
+        - workflows
       type: object
     ListFederationEnrollmentsBody:
       properties:
@@ -2572,10 +3997,14 @@ components:
       type: object
     ListGlobalIssueOut:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         blocked:
           type: boolean
@@ -2642,7 +4071,11 @@ components:
           type: integer
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -2650,6 +4083,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
         web_url:
           description: Browser URL for this issue in the owning daemon.
@@ -2672,12 +4111,23 @@ components:
       type: object
     ListIssuesResponseBody:
       properties:
+        complete:
+          type: boolean
         issues:
           items:
             $ref: "#/components/schemas/IssueOut"
           type: array
+        next_cursor:
+          type: string
+        total:
+          format: int64
+          type: integer
+        truncated:
+          type: boolean
       required:
         - issues
+        - complete
+        - truncated
       type: object
     ListProjectsResponseBody:
       properties:
@@ -2696,6 +4146,15 @@ components:
           type: array
       required:
         - recurrences
+      type: object
+    ListTeamsResponseBody:
+      properties:
+        teams:
+          items:
+            $ref: "#/components/schemas/Team"
+          type: array
+      required:
+        - teams
       type: object
     ListTokensResponseBody:
       properties:
@@ -2844,6 +4303,68 @@ components:
         - issue
         - event
         - changed
+      type: object
+    ObserveCronRunBody:
+      additionalProperties: false
+      properties:
+        actor:
+          type: string
+        definition_event_uid:
+          type: string
+        ended_at:
+          format: date-time
+          type: string
+        executor_label:
+          type: string
+        expected_revision:
+          format: int64
+          minimum: 0
+          type: integer
+        issue_uid:
+          type: string
+        job_uid:
+          type: string
+        occurrence_key:
+          type: string
+        started_at:
+          format: date-time
+          type: string
+        status:
+          enum:
+            - running
+            - succeeded
+            - failed
+            - cancelled
+            - unknown
+          type: string
+        summary:
+          $ref: "#/components/schemas/Summary"
+        teammate:
+          nullable: true
+          type: string
+        workflow_definition_event_uid:
+          type: string
+        workflow_uid:
+          type: string
+      required:
+        - status
+        - summary
+        - expected_revision
+      type: object
+    ObserveCronRunResponseBody:
+      properties:
+        events:
+          items:
+            $ref: "#/components/schemas/Event"
+          type: array
+        replayed:
+          type: boolean
+        run:
+          $ref: "#/components/schemas/CronRun"
+      required:
+        - run
+        - events
+        - replayed
       type: object
     PatchIssueMetadataRequestBody:
       additionalProperties: false
@@ -3042,6 +4563,34 @@ components:
         - revision
         - created_at
       type: object
+    ProjectAccessPolicy:
+      properties:
+        project_uid:
+          type: string
+        revision:
+          format: int64
+          type: integer
+        team_uids:
+          items:
+            type: string
+          type: array
+        visibility:
+          type: string
+      required:
+        - project_uid
+        - visibility
+        - team_uids
+        - revision
+      type: object
+    ProjectAccessResponseBody:
+      properties:
+        event:
+          $ref: "#/components/schemas/Event"
+        policy:
+          $ref: "#/components/schemas/ProjectAccessPolicy"
+      required:
+        - policy
+      type: object
     ProjectAlias:
       properties:
         alias_identity:
@@ -3064,6 +4613,16 @@ components:
         - alias_kind
         - created_at
       type: object
+    ProjectEmbeddingProducer:
+      properties:
+        producer_instance_uid:
+          type: string
+        recipe:
+          $ref: "#/components/schemas/ArtifactIdentity"
+      required:
+        - producer_instance_uid
+        - recipe
+      type: object
     ProjectFederationBody:
       properties:
         baseline_through_event_id:
@@ -3076,6 +4635,8 @@ components:
           type: string
         project_uid:
           type: string
+        relay:
+          $ref: "#/components/schemas/RelayHandshake"
         replay_horizon_event_id:
           format: int64
           type: integer
@@ -3334,6 +4895,36 @@ components:
       required:
         - purge_log
       type: object
+    PutCronJobBody:
+      additionalProperties: false
+      properties:
+        actor:
+          type: string
+        definition:
+          $ref: "#/components/schemas/CronJobDefinition"
+        expected_event_uid:
+          type: string
+        name:
+          type: string
+      required:
+        - name
+        - definition
+      type: object
+    PutCronWorkflowBody:
+      additionalProperties: false
+      properties:
+        actor:
+          type: string
+        definition:
+          $ref: "#/components/schemas/CronWorkflowDefinition"
+        expected_event_uid:
+          type: string
+        name:
+          type: string
+      required:
+        - name
+        - definition
+      type: object
     ReachableGraphEdge:
       properties:
         from_uid:
@@ -3356,10 +4947,14 @@ components:
       type: object
     ReachableGraphNode:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         body:
           type: string
@@ -3402,7 +4997,11 @@ components:
           type: integer
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -3410,6 +5009,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
       required:
         - qualified_id
@@ -3479,10 +5084,14 @@ components:
       type: object
     ReadyGlobalIssueOut:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         blocked:
           type: boolean
@@ -3549,7 +5158,11 @@ components:
           type: integer
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -3557,6 +5170,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
         web_url:
           description: Browser URL for this issue in the owning daemon.
@@ -3740,6 +5359,356 @@ components:
         title:
           type: string
       type: object
+    RelayAcceptance:
+      properties:
+        digest:
+          type: string
+        missing_digests:
+          items:
+            type: string
+          type: array
+        through:
+          format: int64
+          type: integer
+      required:
+        - through
+        - digest
+      type: object
+    RelayAckRequestBody:
+      additionalProperties: false
+      properties:
+        digest:
+          type: string
+        epoch:
+          format: int64
+          minimum: 1
+          type: integer
+        stream:
+          enum:
+            - events
+            - receipts
+            - artifacts
+          type: string
+        through:
+          format: int64
+          minimum: 1
+          type: integer
+      required:
+        - stream
+        - epoch
+        - through
+        - digest
+      type: object
+    RelayAckResponseBody:
+      properties:
+        acknowledged:
+          type: boolean
+      required:
+        - acknowledged
+      type: object
+    RelayBatch:
+      additionalProperties: false
+      properties:
+        after:
+          format: int64
+          type: integer
+        artifacts:
+          items:
+            $ref: "#/components/schemas/EmbeddingArtifact"
+          type: array
+        envelopes:
+          items:
+            $ref: "#/components/schemas/RelayEnvelope"
+          type: array
+        stream:
+          type: string
+      required:
+        - stream
+        - after
+        - envelopes
+      type: object
+    RelayBatchResponse:
+      properties:
+        after:
+          format: int64
+          type: integer
+        artifacts:
+          items:
+            $ref: "#/components/schemas/EmbeddingArtifactResponse"
+          type: array
+        envelopes:
+          items:
+            $ref: "#/components/schemas/RelayEnvelopeResponse"
+          type: array
+        stream:
+          type: string
+      required:
+        - stream
+        - after
+        - envelopes
+      type: object
+    RelayBindingConfig:
+      properties:
+        authority_uid:
+          type: string
+        binding_uid:
+          type: string
+        hub_path:
+          items:
+            type: string
+          type: array
+        local_actor:
+          type: string
+        protocol_version:
+          format: int64
+          type: integer
+        reset_epoch:
+          format: int64
+          type: integer
+        serve_downstream:
+          type: boolean
+        upstream_instance_uid:
+          type: string
+        upstream_revoked:
+          type: boolean
+      required:
+        - protocol_version
+        - binding_uid
+        - upstream_instance_uid
+        - authority_uid
+        - hub_path
+        - local_actor
+        - serve_downstream
+        - reset_epoch
+        - upstream_revoked
+      type: object
+    RelayEnrollmentOptions:
+      additionalProperties: false
+      properties:
+        protocol_version:
+          format: int64
+          type: integer
+        rebind_parent:
+          description: Explicitly rebind the retained relay token to this live same-account API credential, preserving its binding and cursors.
+          type: boolean
+        serve_downstream:
+          type: boolean
+      required:
+        - protocol_version
+      type: object
+    RelayEnvelope:
+      additionalProperties: false
+      properties:
+        authority_uid:
+          type: string
+        binding_uid:
+          type: string
+        body:
+          format: base64
+          type: string
+        digest:
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        path:
+          items:
+            type: string
+          type: array
+        project_uid:
+          type: string
+        receiver_instance_uid:
+          type: string
+        sender_instance_uid:
+          type: string
+        sequence:
+          format: int64
+          type: integer
+        source_hash:
+          type: string
+        source_uid:
+          type: string
+        stream:
+          type: string
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - binding_uid
+        - project_uid
+        - authority_uid
+        - sender_instance_uid
+        - receiver_instance_uid
+        - epoch
+        - sequence
+        - stream
+        - path
+        - source_uid
+        - source_hash
+        - body
+        - digest
+      type: object
+    RelayEnvelopeResponse:
+      properties:
+        authority_uid:
+          type: string
+        binding_uid:
+          type: string
+        body:
+          format: base64
+          type: string
+        digest:
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        path:
+          items:
+            type: string
+          type: array
+        project_uid:
+          type: string
+        receiver_instance_uid:
+          type: string
+        sender_instance_uid:
+          type: string
+        sequence:
+          format: int64
+          type: integer
+        source_hash:
+          type: string
+        source_uid:
+          type: string
+        stream:
+          type: string
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - binding_uid
+        - project_uid
+        - authority_uid
+        - sender_instance_uid
+        - receiver_instance_uid
+        - epoch
+        - sequence
+        - stream
+        - path
+        - source_uid
+        - source_hash
+        - body
+        - digest
+      type: object
+    RelayHandshake:
+      properties:
+        binding_uid:
+          type: string
+        embedding_producer:
+          $ref: "#/components/schemas/ProjectEmbeddingProducer"
+        enrollment_root:
+          $ref: "#/components/schemas/RootKeyPin"
+        hub_path:
+          items:
+            type: string
+          type: array
+        pending_artifact_offers:
+          description: Whether this hub holds artifact offers the presenting enrollment has not accepted yet. Set only on metadata reads by an enrolled relay.
+          type: boolean
+        protocol_version:
+          format: int64
+          type: integer
+        reset_epoch:
+          format: int64
+          type: integer
+        reset_required:
+          type: boolean
+        root:
+          $ref: "#/components/schemas/RootKeyPin"
+        root_key_transitions:
+          items:
+            $ref: "#/components/schemas/RootKeyTransition"
+          type: array
+        upstream_instance_uid:
+          type: string
+      required:
+        - protocol_version
+        - binding_uid
+        - upstream_instance_uid
+        - reset_epoch
+        - reset_required
+        - hub_path
+        - root
+      type: object
+    RelayHopAuthority:
+      properties:
+        authority_uid:
+          type: string
+        binding_uid:
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        project_uid:
+          type: string
+        receiver_instance_uid:
+          type: string
+        sender_instance_uid:
+          type: string
+      required:
+        - binding_uid
+        - project_uid
+        - authority_uid
+        - sender_instance_uid
+        - receiver_instance_uid
+        - epoch
+      type: object
+    RelayResetCheckpoint:
+      properties:
+        manifest:
+          $ref: "#/components/schemas/RootResetManifest"
+        snapshot:
+          $ref: "#/components/schemas/RootResetSnapshot"
+        translation:
+          $ref: "#/components/schemas/RelayResetTranslation"
+      required:
+        - manifest
+        - snapshot
+        - translation
+      type: object
+    RelayResetTranslation:
+      properties:
+        authority:
+          $ref: "#/components/schemas/RelayHopAuthority"
+        hop_baselines:
+          $ref: "#/components/schemas/RelayStreamCursors"
+        snapshot_digest:
+          type: string
+        snapshot_uid:
+          type: string
+      required:
+        - authority
+        - snapshot_uid
+        - snapshot_digest
+        - hop_baselines
+      type: object
+    RelayStreamCursors:
+      properties:
+        artifacts:
+          format: int64
+          type: integer
+        events:
+          format: int64
+          type: integer
+        receipts:
+          format: int64
+          type: integer
+      required:
+        - events
+        - receipts
+        - artifacts
+      type: object
     RemoveProjectResponseBody:
       properties:
         event:
@@ -3759,6 +5728,16 @@ components:
           type: string
       required:
         - name
+      type: object
+    RepinFederationRootKeyRequestBody:
+      additionalProperties: false
+      properties:
+        preflight:
+          type: boolean
+        previous_key_file:
+          type: string
+        strand_relays:
+          type: boolean
       type: object
     ResolveExternalCommentRequestBody:
       additionalProperties: false
@@ -3892,6 +5871,114 @@ components:
         - link_authors
         - total
       type: object
+    RootKeyPin:
+      properties:
+        authority_uid:
+          type: string
+        key_id:
+          type: string
+        project_uid:
+          type: string
+        public_key:
+          format: base64
+          type: string
+        retired:
+          type: boolean
+      required:
+        - project_uid
+        - authority_uid
+        - key_id
+        - public_key
+      type: object
+    RootKeyTransition:
+      properties:
+        next:
+          $ref: "#/components/schemas/RootKeyPin"
+        previous_key_id:
+          type: string
+        signature:
+          format: base64
+          type: string
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - previous_key_id
+        - next
+      type: object
+    RootResetManifest:
+      properties:
+        authority_uid:
+          type: string
+        history_event_id:
+          format: int64
+          type: integer
+        key_id:
+          type: string
+        project_uid:
+          type: string
+        reset_epoch:
+          format: int64
+          type: integer
+        root_baselines:
+          $ref: "#/components/schemas/RelayStreamCursors"
+        signature:
+          format: base64
+          type: string
+        snapshot_digest:
+          type: string
+        snapshot_uid:
+          type: string
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+        - project_uid
+        - authority_uid
+        - key_id
+        - reset_epoch
+        - snapshot_uid
+        - snapshot_digest
+        - root_baselines
+      type: object
+    RootResetSnapshot:
+      properties:
+        artifacts:
+          format: base64
+          type: string
+        entities:
+          format: base64
+          type: string
+        events:
+          format: base64
+          type: string
+        provenance:
+          format: base64
+          type: string
+      required:
+        - events
+        - entities
+        - provenance
+        - artifacts
+      type: object
+    RootSigningHealth:
+      properties:
+        key_file:
+          type: string
+        key_loaded:
+          type: boolean
+        key_problem:
+          type: string
+        projects:
+          items:
+            type: string
+          type: array
+      required:
+        - key_loaded
+        - projects
+      type: object
     RotateFederationEnrollmentRequestBody:
       additionalProperties: false
       properties:
@@ -3956,11 +6043,15 @@ components:
       type: object
     SearchResponseBody:
       properties:
+        complete:
+          type: boolean
         degraded:
           type: boolean
         degraded_reason:
           type: string
         mode:
+          type: string
+        next_cursor:
           type: string
         query:
           type: string
@@ -3968,17 +6059,49 @@ components:
           items:
             $ref: "#/components/schemas/SearchHit"
           type: array
+        total:
+          format: int64
+          type: integer
+        truncated:
+          type: boolean
       required:
         - query
         - mode
         - results
+        - complete
+        - truncated
+      type: object
+    SetProjectAccessRequestBody:
+      additionalProperties: false
+      properties:
+        revision:
+          format: int64
+          minimum: 0
+          type: integer
+        team_uids:
+          items:
+            type: string
+          maxItems: 256
+          type: array
+        visibility:
+          enum:
+            - all
+            - teams
+          type: string
+      required:
+        - visibility
+        - team_uids
       type: object
     ShowIssueOut:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         body:
           type: string
@@ -4023,7 +6146,11 @@ components:
           type: integer
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -4031,6 +6158,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
       required:
         - labels
@@ -4067,8 +6200,10 @@ components:
           type: array
         comments:
           items:
-            $ref: "#/components/schemas/Comment"
+            $ref: "#/components/schemas/CommentOut"
           type: array
+        comments_truncated:
+          type: boolean
         issue:
           $ref: "#/components/schemas/ShowIssueOut"
         labels:
@@ -4129,6 +6264,18 @@ components:
       required:
         - recurrence
       type: object
+    ShowTeamResponseBody:
+      properties:
+        members:
+          items:
+            type: string
+          type: array
+        team:
+          $ref: "#/components/schemas/Team"
+      required:
+        - team
+        - members
+      type: object
     SkipFederationQuarantineRequestBody:
       additionalProperties: false
       properties:
@@ -4138,6 +6285,62 @@ components:
           type: string
       required:
         - actor
+      type: object
+    Summary:
+      additionalProperties: false
+      properties:
+        input_tokens:
+          format: int64
+          type: integer
+        message:
+          type: string
+        output_tokens:
+          format: int64
+          type: integer
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+      type: object
+    SummaryResponse:
+      properties:
+        input_tokens:
+          format: int64
+          type: integer
+        message:
+          type: string
+        output_tokens:
+          format: int64
+          type: integer
+        version:
+          format: int64
+          type: integer
+      required:
+        - version
+      type: object
+    Team:
+      properties:
+        name:
+          type: string
+        revision:
+          format: int64
+          type: integer
+        uid:
+          type: string
+      required:
+        - uid
+        - name
+        - revision
+      type: object
+    TeamResponseBody:
+      properties:
+        event:
+          $ref: "#/components/schemas/Event"
+        team:
+          $ref: "#/components/schemas/Team"
+      required:
+        - team
       type: object
     TokenOut:
       properties:
@@ -4211,14 +6414,80 @@ components:
         - project_uid
         - root_issue_uid
       type: object
+    Transcript:
+      additionalProperties: false
+      properties:
+        agent:
+          enum:
+            - claude
+            - codex
+          type: string
+        session_id:
+          type: string
+        url:
+          type: string
+      required:
+        - agent
+        - session_id
+      type: object
+    Trigger:
+      additionalProperties: false
+      properties:
+        at:
+          type: string
+        cron:
+          type: string
+        interval_seconds:
+          format: int64
+          type: integer
+        issue_uid:
+          type: string
+        kind:
+          type: string
+        lead_seconds:
+          format: int64
+          type: integer
+        timezone:
+          type: string
+      required:
+        - kind
+      type: object
+    TriggerResponse:
+      properties:
+        at:
+          type: string
+        cron:
+          type: string
+        interval_seconds:
+          format: int64
+          type: integer
+        issue_uid:
+          type: string
+        kind:
+          type: string
+        lead_seconds:
+          format: int64
+          type: integer
+        timezone:
+          type: string
+      required:
+        - kind
+      type: object
     UICapabilities:
       properties:
+        access_admin:
+          type: boolean
+        account:
+          type: string
         actor_policy:
           type: string
         allowed_actions:
           items:
             type: string
           type: array
+        auth_kind:
+          description: How this request authenticated; matches the instance auth kind. Never contains credentials.
+          type: string
         close_requires_evidence:
           type: boolean
         expires_at:
@@ -4298,10 +6567,14 @@ components:
       type: object
     UIIssue:
       properties:
+        accountable_actor:
+          type: string
         assignment_expires_on:
           format: date-time
           type: string
         author:
+          type: string
+        authority_uid:
           type: string
         body:
           type: string
@@ -4354,7 +6627,11 @@ components:
           type: string
         short_id:
           type: string
+        source_actor:
+          type: string
         status:
+          type: string
+        teammate:
           type: string
         title:
           type: string
@@ -4362,6 +6639,12 @@ components:
           type: string
         updated_at:
           format: date-time
+          type: string
+        verification:
+          enum:
+            - verified
+            - pending
+            - legacy
           type: string
       required:
         - project_name
@@ -4523,7 +6806,7 @@ components:
       properties:
         comments:
           items:
-            $ref: "#/components/schemas/Comment"
+            $ref: "#/components/schemas/CommentOut"
           type: array
         history:
           items:
@@ -4602,7 +6885,7 @@ components:
       type: object
 info:
   title: kata
-  version: 0.24.0
+  version: 0.29.0
 openapi: 3.0.3
 paths:
   /api/v1/audit/closes:
@@ -4847,6 +7130,22 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
+  /api/v1/doctor:
+    get:
+      operationId: doctor
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DoctorResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
   /api/v1/events:
     get:
       operationId: pollEvents
@@ -4870,6 +7169,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/PollEventsBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -4914,6 +7220,81 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
       summary: Stream events
+  /api/v1/federation/bridges:
+    post:
+      operationId: connectFederationBridge
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectFederationBridgeRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationBridgeBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+      summary: Connect one project to a configured hub
+  /api/v1/federation/bridges/{project_name}:
+    get:
+      operationId: getFederationBridgeStatus
+      parameters:
+        - in: path
+          name: project_name
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationBridgeStatusBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+      summary: Read one local bridge's recorded connection state
+  /api/v1/federation/bridges/{project_name}/disconnect:
+    post:
+      operationId: disconnectFederationBridge
+      parameters:
+        - in: path
+          name: project_name
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DisconnectFederationBridgeRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationBridgeDisconnectResult"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+      summary: Revoke a selected bridge grant and detach its local replica
   /api/v1/federation/enrollments:
     get:
       operationId: listFederationEnrollments
@@ -4931,7 +7312,7 @@ paths:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
     post:
-      description: Creates a hub-side transport grant. When the request includes a caller-supplied token, an exact retry returns the same active enrollment; reusing that token for different attributes or after revocation returns 409.
+      description: Creates a hub-side transport grant. Database account tokens must include relay configuration so the grant remains bound to the account credential; legacy grants require daemon-owner authorization. When the request includes a caller-supplied token, an exact retry returns the same active enrollment; reusing that token for different attributes or after revocation returns 409.
       operationId: createFederationEnrollment
       requestBody:
         content:
@@ -4955,7 +7336,7 @@ paths:
       summary: Create a federation enrollment
   /api/v1/federation/enrollments/actions/rotate:
     post:
-      description: Transactionally revokes active project-scoped grants for the spoke and installs the caller-supplied replacement token. After canonical capability normalization and token-authenticated actor resolution, an exact replay with the same replacement token, spoke instance, project, canonical capabilities, resolved actor, and adoption policy returns the same active enrollment. An attribute mismatch or revoked replacement enrollment returns 409 with code federation_enrollment_token_conflict.
+      description: Transactionally revokes active project-scoped grants for the spoke and installs the caller-supplied replacement token. Database account tokens cannot rotate legacy grants; use relay enrollment credentials so issuer expiry and revocation remain enforced. After canonical capability normalization and token-authenticated actor resolution, an exact replay with the same replacement token, spoke instance, project, canonical capabilities, resolved actor, and adoption policy returns the same active enrollment. An attribute mismatch or revoked replacement enrollment returns 409 with code federation_enrollment_token_conflict.
       operationId: rotateFederationEnrollment
       requestBody:
         content:
@@ -5084,6 +7465,59 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
+  /api/v1/federation/replicas/{project_uid}/actions/configure-signing:
+    post:
+      operationId: configureFederationSigning
+      parameters:
+        - in: path
+          name: project_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigureFederationSigningRequestBody"
+        required: true
+      responses:
+        "204":
+          description: No Content
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/federation/root-keys/{project_name}/repin:
+    post:
+      operationId: repinFederationRootKey
+      parameters:
+        - in: path
+          name: project_name
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepinFederationRootKeyRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationRootKeyRepinResult"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+      summary: Pin a root project to this daemon's loaded root signing key
   /api/v1/federation/status:
     get:
       operationId: getFederationStatus
@@ -5142,6 +7576,30 @@ paths:
     get:
       operationId: listAllIssues
       parameters:
+        - description: Restrict to these positive project IDs; mutually exclusive with project_id
+          explode: true
+          in: query
+          name: project_ids
+          schema:
+            description: Restrict to these positive project IDs; mutually exclusive with project_id
+            items:
+              format: int64
+              type: integer
+            type: array
+        - description: Opaque next_cursor from a matching stable-order page
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque next_cursor from a matching stable-order page
+            type: string
+        - description: Count all matching issues, ignoring cursor and limit
+          explode: false
+          in: query
+          name: include_total
+          schema:
+            description: Count all matching issues, ignoring cursor and limit
+            type: boolean
         - explode: false
           in: query
           name: project_id
@@ -5157,19 +7615,19 @@ paths:
               - closed
               - ""
             type: string
-        - description: exact priority filter (0..4); empty = no filter
+        - description: exact priority filter (0..4 or none for unset); empty = no filter
           explode: false
           in: query
           name: priority
           schema:
-            description: exact priority filter (0..4); empty = no filter
+            description: exact priority filter (0..4 or none for unset); empty = no filter
             type: string
-        - description: include only priority <= this value (0..4); empty = no filter
+        - description: include only priority <= this value (0..4), excluding unset; empty = no filter
           explode: false
           in: query
           name: max_priority
           schema:
-            description: include only priority <= this value (0..4); empty = no filter
+            description: include only priority <= this value (0..4), excluding unset; empty = no filter
             type: string
         - explode: false
           in: query
@@ -5177,14 +7635,15 @@ paths:
           schema:
             format: int64
             type: integer
-        - description: oldest = created_at ascending, then id ascending; empty preserves the route default
+        - description: oldest = creation ascending; created = creation descending; both use id as tie-breaker; empty preserves the route default
           explode: false
           in: query
           name: sort
           schema:
-            description: oldest = created_at ascending, then id ascending; empty preserves the route default
+            description: oldest = creation ascending; created = creation descending; both use id as tie-breaker; empty preserves the route default
             enum:
               - oldest
+              - created
               - ""
             type: string
         - explode: false
@@ -5235,6 +7694,31 @@ paths:
     get:
       operationId: showIssueByUID
       parameters:
+        - explode: false
+          in: query
+          name: thread
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: inbound
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: kind
+          schema:
+            enum:
+              - reply
+              - confirm
+              - refute
+              - supersede
+            type: string
+        - explode: false
+          in: query
+          name: since
+          schema:
+            type: string
         - in: path
           name: uid
           required: true
@@ -5423,6 +7907,57 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
+  /api/v1/projects/{project_id}/access:
+    get:
+      operationId: getProjectAccess
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectAccessResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    put:
+      operationId: setProjectAccess
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetProjectAccessRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectAccessResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
   /api/v1/projects/{project_id}/actions/purge:
     post:
       operationId: purgeProject
@@ -5525,6 +8060,503 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
+  /api/v1/projects/{project_id}/cron/capabilities:
+    get:
+      operationId: getCronCapabilities
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronCapabilitiesResponseBody"
+          description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/jobs:
+    get:
+      operationId: listCronJobs
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - explode: false
+          in: query
+          name: include_deleted
+          schema:
+            type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListCronJobsResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    post:
+      operationId: createCronJob
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutCronJobBody"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronJobResponseBody"
+          description: Created
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/jobs/{cron_uid}:
+    delete:
+      operationId: archiveCronJob
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CronDefinitionActionBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronJobResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    get:
+      operationId: showCronJob
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronJobResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    put:
+      operationId: replaceCronJob
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutCronJobBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronJobResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/jobs/{cron_uid}/restore:
+    post:
+      operationId: restoreCronJob
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CronDefinitionActionBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronJobResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/runs:
+    get:
+      operationId: listCronRuns
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - explode: false
+          in: query
+          name: job_uid
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: limit
+          schema:
+            format: int64
+            maximum: 100
+            minimum: 0
+            type: integer
+        - explode: false
+          in: query
+          name: before_uid
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronRunsResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/runs/{run_uid}:
+    get:
+      operationId: showCronRun
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: run_uid
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronRunResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    put:
+      operationId: observeCronRun
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: run_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObserveCronRunBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObserveCronRunResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/workflows:
+    get:
+      operationId: listCronWorkflows
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - explode: false
+          in: query
+          name: include_deleted
+          schema:
+            type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListCronWorkflowsResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    post:
+      operationId: createCronWorkflow
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutCronWorkflowBody"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronWorkflowResponseBody"
+          description: Created
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/workflows/{cron_uid}:
+    delete:
+      operationId: archiveCronWorkflow
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CronDefinitionActionBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronWorkflowResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    get:
+      operationId: showCronWorkflow
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronWorkflowResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    put:
+      operationId: replaceCronWorkflow
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutCronWorkflowBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronWorkflowResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/cron/workflows/{cron_uid}/restore:
+    post:
+      operationId: restoreCronWorkflow
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: cron_uid
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CronDefinitionActionBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronWorkflowResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
   /api/v1/projects/{project_id}/digest:
     get:
       operationId: digestProject
@@ -5595,6 +8627,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/PollEventsBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -5618,6 +8657,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProjectFederationBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -5647,6 +8693,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProjectFederationBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -5657,6 +8710,10 @@ paths:
     get:
       operationId: pollFederationProjectEvents
       parameters:
+        - in: header
+          name: X-Kata-Event-Features
+          schema:
+            type: string
         - in: path
           name: project_id
           required: true
@@ -5686,6 +8743,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/PollEventsBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -5696,6 +8760,10 @@ paths:
     post:
       operationId: ingestFederationProjectEvents
       parameters:
+        - in: header
+          name: X-Kata-Event-Features
+          schema:
+            type: string
         - in: path
           name: project_id
           required: true
@@ -5719,6 +8787,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/FederationIngestEventsBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -5729,6 +8804,10 @@ paths:
     get:
       operationId: getFederationProjectMetadata
       parameters:
+        - in: header
+          name: X-Kata-Event-Features
+          schema:
+            type: string
         - in: path
           name: project_id
           required: true
@@ -5746,6 +8825,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProjectFederationBody"
           description: OK
+          headers:
+            X-Kata-Event-Features:
+              schema:
+                type: string
+            X-Kata-Required-Event-Features:
+              schema:
+                type: string
         default:
           content:
             application/json:
@@ -5830,6 +8916,193 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
+  /api/v1/projects/{project_id}/federation/relay:
+    get:
+      operationId: offerRelayDeliveries
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: header
+          name: Authorization
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: stream
+          schema:
+            enum:
+              - events
+              - receipts
+              - artifacts
+            type: string
+        - explode: false
+          in: query
+          name: limit
+          schema:
+            default: 100
+            format: int64
+            maximum: 1024
+            minimum: 1
+            type: integer
+        - explode: true
+          in: query
+          name: artifact_digest
+          schema:
+            items:
+              type: string
+            maxItems: 32
+            type: array
+        - explode: false
+          in: query
+          name: epoch
+          schema:
+            format: int64
+            minimum: 0
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayBatchResponse"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/federation/relay/reset:
+    get:
+      operationId: getRelayReset
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: header
+          name: Authorization
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayResetCheckpoint"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/federation/relay:accept:
+    post:
+      operationId: acceptRelayDeliveries
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: header
+          name: Authorization
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelayBatch"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayAcceptance"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/federation/relay:ack:
+    post:
+      operationId: ackRelayDeliveries
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: header
+          name: Authorization
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelayAckRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayAckResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/projects/{project_id}/federation/relay:disconnect:
+    post:
+      operationId: disconnectRelayEnrollment
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: header
+          name: Authorization
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DisconnectRelayRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DisconnectRelayResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+      summary: Revoke only the presented relay transport grant
   /api/v1/projects/{project_id}/federation/status:
     get:
       operationId: getProjectFederationStatus
@@ -6016,6 +9289,20 @@ paths:
     get:
       operationId: listIssues
       parameters:
+        - description: Opaque next_cursor from a matching stable-order page
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque next_cursor from a matching stable-order page
+            type: string
+        - description: Count all matching issues, ignoring cursor and limit
+          explode: false
+          in: query
+          name: include_total
+          schema:
+            description: Count all matching issues, ignoring cursor and limit
+            type: boolean
         - in: path
           name: project_id
           required: true
@@ -6031,19 +9318,19 @@ paths:
               - closed
               - ""
             type: string
-        - description: exact priority filter (0..4); empty = no filter
+        - description: exact priority filter (0..4 or none for unset); empty = no filter
           explode: false
           in: query
           name: priority
           schema:
-            description: exact priority filter (0..4); empty = no filter
+            description: exact priority filter (0..4 or none for unset); empty = no filter
             type: string
-        - description: include only priority <= this value (0..4); empty = no filter
+        - description: include only priority <= this value (0..4), excluding unset; empty = no filter
           explode: false
           in: query
           name: max_priority
           schema:
-            description: include only priority <= this value (0..4); empty = no filter
+            description: include only priority <= this value (0..4), excluding unset; empty = no filter
             type: string
         - explode: false
           in: query
@@ -6051,14 +9338,15 @@ paths:
           schema:
             format: int64
             type: integer
-        - description: oldest = created_at ascending, then id ascending; empty preserves the route default
+        - description: oldest = creation ascending; created = creation descending; both use id as tie-breaker; empty preserves the route default
           explode: false
           in: query
           name: sort
           schema:
-            description: oldest = created_at ascending, then id ascending; empty preserves the route default
+            description: oldest = creation ascending; created = creation descending; both use id as tie-breaker; empty preserves the route default
             enum:
               - oldest
+              - created
               - ""
             type: string
         - explode: false
@@ -6108,6 +9396,12 @@ paths:
     post:
       operationId: createIssue
       parameters:
+        - description: Client interface for action telemetry (web, tui, or cli); other values are ignored.
+          in: header
+          name: X-Kata-Surface
+          schema:
+            description: Client interface for action telemetry (web, tui, or cli); other values are ignored.
+            type: string
         - description: "Numeric project ID or name:<project name>; name: alone requires an alias"
           in: path
           name: project_id
@@ -6159,6 +9453,31 @@ paths:
     get:
       operationId: showIssue
       parameters:
+        - explode: false
+          in: query
+          name: thread
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: inbound
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: kind
+          schema:
+            enum:
+              - reply
+              - confirm
+              - refute
+              - supersede
+            type: string
+        - explode: false
+          in: query
+          name: since
+          schema:
+            type: string
         - in: path
           name: project_id
           required: true
@@ -6320,6 +9639,12 @@ paths:
     post:
       operationId: closeIssue
       parameters:
+        - description: Client interface for action telemetry (web, tui, or cli); other values are ignored.
+          in: header
+          name: X-Kata-Surface
+          schema:
+            description: Client interface for action telemetry (web, tui, or cli); other values are ignored.
+            type: string
         - in: path
           name: project_id
           required: true
@@ -7477,6 +10802,64 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
           description: Error
+  /api/v1/projects/{project_id}/issues/{ref}/planning-dates:
+    get:
+      operationId: issuePlanningDates
+      parameters:
+        - explode: false
+          in: query
+          name: thread
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: inbound
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: kind
+          schema:
+            enum:
+              - reply
+              - confirm
+              - refute
+              - supersede
+            type: string
+        - explode: false
+          in: query
+          name: since
+          schema:
+            type: string
+        - in: path
+          name: project_id
+          required: true
+          schema:
+            format: int64
+            type: integer
+        - in: path
+          name: ref
+          required: true
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: include_deleted
+          schema:
+            type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuePlanningDates"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
   /api/v1/projects/{project_id}/labels:
     get:
       operationId: listLabels
@@ -7806,6 +11189,23 @@ paths:
       description: Explicit semantic/hybrid modes return a validation error (400) when a configured embedding credential source is unusable or the provider rejects authentication or access. Default search returns lexical results with degraded_reason instead. Transient vector failures return unavailable (503) in explicit modes.
       operationId: searchIssues
       parameters:
+        - description: Continuation for explicit lexical search with sort=oldest
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Continuation for explicit lexical search with sort=oldest
+            type: string
+        - description: oldest selects exhaustive creation-ordered lexical pages; omit for relevance ranking
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: oldest selects exhaustive creation-ordered lexical pages; omit for relevance ranking
+            enum:
+              - oldest
+              - ""
+            type: string
         - description: Issue status; omit to search open and closed issues
           explode: false
           in: query
@@ -7958,6 +11358,139 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadyGlobalResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/teams:
+    get:
+      operationId: listTeams
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListTeamsResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    post:
+      operationId: createTeam
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTeamRequestBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/teams/{team_uid}:
+    delete:
+      operationId: deleteTeam
+      parameters:
+        - in: path
+          name: team_uid
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessAdministrationResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    get:
+      operationId: showTeam
+      parameters:
+        - in: path
+          name: team_uid
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShowTeamResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+  /api/v1/teams/{team_uid}/members/{actor}:
+    delete:
+      operationId: removeTeamMember
+      parameters:
+        - in: path
+          name: team_uid
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: actor
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessAdministrationResponseBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+    put:
+      operationId: addTeamMember
+      parameters:
+        - in: path
+          name: team_uid
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: actor
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessAdministrationResponseBody"
           description: OK
         default:
           content:
@@ -8228,3 +11761,26 @@ paths:
         "304":
           description: Snapshot unchanged
       summary: Read a coherent browser snapshot
+  /api/v1/ui/telemetry:
+    post:
+      operationId: captureTelemetryEvent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CaptureTelemetryEventRequestBody"
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureTelemetryEventResponseBody"
+          description: Accepted
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+      summary: Report a browser telemetry event

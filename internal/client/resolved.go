@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"go.kenn.io/kata/internal/config"
@@ -66,7 +67,10 @@ type ResolvedDaemon struct {
 	// Named catalog entries can be local or remote while sharing one public
 	// source enum. Retain that distinction so Running reproduces the exact
 	// RunningDaemon returned by the credential-free named locator.
-	namedRemote bool
+	namedRemote     bool
+	credentialError error
+	persistedAuth   bool
+	implicitToken   bool
 }
 
 // ConfiguredRemote reports whether resolution selected configured remote
@@ -94,6 +98,7 @@ func (d ResolvedDaemon) Running() RunningDaemon {
 		Network:          d.Network,
 		Scheme:           d.Scheme,
 		ConfiguredRemote: d.ConfiguredRemote(),
+		PersistedAuth:    d.persistedAuth,
 	}
 }
 
@@ -109,18 +114,25 @@ func (d ResolvedDaemon) WithRunning(running RunningDaemon) ResolvedDaemon {
 	refreshed.LocalProfile = d.LocalProfile
 	refreshed.profileConfig = d.profileConfig
 	refreshed.SourcePath = d.SourcePath
-	return refreshed
+	refreshed.credentialError = d.credentialError
+	refreshed.implicitToken = d.implicitToken
+	if d.implicitToken && !running.PersistedAuth {
+		refreshed.Token = ""
+		refreshed.implicitToken = false
+	}
+	return refreshed.withPersistedAuth()
 }
 
 func resolvedForRunning(source DaemonSource, name string, running RunningDaemon) ResolvedDaemon {
 	resolved := ResolvedDaemon{
-		Source:      source,
-		Name:        name,
-		BaseURL:     running.BaseURL,
-		Address:     running.Address,
-		Network:     running.Network,
-		Scheme:      running.Scheme,
-		namedRemote: source == DaemonSourceNamedCatalog && running.ConfiguredRemote,
+		Source:        source,
+		Name:          name,
+		BaseURL:       running.BaseURL,
+		Address:       running.Address,
+		Network:       running.Network,
+		Scheme:        running.Scheme,
+		namedRemote:   source == DaemonSourceNamedCatalog && running.ConfiguredRemote,
+		persistedAuth: running.PersistedAuth,
 	}
 	if running.Network == "unix" {
 		resolved.UnixSocket = running.Address
@@ -133,21 +145,47 @@ func resolvedForRunning(source DaemonSource, name string, running RunningDaemon)
 
 func (d ResolvedDaemon) withGlobalAuth() ResolvedDaemon {
 	auth := resolveAuthConfig()
+	d.credentialError = auth.CredentialError
 	d.Token = auth.Token
 	if override := authTokenEnvOverride(); override != "" {
 		d.Token = override
 	}
 	d.TrustPrivateNetwork = auth.TrustPrivateNetwork
+	return d.withPersistedAuth()
+}
+
+func (d ResolvedDaemon) withPersistedAuth() ResolvedDaemon {
+	if !d.persistedAuth || d.Token != "" || d.credentialError != nil {
+		return d
+	}
+	var home string
+	var err error
+	if d.LocalProfile != nil {
+		home = d.LocalProfile.Home
+	} else if d.Source == DaemonSourceLocalRuntime || (d.Source == DaemonSourceNamedCatalog && !d.namedRemote) {
+		home, err = config.KataHome()
+	} else {
+		return d
+	}
+	if err == nil {
+		d.Token, err = config.ReadPersistedAuthToken(home)
+		if err == nil && d.Token == "" {
+			err = fmt.Errorf("%w: local runtime's persisted auth token is missing", config.ErrCredentialSource)
+		}
+	}
+	d.credentialError = err
+	d.implicitToken = err == nil && d.Token != ""
 	return d
 }
 
-// GlobalAuthToken returns the bearer token selected by global auth
-// resolution: KATA_AUTH_TOKEN, then [auth].token.
-func GlobalAuthToken() string {
+// GlobalAuthCredential preserves selected-source failures for SDK transports.
+// It never discovers the implicit owner token from a local runtime.
+func GlobalAuthCredential() (string, error) {
 	if override := authTokenEnvOverride(); override != "" {
-		return override
+		return override, nil
 	}
-	return resolveAuthConfig().Token
+	auth := resolveAuthConfig()
+	return auth.Token, auth.CredentialError
 }
 
 func (d ResolvedDaemon) withRemoteTargetAuth(token string, allowInsecure bool) ResolvedDaemon {
@@ -166,9 +204,10 @@ func (d ResolvedDaemon) withLocalTargetAuth(token string) ResolvedDaemon {
 	d.Token = token
 	if d.Token == "" {
 		d.Token = auth.Token
+		d.credentialError = auth.CredentialError
 	}
 	d.TrustPrivateNetwork = auth.TrustPrivateNetwork
-	return d
+	return d.withPersistedAuth()
 }
 
 // EnsureResolvedInWorkspace selects a daemon and retains the policy selected
@@ -248,12 +287,28 @@ func PrepareResolvedNamed(ctx context.Context, name string) (ResolvedDaemon, err
 // version-checks a local daemon or opens storage. ok is false when no remote is configured and
 // no live local runtime exists.
 func DiscoverResolvedInWorkspace(ctx context.Context, workspaceStart string) (ResolvedDaemon, bool, error) {
+	return discoverResolvedInWorkspace(ctx, workspaceStart, liveDaemons, true)
+}
+
+// DiscoverResolvedReadOnlyInWorkspace resolves the same target as
+// DiscoverResolvedInWorkspace but never creates or repairs local runtime
+// metadata and defers local-profile identity verification until the caller
+// can apply a bounded transport. It is intended for diagnostics that promise
+// not to change files.
+func DiscoverResolvedReadOnlyInWorkspace(ctx context.Context, workspaceStart string) (ResolvedDaemon, bool, error) {
+	return discoverResolvedInWorkspace(ctx, workspaceStart, liveDaemonsReadOnly, false)
+}
+
+func discoverResolvedInWorkspace(ctx context.Context, workspaceStart string, scan liveDaemonScanner, verifyProfileIdentity bool) (ResolvedDaemon, bool, error) {
 	selection, err := InspectSelection(ctx, workspaceStart, "")
 	if err != nil {
 		return ResolvedDaemon{}, false, err
 	}
 	if selection.Profile != nil {
-		return discoverLocalProfile(ctx, selection)
+		if verifyProfileIdentity {
+			return discoverLocalProfileUsing(ctx, selection, scan)
+		}
+		return discoverLocalProfileUsingWithoutIdentityProbe(ctx, selection, scan)
 	}
 	if resolved, ok, err := resolveRemoteSelection(ctx, workspaceStart, remoteRequestTarget); err != nil || ok {
 		return resolved, ok, err
@@ -262,14 +317,24 @@ func DiscoverResolvedInWorkspace(ctx context.Context, workspaceStart string) (Re
 	if err != nil {
 		return ResolvedDaemon{}, false, err
 	}
-	return DiscoverResolved(ctx, namespace.DataDir)
+	return discoverResolved(ctx, namespace.DataDir, scan)
 }
 
 // DiscoverResolved returns the first live local runtime with its exact
 // endpoint and preserves store, cancellation, and unreachable-daemon errors.
 func DiscoverResolved(ctx context.Context, dataDir string) (ResolvedDaemon, bool, error) {
+	return discoverResolved(ctx, dataDir, liveDaemons)
+}
+
+// DiscoverResolvedReadOnly finds a live local runtime without creating or
+// repairing runtime metadata. Diagnostics use this to preserve file state.
+func DiscoverResolvedReadOnly(ctx context.Context, dataDir string) (ResolvedDaemon, bool, error) {
+	return discoverResolved(ctx, dataDir, liveDaemonsReadOnly)
+}
+
+func discoverResolved(ctx context.Context, dataDir string, scan liveDaemonScanner) (ResolvedDaemon, bool, error) {
 	var unreachable error
-	for candidate, err := range liveDaemons(ctx, dataDir) {
+	for candidate, err := range scan(ctx, dataDir) {
 		if err == nil {
 			return localRuntimeResolved(candidate), true, nil
 		}
@@ -288,15 +353,45 @@ func DiscoverResolved(ctx context.Context, dataDir string) (ResolvedDaemon, bool
 // starting a local daemon or opening storage. A configured local entry with no live runtime
 // returns the zero value and no error while preserving all resolver errors.
 func DiscoverResolvedNamed(ctx context.Context, name string) (ResolvedDaemon, error) {
+	return discoverResolvedNamed(ctx, name, namedDiscoverOnly, liveDaemons)
+}
+
+// DiscoverResolvedNamedTargetReadOnly resolves a named catalog selection
+// without creating or repairing local runtime metadata and without probing a
+// remote endpoint. The caller can make the first request with its own bounded
+// transport.
+func DiscoverResolvedNamedTargetReadOnly(ctx context.Context, name string) (ResolvedDaemon, error) {
+	return discoverResolvedNamed(ctx, name, namedDiscoverTargetReadOnly, liveDaemonsReadOnly)
+}
+
+func discoverNamedLocalProfile(
+	ctx context.Context,
+	selection DaemonSelection,
+	mode namedResolutionMode,
+	scan liveDaemonScanner,
+) (ResolvedDaemon, bool, error) {
+	if mode == namedDiscoverTargetReadOnly {
+		return discoverLocalProfileUsingWithoutIdentityProbe(ctx, selection, scan)
+	}
+	return discoverLocalProfileUsing(ctx, selection, scan)
+}
+
+func discoverResolvedNamed(ctx context.Context, name string, mode namedResolutionMode, scan liveDaemonScanner) (ResolvedDaemon, error) {
 	selection, err := InspectSelection(ctx, "", name)
 	if err != nil {
 		return ResolvedDaemon{}, err
 	}
 	if selection.Profile != nil {
-		resolved, _, err := discoverLocalProfile(ctx, selection)
+		resolved, _, err := discoverNamedLocalProfile(ctx, selection, mode, scan)
 		return resolved, err
 	}
-	target, ok, err := discoverNamedDaemonTarget(ctx, name)
+	var target namedDaemonTarget
+	var ok bool
+	if mode == namedDiscoverOnly {
+		target, ok, err = discoverNamedDaemonTarget(ctx, name)
+	} else {
+		target, ok, err = buildNamedDaemonTarget(ctx, name, mode)
+	}
 	if err != nil {
 		return ResolvedDaemon{}, err
 	}

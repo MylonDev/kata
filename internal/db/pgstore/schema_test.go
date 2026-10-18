@@ -7,6 +7,8 @@ import (
 	"sort"
 	"testing"
 
+	"go.kenn.io/kata/internal/db/pgstore/pgstoretest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kata/internal/db/pgstore"
@@ -67,6 +69,11 @@ func TestSchemaBootstrapRejectsExtensionsOutsidePublic(t *testing.T) {
 // Full constraint/index name parity with sqlitestore belongs in the later
 // conformance suite; this test pins the baseline acceptance subset.
 var expectedTables = []string{
+	"cron_jobs", "cron_workflows", "cron_runs",
+	"federation_embedding_artifacts",
+	"federation_relay_outbox", "federation_relay_inbox", "federation_relay_cursors",
+	"federation_root_keys", "federation_event_provenance", "federation_entity_provenance",
+	"teams", "team_memberships", "project_access_policies", "project_access_teams",
 	"api_tokens",
 	"comments",
 	"events",
@@ -114,23 +121,27 @@ var expectedTriggers = []string{
 // suite should compare names too; this subset checks arity so a missing FK is
 // caught without forcing name parity.
 var expectedFKCounts = map[string]int{
-	"project_aliases":        1, // -> projects
-	"recurrences":            1, // -> projects (CASCADE)
-	"issues":                 2, // -> projects, -> recurrences
-	"comments":               1, // -> issues
-	"links":                  2, // -> issues x2 (project-independent edges, storage v16)
-	"issue_labels":           1, // -> issues
-	"events":                 3, // -> projects, -> issues, -> issues (related)
-	"federation_bindings":    1, // -> projects
-	"federation_sync_status": 1, // -> projects
-	"federation_quarantine":  1, // -> projects
-	"federation_enrollments": 1, // -> projects
-	"issue_claims":           2, // -> projects, -> issues
-	"pending_claim_requests": 2, // -> projects, -> issues
-	"issues_search":          1, // -> issues (CASCADE)
-	"import_mappings":        4, // -> projects, issues, comments, links
-	"external_root_bindings": 3, // -> projects, issues, import_mappings
-	"external_field_states":  2, // -> external_root_bindings, external_field_mappings
+	"teams": 0, "team_memberships": 1, "project_access_policies": 1, "project_access_teams": 2,
+	"project_aliases":          1, // -> projects
+	"recurrences":              1, // -> projects (CASCADE)
+	"issues":                   2, // -> projects, -> recurrences
+	"comments":                 1, // -> issues
+	"links":                    2, // -> issues x2 (project-independent edges, storage v16)
+	"issue_labels":             1, // -> issues
+	"events":                   3, // -> projects, -> issues, -> issues (related)
+	"federation_bindings":      1, // -> projects
+	"federation_sync_status":   1, // -> projects
+	"federation_quarantine":    1, // -> projects
+	"federation_enrollments":   2, // -> projects, api_tokens
+	"federation_relay_outbox":  1,
+	"federation_relay_inbox":   1,
+	"federation_relay_cursors": 1,
+	"issue_claims":             2, // -> projects, -> issues
+	"pending_claim_requests":   2, // -> projects, -> issues
+	"issues_search":            1, // -> issues (CASCADE)
+	"import_mappings":          4, // -> projects, issues, comments, links
+	"external_root_bindings":   3, // -> projects, issues, import_mappings
+	"external_field_states":    2, // -> external_root_bindings, external_field_mappings
 }
 
 // TestSchema_BaselineMatchesExpectedSurface opens a real PG and asserts the
@@ -142,7 +153,7 @@ func TestSchema_BaselineMatchesExpectedSurface(t *testing.T) {
 		t.Skip("requires postgres testcontainer")
 	}
 	ctx := context.Background()
-	dsn, cleanup := testenv.NewPostgresContainer(t, ctx)
+	dsn, cleanup := pgstoretest.NewDatabase(t, ctx)
 	t.Cleanup(cleanup)
 
 	s, err := pgstore.Open(ctx, dsn)
@@ -174,7 +185,7 @@ func TestSchema_BaselineMatchesExpectedSurface(t *testing.T) {
 		 WHERE table_schema = current_schema()
 		   AND table_name = 'comments'
 		 ORDER BY ordinal_position`)
-	assert.Equal(t, []string{"id", "uid", "issue_id", "author", "body", "created_at", "teammate"}, commentColumns)
+	assert.Equal(t, []string{"id", "uid", "issue_id", "author", "body", "created_at", "teammate", "reply_to_uid", "reply_kind", "edited_at"}, commentColumns)
 	var teammateNullable string
 	require.NoError(t, s.QueryRowContext(ctx, `
 		SELECT is_nullable

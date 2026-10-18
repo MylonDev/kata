@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,6 +22,9 @@ import (
 	"go.kenn.io/kata/internal/config"
 	"go.kenn.io/kata/internal/db"
 	hubclient "go.kenn.io/kata/internal/federation"
+	"go.kenn.io/kata/internal/federation/joincommand"
+	"go.kenn.io/kata/internal/federationsigning"
+	"go.kenn.io/kata/internal/httpurl"
 	"go.kenn.io/kata/internal/textsafe"
 	kataclient "go.kenn.io/kata/pkg/client"
 	"go.kenn.io/kata/pkg/client/generated"
@@ -34,6 +38,9 @@ func newFederationCmd() *cobra.Command {
 	}
 	cmd.AddCommand(
 		federationIdentityCmd(),
+		federationSigningCmd(),
+		federationEmbeddingRecipeCmd(),
+		federationBridgeCmd(),
 		federationEnableCmd(),
 		federationEnrollCmd(),
 		federationEnrollmentsCmd(),
@@ -41,6 +48,7 @@ func newFederationCmd() *cobra.Command {
 		federationLeaveCmd(),
 		federationRebindCmd(),
 		federationRevokeCmd(),
+		federationRootKeyCmd(),
 		federationStatusCmd(),
 		federationQuarantineCmd(),
 		newFederationLeaseCmd(),
@@ -127,6 +135,7 @@ func federationEnrollCmd() *cobra.Command {
 	var hubURL string
 	var capabilities string
 	var token string
+	var hubTokenEnv string
 	var actor string
 	var allowInsecure bool
 	var adoptExistingFlag bool
@@ -159,10 +168,11 @@ func federationEnrollCmd() *cobra.Command {
 				}
 			}
 			hubBaseURL := strings.TrimRight(hubURL, "/")
-			hubClient, err := federationEnrollHTTPClient(ctx, hubBaseURL, allowInsecure)
+			hubClient, effectiveAllowInsecure, err := federationEnrollHTTPClientPolicy(ctx, hubBaseURL, allowInsecure, hubTokenEnv)
 			if err != nil {
 				return federationEnrollHTTPClientError(err)
 			}
+			allowInsecure = effectiveAllowInsecure
 			hub := hubAPI(ctx, hubBaseURL, hubClient)
 			requestActor := strings.TrimSpace(actor)
 			if requestActor == "" {
@@ -170,11 +180,11 @@ func federationEnrollCmd() *cobra.Command {
 			}
 			project, err := resolveFederationProject(hub, args, true, requestActor)
 			if err != nil {
-				return err
+				return federationEnrollHTTPClientError(err)
 			}
 			metadata, err := enableAndReadFederationMetadata(hub, project.ID, requestActor)
 			if err != nil {
-				return err
+				return federationEnrollHTTPClientError(err)
 			}
 			adoptExisting := adoptExistingFlag
 			if !adoptExisting && pushCapable {
@@ -196,10 +206,10 @@ func federationEnrollCmd() *cobra.Command {
 			}
 			callResp, callErr := apiClient.CreateFederationEnrollmentWithResponse(hub.ctx, &generated.CreateFederationEnrollmentRequestOptions{Body: &generated.CreateFederationEnrollmentBody{SpokeInstanceUID: spokeInstance, ProjectID: project.ID, Capabilities: internalCaps, Token: &token, Actor: &requestActor, AllowAdoptionSnapshotAuthors: &adoptExisting}})
 			if err := externalCLITransportError(callResp, callErr); err != nil {
-				return err
+				return federationEnrollHTTPClientError(err)
 			}
 			if err := externalCLIResponseError(callResp.StatusCode, callResp.Body, callErr); err != nil {
-				return err
+				return federationEnrollHTTPClientError(err)
 			}
 			bs := callResp.Body
 			var enrollment api.FederationEnrollmentOut
@@ -226,8 +236,9 @@ func federationEnrollCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&spokeInstance, "spoke-instance", "", "spoke instance UID from `kata federation identity`")
 	cmd.Flags().StringVar(&hubURL, "hub-url", "", "hub URL reachable by the spoke")
-	cmd.Flags().StringVar(&capabilities, "capabilities", "pull,push,lease", "comma-separated capabilities: pull,push,lease")
+	cmd.Flags().StringVar(&capabilities, "capabilities", "pull,push,lease", "comma-separated capabilities: pull,push,lease (claim is the API name for lease)")
 	cmd.Flags().StringVar(&token, "token", "", "explicit enrollment token (default: generated)")
+	cmd.Flags().StringVar(&hubTokenEnv, "hub-token-env", "", "environment variable containing the hub admin token (highest precedence)")
 	cmd.Flags().StringVar(&actor, "actor", "", "actor bound to this spoke enrollment")
 	cmd.Flags().BoolVar(&allowInsecure, "allow-insecure", false, "allow plaintext HTTP hub URL for enrollment and later spoke transport")
 	cmd.Flags().BoolVar(&adoptExistingFlag, "adopt-existing", false, "mark enrollment for adopting an existing spoke project")
@@ -235,22 +246,53 @@ func federationEnrollCmd() *cobra.Command {
 }
 
 func federationEnrollHTTPClient(ctx context.Context, hubBaseURL string, allowInsecure bool) (*http.Client, error) {
-	httpClient, err := clientpkg.NewHTTPClient(ctx, hubBaseURL, clientpkg.Opts{
-		Timeout:       envHTTPTimeout(defaultHTTPTimeout),
-		AllowInsecure: allowInsecure,
-	})
+	client, _, err := federationEnrollHTTPClientPolicy(ctx, hubBaseURL, allowInsecure, "")
+	return client, err
+}
+
+func federationEnrollHTTPClientPolicy(ctx context.Context, hubBaseURL string, allowInsecure bool, hubTokenEnv string) (*http.Client, bool, error) {
+	// Hub credentials come only from hub-specific catalog entries whose origin
+	// matches this target. The local daemon's global token never authorizes a hub.
+	cat, err := config.ReadDaemonCatalogAndAuthPolicy()
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	in := hubAuthInputs{hubURL: hubBaseURL, hubTokenEnv: hubTokenEnv, allowInsecure: allowInsecure}
+	if selected := catalogByName(cat, flags.Daemon); selected != nil {
+		// --daemon selects the spoke; reuse its credential only for the same hub endpoint.
+		selectedBaseURL, selectedErr := canonicalHubBaseURL(selected.URL)
+		targetBaseURL, hubErr := canonicalHubBaseURL(hubBaseURL)
+		if selectedErr == nil && hubErr == nil && selectedBaseURL == targetBaseURL {
+			in.hubName = selected.Name
+		}
+	}
+	auth, err := resolveHubAdminAuth(cat, in)
+	if err != nil {
+		return nil, false, err
+	}
+	allowInsecure = auth.allowInsecure
+	httpClient, err := hubAdminClient(ctx, auth)
+	if err != nil {
+		return nil, false, err
 	}
 	if err := clientpkg.ConfigureOriginPinnedRedirects(httpClient, hubBaseURL); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return httpClient, nil
+	effective, err := httpurl.EffectiveHTTPAllowInsecure(hubBaseURL, allowInsecure)
+	if err != nil {
+		return nil, false, err
+	}
+	return httpClient, effective, nil
 }
 
 func federationEnrollHTTPClientError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if cli, ok := errors.AsType[*cliError](err); ok && cli.HTTPStatus == http.StatusUnauthorized {
+		hint := *cli
+		hint.Message += "; pass --hub-token-env or configure a daemon catalog entry matching --hub-url; KATA_AUTH_TOKEN is for the selected daemon and is not sent to the hub"
+		return &hint
 	}
 	if strings.Contains(err.Error(), "refusing to attach bearer token to plaintext non-loopback URL") {
 		return fmt.Errorf("%w; for a trusted private/plain HTTP federation hub, rerun `kata federation enroll` with --allow-insecure", err)
@@ -268,8 +310,8 @@ func federationSpokeProjectExists(ctx context.Context, projectName, spokeInstanc
 // that project's UID. The UID is "" when the daemon's list payload predates
 // uid, in which case callers should fall back to the adoption default. This
 // probe deliberately keeps its spoke-specific client instead of dialDaemon:
-// during federation enroll, KATA_AUTH_TOKEN belongs to the hub and must not be
-// attached to the spoke. Requests still use daemonAPI once that client is built.
+// during federation enroll, spoke and hub credentials are resolved separately.
+// Requests still use daemonAPI once that client is built.
 func federationSpokeProjectUID(ctx context.Context, projectName, spokeInstance string) (string, bool, error) {
 	explicitDaemon, err := federationSpokeProbeExplicit(ctx)
 	if err != nil {
@@ -579,14 +621,16 @@ func federationRevokeCmd() *cobra.Command {
 
 func federationJoinCmd() *cobra.Command {
 	var bundle federationJoinBundle
+	var signingID, signingFile, signingEnv string
 	cmd := &cobra.Command{
 		Use:   "join",
 		Short: "join a hub project as a spoke",
+		Long:  "Join a hub project as a spoke.\n\n--project <name> is the local project name to bind on this spoke.\nRun the complete join command returned by federation enroll on the spoke.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			projectName := strings.TrimSpace(flags.Project)
 			if projectName == "" {
-				return &cliError{Message: "--project is required", Kind: kindValidation, ExitCode: ExitValidation}
+				return &cliError{Message: "--project <local project name> is required to bind the hub project on this spoke", Kind: kindValidation, ExitCode: ExitValidation}
 			}
 			bundle.ProjectName = projectName
 			if bundle.HubURL == "" || bundle.HubProjectID <= 0 || bundle.Token == "" {
@@ -613,6 +657,11 @@ func federationJoinCmd() *cobra.Command {
 			if err := validateFederationJoinCapabilities(internalCaps, bundle.PushEnabled); err != nil {
 				return err
 			}
+			source, err := signingSource(bundle.HubURL, signingID, signingFile, signingEnv)
+			if err != nil {
+				return err
+			}
+			bundle.Signing = source
 			ctx := cmd.Context()
 			if err := hydrateFederationJoinMetadata(ctx, &bundle); err != nil {
 				return err
@@ -635,7 +684,13 @@ func federationJoinCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			callResp, callErr := apiClient.CreateFederationReplicaWithResponse(a.ctx, &generated.CreateFederationReplicaRequestOptions{Body: &generated.CreateFederationReplicaBody{HubURL: strings.TrimRight(bundle.HubURL, "/"), HubProjectID: bundle.HubProjectID, HubProjectUID: bundle.HubProjectUID, ProjectName: bundle.ProjectName, ReplayHorizonEventID: bundle.ReplayHorizonEventID, BaselineThroughEventID: &bundle.BaselineThroughEventID, Token: &bundle.Token, Capabilities: &internalCaps, Actor: new(strings.TrimSpace(bundle.Actor)), AllowInsecure: &bundle.AllowInsecure, PushEnabled: &bundle.PushEnabled, AdoptExisting: &bundle.AdoptExisting}})
+			var signingKeyID, signingKeyFile, signingKeyEnv *string
+			if bundle.Signing != nil {
+				signingKeyID = &bundle.Signing.KeyID
+				signingKeyFile = &bundle.Signing.KeyFile
+				signingKeyEnv = &bundle.Signing.KeyEnv
+			}
+			callResp, callErr := apiClient.CreateFederationReplicaWithResponse(a.ctx, &generated.CreateFederationReplicaRequestOptions{Body: &generated.CreateFederationReplicaBody{HubURL: strings.TrimRight(bundle.HubURL, "/"), HubProjectID: bundle.HubProjectID, HubProjectUID: bundle.HubProjectUID, ProjectName: bundle.ProjectName, ReplayHorizonEventID: bundle.ReplayHorizonEventID, BaselineThroughEventID: &bundle.BaselineThroughEventID, Token: &bundle.Token, Capabilities: &internalCaps, Actor: new(strings.TrimSpace(bundle.Actor)), AllowInsecure: &bundle.AllowInsecure, PushEnabled: &bundle.PushEnabled, AdoptExisting: &bundle.AdoptExisting, SigningKeyID: signingKeyID, SigningKeyFile: signingKeyFile, SigningKeyEnv: signingKeyEnv}})
 			if err := externalCLITransportError(callResp, callErr); err != nil {
 				return err
 			}
@@ -652,13 +707,16 @@ func federationJoinCmd() *cobra.Command {
 			return printFederationJoin(cmd, bs)
 		},
 	}
+	cmd.Flags().StringVar(&signingID, "signing-key-id", "", "public signing key ID")
+	cmd.Flags().StringVar(&signingFile, "signing-key-file", "", "owner-only signing secret file on the spoke")
+	cmd.Flags().StringVar(&signingEnv, "signing-key-env", "", "signing secret environment variable on the spoke")
 	cmd.Flags().StringVar(&bundle.HubURL, "hub-url", "", "hub URL")
 	cmd.Flags().Int64Var(&bundle.HubProjectID, "hub-project-id", 0, "hub project ID")
 	cmd.Flags().StringVar(&bundle.HubProjectUID, "hub-project-uid", "", "hub project UID")
 	cmd.Flags().Int64Var(&bundle.ReplayHorizonEventID, "replay-horizon", 0, "hub replay horizon event ID")
 	cmd.Flags().Int64Var(&bundle.BaselineThroughEventID, "baseline-through", 0, "baseline-through event ID")
 	cmd.Flags().StringVar(&bundle.Token, "token", "", "enrollment token")
-	cmd.Flags().StringVar(&bundle.DisplayCapabilities, "capabilities", "pull,push,lease", "comma-separated capabilities: pull,push,lease")
+	cmd.Flags().StringVar(&bundle.DisplayCapabilities, "capabilities", "pull,push,lease", "comma-separated capabilities: pull,push,lease (claim is the API name for lease)")
 	cmd.Flags().StringVar(&bundle.Actor, "actor", "", "actor bound to this spoke")
 	cmd.Flags().BoolVar(&bundle.AllowInsecure, "allow-insecure", false, "allow plaintext HTTP hub hostnames for private overlay networks")
 	cmd.Flags().BoolVar(&bundle.PushEnabled, "push", false, "enable spoke push")
@@ -711,7 +769,7 @@ func federationLeaveCmd() *cobra.Command {
 		force         bool
 		localOnly     bool
 		hubName       string
-		hubToken      string
+		hubTokenEnv   string
 		allowInsecure bool
 		yes           bool
 	)
@@ -831,9 +889,9 @@ func federationLeaveCmd() *cobra.Command {
 						textsafe.Line(target.hubURL))
 				} else {
 					globals, err := revokeSpokeEnrollmentsOnHub(ctx, target, hubAuthInputs{
-						hubURL:   target.hubURL,
-						hubName:  hubName,
-						hubToken: hubToken,
+						hubURL:      target.hubURL,
+						hubName:     hubName,
+						hubTokenEnv: hubTokenEnv,
 						// Union of opt-ins: the binding/status flag (which can be
 						// lost with the credential during a partial-leave
 						// recovery) and the explicit leave-time flag.
@@ -872,7 +930,7 @@ func federationLeaveCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "with --delete, override the open-issue refusal")
 	cmd.Flags().BoolVar(&localOnly, "local-only", false, "skip the hub revoke when the hub is unreachable (leaves the token valid)")
 	cmd.Flags().StringVar(&hubName, "hub", "", "named daemon catalog entry for hub admin auth (its URL must match the binding's hub URL)")
-	cmd.Flags().StringVar(&hubToken, "hub-token", "", "explicit hub admin token (highest precedence)")
+	cmd.Flags().StringVar(&hubTokenEnv, "hub-token-env", "", "environment variable containing the hub admin token (highest precedence)")
 	cmd.Flags().BoolVar(&allowInsecure, "allow-insecure", false, "allow the hub revoke to send a bearer token to a plaintext HTTP hub hostname (private overlay networks); restores the join-time opt-in when it was lost with the credential")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the interactive confirmation")
 	return cmd
@@ -967,7 +1025,7 @@ func resolveSpokeForLeave(a daemonAPI, args []string) (spokeLeaveTarget, error) 
 // the caller warns about them. Any hub transport/auth failure aborts before
 // local teardown and instructs the operator to retry with --local-only.
 func revokeSpokeEnrollmentsOnHub(ctx context.Context, target spokeLeaveTarget, in hubAuthInputs) ([]int64, error) {
-	cat, err := config.ReadDaemonConfig()
+	cat, err := config.ReadDaemonCatalogAndAuthPolicy()
 	if err != nil {
 		return nil, err
 	}
@@ -1184,24 +1242,26 @@ func federationStatusCmd() *cobra.Command {
 }
 
 type federationJoinBundle struct {
-	HubURL                 string `json:"hub_url"`
-	HubProjectID           int64  `json:"hub_project_id"`
-	HubProjectUID          string `json:"hub_project_uid"`
-	ProjectName            string `json:"project_name"`
-	ReplayHorizonEventID   int64  `json:"replay_horizon_event_id"`
-	BaselineThroughEventID int64  `json:"baseline_through_event_id,omitzero"`
-	Token                  string `json:"token"`
-	Capabilities           string `json:"capabilities,omitempty"`
-	DisplayCapabilities    string `json:"-"`
-	Actor                  string `json:"actor,omitempty"`
-	AllowInsecure          bool   `json:"allow_insecure,omitzero"`
-	PushEnabled            bool   `json:"push_enabled,omitzero"`
-	AdoptExisting          bool   `json:"adopt_existing,omitzero"`
+	HubURL                 string                    `json:"hub_url"`
+	HubProjectID           int64                     `json:"hub_project_id"`
+	HubProjectUID          string                    `json:"hub_project_uid"`
+	ProjectName            string                    `json:"project_name"`
+	ReplayHorizonEventID   int64                     `json:"replay_horizon_event_id"`
+	BaselineThroughEventID int64                     `json:"baseline_through_event_id"`
+	Token                  string                    `json:"token"`
+	Capabilities           string                    `json:"capabilities,omitempty"`
+	DisplayCapabilities    string                    `json:"-"`
+	JoinCommand            string                    `json:"join_command"`
+	Actor                  string                    `json:"actor,omitempty"`
+	AllowInsecure          bool                      `json:"allow_insecure,omitzero"`
+	PushEnabled            bool                      `json:"push_enabled,omitzero"`
+	AdoptExisting          bool                      `json:"adopt_existing,omitzero"`
+	Signing                *federationsigning.Source `json:"-"`
 }
 
 var fetchFederationJoinMetadata = func(ctx context.Context, bundle federationJoinBundle) (api.ProjectFederationBody, error) {
 	client, err := hubclient.NewClient(ctx, bundle.HubURL, bundle.Token,
-		clientpkg.Opts{Timeout: envHTTPTimeout(defaultHTTPTimeout), AllowInsecure: bundle.AllowInsecure})
+		clientpkg.Opts{Timeout: envHTTPTimeout(defaultHTTPTimeout), AllowInsecure: bundle.AllowInsecure, FederationSigning: bundle.Signing})
 	if err != nil {
 		return api.ProjectFederationBody{}, err
 	}
@@ -1350,6 +1410,8 @@ func printFederationEnrollment(
 	enrollment api.FederationEnrollmentOut,
 	bundle federationJoinBundle,
 ) error {
+	bundle.JoinCommand = federationJoinCommand(bundle)
+	enrollment.Join = nil // The CLI exposes its own join bundle with the invoked binary name.
 	if currentOutputMode() == outputJSON {
 		return emitJSON(cmd.OutOrStdout(), struct {
 			Enrollment api.FederationEnrollmentOut `json:"enrollment"`
@@ -1364,14 +1426,29 @@ func printFederationEnrollment(
 		); err != nil {
 			return err
 		}
-		return writeAgentKVRow(cmd.OutOrStdout(),
-			agentRowField("join_command", federationJoinCommand(bundle)))
+		if bundle.JoinCommand == "" {
+			if err := writeAgentKVRow(cmd.OutOrStdout(), agentRowField("join_command", "")); err != nil {
+				return err
+			}
+			return writeAgentKVRow(cmd.OutOrStdout(), agentRowField(
+				"note", "join command unavailable: incomplete or invalid enrollment data; use --json to inspect join details",
+			))
+		}
+		return writeAgentKVRow(cmd.OutOrStdout(), agentRowField("join_command", bundle.JoinCommand))
 	}
+	if bundle.JoinCommand == "" {
+		// Preserve the issued credential so the operator can finish joining manually.
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), "join command unavailable: incomplete or invalid enrollment data; use the details below to join manually"); err != nil {
+			return err
+		}
+		return emitJSON(cmd.OutOrStdout(), bundle)
+	}
+
 	if flags.Quiet {
 		return nil
 	}
 	_, err := fmt.Fprintf(cmd.OutOrStdout(), "enrolled %s for %s\njoin: %s\n",
-		textsafe.Line(spokeInstance), textsafe.Line(projectName), federationJoinCommand(bundle))
+		textsafe.Line(spokeInstance), textsafe.Line(projectName), bundle.JoinCommand)
 	return err
 }
 
@@ -1540,29 +1617,17 @@ func validateFederationJoinCapabilities(capabilities string, pushEnabled bool) e
 }
 
 func federationJoinCommand(bundle federationJoinBundle) string {
-	args := []string{
-		invokedKataCommand(), "federation", "join",
-		"--project", bundle.ProjectName,
-		"--hub-url", bundle.HubURL,
-		"--hub-project-id", strconv.FormatInt(bundle.HubProjectID, 10),
-		"--token", bundle.Token,
-		"--capabilities", bundle.DisplayCapabilities,
-		"--actor", bundle.Actor,
+	command := joincommand.Build(api.FederationJoinInstructions{
+		HubURL: bundle.HubURL, HubProjectID: bundle.HubProjectID, HubProjectUID: bundle.HubProjectUID,
+		ProjectName: bundle.ProjectName, ReplayHorizonEventID: bundle.ReplayHorizonEventID,
+		BaselineThroughEventID: bundle.BaselineThroughEventID, Token: bundle.Token, Actor: bundle.Actor,
+		Capabilities: bundle.Capabilities, PushEnabled: bundle.PushEnabled,
+		AdoptExisting: bundle.AdoptExisting, AllowInsecure: bundle.AllowInsecure,
+	})
+	if command == "" {
+		return ""
 	}
-	if bundle.PushEnabled {
-		args = append(args, "--push")
-	}
-	if bundle.AllowInsecure {
-		args = append(args, "--allow-insecure")
-	}
-	if bundle.AdoptExisting {
-		args = append(args, "--adopt-existing")
-	}
-	quoted := make([]string, 0, len(args))
-	for _, arg := range args {
-		quoted = append(quoted, shellQuote(arg))
-	}
-	return strings.Join(quoted, " ")
+	return shellQuote(invokedKataCommand()) + strings.TrimPrefix(command, "kata")
 }
 
 func invokedKataCommand() string {
@@ -2016,6 +2081,18 @@ func printFederationStatus(cmd *cobra.Command, body api.FederationStatusBody) er
 			}
 			lines = append(lines, "provider: "+provider)
 		}
+		if status.RootSigningKey != "" {
+			lines = append(lines, "root signing key: "+formatRootSigningKeyStatus(status))
+		}
+		if status.RelayCheckpointError != "" {
+			lines = append(lines, "relay checkpoint: not measured; "+textsafe.Line(status.RelayCheckpointError))
+		}
+		if status.RelayCheckpointCapacity > 0 {
+			lines = append(lines, federationRelayCapacityLines(status)...)
+		}
+		if status.Embedding != nil {
+			lines = append(lines, federationEmbeddingLines(status.Embedding)...)
+		}
 		if status.CredentialExpiresAt != nil {
 			lines = append(lines, "access expires: "+formatFederationStatusTime(status.CredentialExpiresAt))
 		}
@@ -2082,6 +2159,30 @@ func formatFederationStatusError(at *time.Time, msg *string) string {
 	return at.UTC().Format(time.RFC3339) + " " + textsafe.Line(*msg)
 }
 
+func formatRootSigningKeyStatus(status api.FederationProjectStatus) string {
+	if status.RootSigningKey != "unavailable" {
+		return textsafe.Line(status.RootSigningKey)
+	}
+	return "unavailable; restore federation-root.key and restart the daemon, or run kata federation root-key repin --project " + textsafe.Line(status.ProjectName)
+}
+
+// federationRelayCapacityLines reports how close a root hub project is to the
+// relay checkpoint capacity that bounds new relay enrollments and resets.
+func federationRelayCapacityLines(status api.FederationProjectStatus) []string {
+	lines := []string{fmt.Sprintf("relay checkpoint: %s of %s", formatMiB(status.RelayCheckpointBytes), formatMiB(status.RelayCheckpointCapacity))}
+	switch {
+	case status.RelayCheckpointBytes > status.RelayCheckpointCapacity:
+		lines = append(lines, "warning: relay checkpoint exceeds capacity; new relay enrollments and resets are refused until issues are purged")
+	case status.RelayCheckpointBytes*10 >= status.RelayCheckpointCapacity*9:
+		lines = append(lines, "warning: relay checkpoint is within 10% of capacity; purge issues the project no longer needs before new relays are refused")
+	}
+	return lines
+}
+
+func formatMiB(bytes int64) string {
+	return fmt.Sprintf("%.1f MiB", float64(bytes)/float64(1<<20))
+}
+
 func formatFederationResetBlocker(blocker string) string {
 	if blocker == "" {
 		return "none"
@@ -2095,6 +2196,12 @@ func printFederationStatusAgent(cmd *cobra.Command, body api.FederationStatusBod
 		return err
 	}
 	for _, status := range body.Statuses {
+		var checkpointBytes, checkpointCapacity string
+		if status.RelayCheckpointCapacity > 0 {
+			checkpointBytes = strconv.FormatInt(status.RelayCheckpointBytes, 10)
+			checkpointCapacity = strconv.FormatInt(status.RelayCheckpointCapacity, 10)
+		}
+		checkpointError := status.RelayCheckpointError
 		if err := writeAgentKVRow(out,
 			agentRowField("project", status.ProjectName),
 			agentRowField("role", status.Role),
@@ -2112,10 +2219,38 @@ func printFederationStatusAgent(cmd *cobra.Command, body api.FederationStatusBod
 			agentRowField("enrollments", strconv.FormatInt(status.EnrollmentCount, 10)),
 			agentRowField("active_quarantine", strconv.FormatInt(status.ActiveQuarantineCount, 10)),
 			agentRowField("reset_blocker", formatFederationResetBlocker(status.ResetBlocker)),
+			agentOptionalRowField("root_signing_key", &status.RootSigningKey),
+			agentOptionalRowField("relay_checkpoint_bytes", &checkpointBytes),
+			agentOptionalRowField("relay_checkpoint_capacity_bytes", &checkpointCapacity),
+			agentOptionalRowField("relay_checkpoint_error", &checkpointError),
 			agentRowField("unresolved_violations", strconv.FormatInt(status.UnresolvedViolationCount, 10)),
 			agentRowField("recent_violations", strconv.FormatInt(status.RecentViolationCount, 10)),
 		); err != nil {
 			return err
+		}
+		if status.Embedding != nil {
+			e := status.Embedding
+			counts := e.ArtifactCounts()
+			producer := "none"
+			if e.Producer != nil {
+				producer = e.Producer.ProducerInstanceUID
+			}
+			if err := writeAgentKVRow(out,
+				agentRowField("embedding_project", status.ProjectName),
+				agentRowField("state", e.State),
+				agentRowField("reason", formatFederationStatusError(nil, &e.Reason)),
+				agentRowField("last_error", formatFederationStatusError(nil, &e.LastError)),
+				agentRowField("producer", producer),
+				agentRowField("generated", strconv.Itoa(counts["generated"])),
+				agentRowField("reused", strconv.Itoa(counts["reused"])),
+				agentRowField("incompatible", strconv.Itoa(counts["incompatible"])),
+				agentRowField("stored_unindexed", strconv.Itoa(counts["stored_unindexed"])),
+				agentRowField("retained", strconv.Itoa(len(e.Artifacts))),
+				agentRowField("limit", strconv.Itoa(e.ArtifactLimit)),
+				agentRowField("limited", strconv.FormatBool(e.Limited)),
+			); err != nil {
+				return err
+			}
 		}
 		for _, violation := range status.RecentViolations {
 			if err := writeAgentKVRow(out,

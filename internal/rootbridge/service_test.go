@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -239,7 +240,7 @@ func TestBindDeliversCommittedBindingBeforeImmediateReconcileReturns(t *testing.
 	var eventBeforeRelease db.Event
 	select {
 	case eventBeforeRelease = <-delivered:
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 	}
 	close(release)
 	got := <-done
@@ -1959,7 +1960,7 @@ func (c *fakeConnectorClient) WriteFields(_ context.Context, params connector.Wr
 		c.fieldValues = make(map[string]connector.FieldValue)
 	}
 	for fieldID := range params.Fields {
-		if expected, ok := params.Expected[fieldID]; !ok || c.fieldValues[fieldID] != expected {
+		if expected, ok := params.Expected[fieldID]; !ok || !reflect.DeepEqual(c.fieldValues[fieldID], expected) {
 			return connector.WriteFieldsResult{}, &connector.Error{Code: "field_conflict", Message: "field changed before write"}
 		}
 	}

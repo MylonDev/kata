@@ -19,8 +19,10 @@ import (
 	"go.kenn.io/kata/internal/api"
 	clientpkg "go.kenn.io/kata/internal/client"
 	"go.kenn.io/kata/internal/config"
+	"go.kenn.io/kata/internal/telemetry"
 	katauid "go.kenn.io/kata/internal/uid"
 	"go.kenn.io/kata/pkg/client/generated"
+	"golang.org/x/mod/semver"
 )
 
 // Client is the typed adapter the TUI uses to talk to the daemon. Errors
@@ -30,6 +32,19 @@ type Client struct {
 	hc                     *http.Client
 	refreshLocalHTTPClient func(context.Context) (*http.Client, error)
 	mu                     sync.RWMutex
+}
+
+type suppressIssueActionTelemetryKey struct{}
+
+func suppressIssueActionTelemetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, suppressIssueActionTelemetryKey{}, true)
+}
+
+func issueActionSurface(ctx context.Context) *string {
+	if ctx.Value(suppressIssueActionTelemetryKey{}) == true {
+		return nil
+	}
+	return new("tui")
 }
 
 // NewClient wraps a pre-built *http.Client with a typed daemon adapter.
@@ -120,6 +135,48 @@ func (c *Client) GetInstance(ctx context.Context) (InstanceInfo, error) {
 		}
 	}
 	return resp, nil
+}
+
+// ReportAppOpened sends app_opened with surface=tui to the connected daemon,
+// which applies its own allowlist and opt-out before anything leaves the machine.
+func (c *Client) ReportAppOpened(ctx context.Context) error {
+	return c.reportUsage(ctx, "app_opened", map[string]any{"surface": "tui"})
+}
+
+// ReportSessionEnded sends the completed terminal lifetime with an independent one-second deadline.
+func (c *Client) ReportSessionEnded(elapsed time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return c.reportUsage(ctx, "session_ended", map[string]any{"surface": "tui", "duration_bucket": telemetry.DurationBucket(elapsed)})
+}
+
+func (c *Client) reportUsage(ctx context.Context, event string, properties map[string]any) error {
+	apiClient, err := c.generatedClient()
+	if err != nil {
+		return err
+	}
+	wire, callErr := apiClient.CaptureTelemetryEventWithResponse(ctx, &generated.CaptureTelemetryEventRequestOptions{
+		Body: &generated.CaptureTelemetryEventBody{Event: event, Properties: properties},
+	})
+	if wire == nil {
+		return callErr
+	}
+	return decodeGeneratedResponse(wire.HTTPResponse, wire.Body, callErr, nil)
+}
+
+// ReportScreenViewed sends the visible screen to the connected daemon.
+func (c *Client) ReportScreenViewed(ctx context.Context, screen string) error {
+	apiClient, err := c.generatedClient()
+	if err != nil {
+		return err
+	}
+	wire, callErr := apiClient.CaptureTelemetryEventWithResponse(ctx, &generated.CaptureTelemetryEventRequestOptions{
+		Body: &generated.CaptureTelemetryEventBody{Event: "screen_viewed", Properties: map[string]any{"surface": "tui", "screen": screen}},
+	})
+	if wire == nil {
+		return callErr
+	}
+	return decodeGeneratedResponse(wire.HTTPResponse, wire.Body, callErr, nil)
 }
 
 // ListTokens returns the daemon's redacted credential audit inventory and
@@ -229,9 +286,9 @@ func (c *Client) CreateIssue(ctx context.Context, projectID int64, body CreateIs
 		}
 		payload.Links = append(payload.Links, item)
 	}
-	options := &generated.CreateIssueRequestOptions{PathParams: &generated.CreateIssuePath{ProjectID: fmt.Sprint(projectID)}, Body: payload}
+	options := &generated.CreateIssueRequestOptions{PathParams: &generated.CreateIssuePath{ProjectID: fmt.Sprint(projectID)}, Body: payload, Header: &generated.CreateIssueHeaders{XKataSurface: issueActionSurface(ctx)}}
 	if body.IdempotencyKey != "" {
-		options.Header = &generated.CreateIssueHeaders{IdempotencyKey: &body.IdempotencyKey}
+		options.Header.IdempotencyKey = &body.IdempotencyKey
 	}
 	apiClient, err := c.generatedClient()
 	if err != nil {
@@ -259,7 +316,7 @@ func (c *Client) Close(ctx context.Context, projectID int64, ref, actor string) 
 	if err != nil {
 		return nil, err
 	}
-	wire, callErr := apiClient.CloseIssueWithResponse(ctx, &generated.CloseIssueRequestOptions{PathParams: &generated.CloseIssuePath{ProjectID: projectID, Ref: ref}, Body: &generated.CloseIssueBody{Actor: &actor, Source: new(generated.CloseActionRequestBodySource("tui")), Reason: new(generated.CloseActionRequestBodyReason("done"))}})
+	wire, callErr := apiClient.CloseIssueWithResponse(ctx, &generated.CloseIssueRequestOptions{PathParams: &generated.CloseIssuePath{ProjectID: projectID, Ref: ref}, Header: &generated.CloseIssueHeaders{XKataSurface: issueActionSurface(ctx)}, Body: &generated.CloseIssueBody{Actor: &actor, Source: new(generated.CloseActionRequestBodySource("tui")), Reason: new(generated.CloseActionRequestBodyReason("done"))}})
 	if wire == nil {
 		return nil, callErr
 	}
@@ -293,6 +350,7 @@ func (c *Client) CloseWithEvidence(
 	}
 	wire, callErr := apiClient.CloseIssueWithResponse(ctx, &generated.CloseIssueRequestOptions{
 		PathParams: &generated.CloseIssuePath{ProjectID: projectID, Ref: ref}, Body: &payload,
+		Header: &generated.CloseIssueHeaders{XKataSurface: issueActionSurface(ctx)},
 	})
 	if wire == nil {
 		return nil, callErr
@@ -1204,4 +1262,38 @@ func decodeError(body []byte, status int, method, path string) error {
 		Message: env.Error.Message,
 		Hint:    env.Error.Hint,
 	}
+}
+
+// mutationPreflightError identifies a failure before a write request was sent.
+type mutationPreflightError struct{ error }
+
+func (e *mutationPreflightError) Unwrap() error { return e.error }
+
+// AddCommentReply sends an attributed typed reply with a retry-stable key.
+func (c *Client) AddCommentReply(ctx context.Context, projectID int64, ref, body, actor, target, kind string, force bool, key string) (*MutationResp, error) {
+	apiClient, err := c.generatedClient()
+	if err != nil {
+		return nil, &mutationPreflightError{err}
+	}
+	health, err := apiClient.Health(ctx)
+	if err != nil {
+		return nil, &mutationPreflightError{err}
+	}
+	reported := ""
+	if health.APISchemaVersion != nil {
+		reported = *health.APISchemaVersion
+	}
+	if !semver.IsValid("v"+reported) || semver.Compare("v"+reported, "v0.28.0") < 0 {
+		return nil, &mutationPreflightError{fmt.Errorf("typed replies require daemon API 0.28.0 or newer; upgrade the daemon")}
+	}
+	replyKind := generated.CommentRequestBodyKind(kind)
+	wire, callErr := apiClient.CreateCommentWithResponse(ctx, &generated.CreateCommentRequestOptions{PathParams: &generated.CreateCommentPath{ProjectID: fmt.Sprint(projectID), Ref: ref}, Body: &generated.CreateCommentBody{Actor: &actor, Body: body, ReplyTo: &target, Kind: &replyKind, Force: &force}, Header: &generated.CreateCommentHeaders{IdempotencyKey: &key}})
+	if wire == nil {
+		return nil, callErr
+	}
+	var resp MutationResp
+	if err := decodeGeneratedResponse(wire.HTTPResponse, wire.Body, callErr, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }

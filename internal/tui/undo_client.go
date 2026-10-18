@@ -69,6 +69,14 @@ func (c *undoClient) ListTokens(ctx context.Context) ([]TokenInfo, time.Time, er
 	return audit.ListTokens(ctx)
 }
 
+func (c *undoClient) ReportAppOpened(ctx context.Context) error {
+	reporter, ok := c.KataAPI.(appOpenedAPI)
+	if !ok {
+		return errors.New("telemetry client unavailable")
+	}
+	return reporter.ReportAppOpened(ctx)
+}
+
 // Writes wait until the model has recorded the preceding response. Undo must
 // refuse a busy client because its history entry was selected before waiting.
 func (c *undoClient) begin(ctx context.Context, wait bool) (*undoAttempt, error) {
@@ -284,5 +292,23 @@ func (c *undoClient) AddComment(ctx context.Context, projectID int64, ref, body,
 func (c *undoClient) ClaimTimedAssignment(ctx context.Context, projectID int64, ref, actor string, ttl time.Duration) (*MutationResp, error) {
 	return c.boundaryWrite(ctx, "timed assignment cannot be undone", func() (*MutationResp, error) {
 		return c.KataAPI.ClaimTimedAssignment(ctx, projectID, ref, actor, ttl)
+	})
+}
+
+func (c *undoClient) ReportScreenViewed(ctx context.Context, screen string) error {
+	reporter, ok := c.KataAPI.(screenViewedAPI)
+	if !ok {
+		return errors.New("telemetry client unavailable")
+	}
+	return reporter.ReportScreenViewed(ctx, screen)
+}
+
+func (c *undoClient) AddCommentReply(ctx context.Context, pid int64, ref, body, actor, target, kind string, force bool, key string) (*MutationResp, error) {
+	client, ok := c.KataAPI.(typedCommentAPI)
+	if !ok {
+		return nil, errors.New("client does not support typed comment replies")
+	}
+	return c.boundaryWrite(ctx, "comment addition cannot be undone", func() (*MutationResp, error) {
+		return client.AddCommentReply(ctx, pid, ref, body, actor, target, kind, force, key)
 	})
 }

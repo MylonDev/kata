@@ -52,6 +52,21 @@ describe('web daemon transport', () => {
     expect(paths).toEqual(['/api/v1/ui/daemons', '/api/v1/ui/session/local'])
   })
 
+  test('keeps browser telemetry on the serving daemon', async () => {
+    const upstream = vi.fn<typeof fetch>(async () => new Response('{}'))
+    const fetcher = createDaemonFetch(() => 'example-remote', upstream)
+
+    await fetcher('/api/v1/ui/telemetry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'app_opened' }),
+    })
+
+    const [input, init] = upstream.mock.calls[0]!
+    expect(new URL(String(input), window.location.origin).pathname).toBe('/api/v1/ui/telemetry')
+    expect(new Headers(init?.headers).get('X-Kata-Web-Daemon')).toBeNull()
+  })
+
   test('keeps credential audit on the source daemon', async () => {
     const upstream = vi.fn<typeof fetch>(async () => new Response('{}'))
     const fetcher = createDaemonFetch(() => 'example-remote', upstream)
@@ -61,6 +76,34 @@ describe('web daemon transport', () => {
     const [input, init] = upstream.mock.calls[0]!
     const request = new Request(new URL(String(input), window.location.origin), init)
     expect(new URL(request.url).pathname).toBe('/api/v1/tokens')
+    expect(request.headers.has('X-Kata-Web-Daemon')).toBe(false)
+  })
+
+  test('keeps team and visibility administration on the browser origin with a daemon selected', async () => {
+    const upstream = vi.fn<typeof fetch>(async () => new Response('{}'))
+    const fetcher = createDaemonFetch(() => 'example-remote', upstream)
+    const paths = [
+      '/api/v1/teams',
+      '/api/v1/teams/team-one/members/member-one',
+      '/api/v1/projects/7/access',
+    ]
+    for (const path of paths) await fetcher(path, { method: 'PUT' })
+    expect(
+      upstream.mock.calls.map(([input, init]) => {
+        const request = new Request(new URL(String(input), window.location.origin), init)
+        expect(request.headers.has('X-Kata-Web-Daemon')).toBe(false)
+        return new URL(request.url).pathname
+      }),
+    ).toEqual(paths)
+  })
+
+  test('keeps scoped project sync on the source origin with a daemon selected', async () => {
+    const upstream = vi.fn<typeof fetch>(async () => new Response('{}'))
+    const fetcher = createDaemonFetch(() => 'example-remote', upstream)
+    await fetcher('/api/v1/projects/7/federation/status')
+    const [input, init] = upstream.mock.calls[0]!
+    const request = new Request(new URL(String(input), window.location.origin), init)
+    expect(new URL(request.url).pathname).toBe('/api/v1/projects/7/federation/status')
     expect(request.headers.has('X-Kata-Web-Daemon')).toBe(false)
   })
 
@@ -100,6 +143,33 @@ describe('web daemon transport', () => {
       expect.objectContaining({ id: 'example-remote', auth: 'token', health: 'auth_required' }),
       expect.objectContaining({ id: 'example-legacy', health: 'upgrade_required' }),
     ])
+  })
+
+  test('retains explicit native local authority and treats absent local metadata as remote', async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json({
+        daemons: [
+          {
+            id: 'owner-target',
+            url: '',
+            default: true,
+            auth: 'none',
+            health: 'connected',
+            local: true,
+          },
+          {
+            id: 'other-target',
+            url: 'https://daemon.example',
+            default: false,
+            auth: 'token',
+            health: 'connected',
+          },
+        ],
+      }),
+    )
+    const daemons = await fetchWebDaemons(fetcher)
+    expect(daemons[0]).toMatchObject({ local: true })
+    expect(daemons[1]).toMatchObject({ local: false })
   })
 
   test('classifies authentication-required roster responses', async () => {

@@ -217,14 +217,14 @@ func TestBatch_StopsAtTheFirstFailingLine(t *testing.T) {
 
 	stdout, stderr, err := execBatch(t, env, dir, stdin, []string{"--agent"})
 
-	// A standalone `kata close <ref>` without a reason exits ExitInternal.
-	ce := requireCLIError(t, err, ExitInternal)
+	// A standalone `kata close <ref>` without a reason exits ExitUsage.
+	ce := requireCLIError(t, err, ExitUsage)
 	assert.Equal(t,
-		"line 2 (close): --reason is required (one of: done, wontfix, duplicate, superseded, audit-no-change)"+
+		"line 2 (close): close needs a reason: --done (with --commit, --pr, --test, or --reviewed), --wontfix, --duplicate-of <ref>, --superseded-by <ref>, or --audit-no-change"+
 			"; line 1 applied ("+ref+"); lines 3-4 not run; fix line 2 and rerun with --from-line 2",
 		ce.Message)
 	assert.Empty(t, stdout)
-	assert.Regexp(t, `^ERR batch internal: line 2 \(close\): --reason is required`, stderr)
+	assert.Regexp(t, `^ERR batch usage: line 2 \(close\): close needs a reason`, stderr)
 	assert.Equal(t, []string{"applied before the failure"}, batchCommentBodies(t, env, pid, ref))
 	assert.Empty(t, fetchIssueViaHTTP(t, env, pid, ref).Labels)
 }

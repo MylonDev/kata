@@ -18,6 +18,7 @@ const (
 	authHeader           = "Authorization"
 	pathPing             = "/api/v1/ping"
 	pathHealth           = "/api/v1/health"
+	pathDoctor           = "/api/v1/doctor"
 	pathEventsStreamPath = "/api/v1/events/stream"
 )
 
@@ -34,6 +35,9 @@ type authPolicy struct {
 	AllowUnauthenticatedPrivateNetworkWrites bool
 	InsecureReadonly                         bool
 	RequireTokenIdentity                     bool
+	// TrustedProxySession is set only by the browser-listener startup check
+	// after the listener matches the configured trusted-proxy allowlist.
+	TrustedProxySession bool
 
 	// SelfAuthenticatedRoutes is the set of routes whose handler owns
 	// authentication; the middleware must not pre-empt them with a daemon-token
@@ -63,7 +67,8 @@ func requireBearer(p authPolicy, tokenStores ...db.Storage) func(http.Handler) h
 			// Non-API paths reach the optional, public web-assets handler.
 			// Keep the static shell public; listener Host policy still wraps it.
 			if !strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api" &&
-				r.URL.Path != "/openapi.yaml" && r.URL.Path != "/openapi.json" {
+				r.URL.Path != "/openapi.yaml" && r.URL.Path != "/openapi.json" &&
+				!strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -76,6 +81,9 @@ func requireBearer(p authPolicy, tokenStores ...db.Storage) func(http.Handler) h
 				isWebSessionBootstrapRequest(r) {
 				next.ServeHTTP(w, r)
 				return
+			}
+			if p.Token == "" && p.AllowUnauthenticatedPrivateNetworkWrites && !p.InsecureReadonly {
+				r = r.WithContext(withUnauthenticatedPrivateNetworkRequest(r.Context()))
 			}
 			if p.RequireTokenIdentity && p.SelfAuthenticatedRoutes.matches(r) &&
 				hasBearerHeader(r.Header.Get(authHeader)) && tokenStore != nil {
@@ -127,9 +135,6 @@ func requireBearer(p authPolicy, tokenStores ...db.Storage) func(http.Handler) h
 					return
 				}
 				if !p.InsecureReadonly {
-					if p.AllowUnauthenticatedPrivateNetworkWrites {
-						r = r.WithContext(withUnauthenticatedPrivateNetworkRequest(r.Context()))
-					}
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -212,6 +217,7 @@ func isTokenAdminPath(path string) bool {
 //	Token != "" && !TrustPrivateNetwork                -> REFUSE (token would travel in cleartext)
 //	Token == "" && AllowUnauthenticatedPrivateNetworkWrites -> permit only on literal private IP binds
 //	Token == "" &&  InsecureReadonly                   -> permit (dev-only GET access)
+//	Token == "" && TrustedProxySession && TrustPrivateNetwork -> permit for its dedicated browser listener
 //	Token == "" && !InsecureReadonly                   -> REFUSE (would expose mutations to the LAN)
 //
 // The daemon does not terminate TLS, so a bearer token on plaintext non-
@@ -255,6 +261,9 @@ func checkAuthStartup(listen string, p authPolicy) error {
 			"tunnel via SSH or a TLS-terminating reverse proxy", listen)
 	}
 	if p.InsecureReadonly {
+		return nil
+	}
+	if p.TrustedProxySession && p.TrustPrivateNetwork {
 		return nil
 	}
 	return fmt.Errorf("non-loopback TCP listen %q is not supported — "+

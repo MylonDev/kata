@@ -43,9 +43,9 @@ func newRootCmd() *cobra.Command {
 	flags = globalFlags{}
 	runEEntered = false
 	errorCommandName = ""
+	cliUseTarget.Store(nil)
 	cmd := &cobra.Command{
 		Use:           "kata",
-		Short:         "kata — lightweight issue tracker for agents",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// The root is runnable only to serve the conventional `--version`
@@ -77,17 +77,22 @@ func newRootCmd() *cobra.Command {
 			flags.Mode = mode
 			return nil
 		},
+		// Cobra runs this only after the command's RunE succeeded.
+		PersistentPostRunE: func(cmd *cobra.Command, _ []string) error {
+			reportCLIUse(cmd)
+			return nil
+		},
 	}
 	cmd.PersistentFlags().Var(outputFormatFlag{values: &flags.Sel.formats},
-		"format", "output format: human|json|agent; contract for quickstart")
-	cmd.PersistentFlags().BoolVar(&flags.Sel.json, "json", false, "emit machine-readable JSON")
-	cmd.PersistentFlags().BoolVar(&flags.Sel.agent, "agent", false, "emit concise agent-readable text")
+		"format", "output mode: human (default), json, or agent; quickstart also accepts contract")
+	cmd.PersistentFlags().BoolVar(&flags.Sel.json, "json", false, "full JSON envelope for scripts")
+	cmd.PersistentFlags().BoolVar(&flags.Sel.agent, "agent", false, "agent output: an OK or ERR status line, then command-specific details (use in agent sessions)")
 	cmd.PersistentFlags().BoolVarP(&flags.Quiet, "quiet", "q", false, "suppress non-essential output")
 	cmd.PersistentFlags().String("teammate", "", "teammate attribution (default: $KATA_TEAMMATE; empty suppresses inheritance)")
 	cmd.PersistentFlags().StringVar(&flags.As, "as", "", "override actor (default: $KATA_AUTHOR > $USER > git > anonymous)")
 	cmd.PersistentFlags().StringVar(&flags.Workspace, "workspace", "", "path used for project resolution (default: cwd)")
-	cmd.PersistentFlags().StringVar(&flags.Project, "project", "", "project name for project-scoped commands")
-	cmd.PersistentFlags().StringVar(&flags.Daemon, "daemon", "", "named daemon catalog entry to target for this command")
+	cmd.PersistentFlags().StringVar(&flags.Project, "project", "", "project name (default: from .kata.toml at or above --workspace)")
+	cmd.PersistentFlags().StringVar(&flags.Daemon, "daemon", "", "named daemon catalog entry (default: KATA_SERVER, workspace, active_daemon, local)")
 	// Root-local, not persistent: `kata --version` is the conventional
 	// spelling, while `kata list --version` should stay an unknown flag.
 	// No `-v` shorthand: that spelling conventionally means verbose, and
@@ -141,6 +146,7 @@ func newRootCmd() *cobra.Command {
 		newWaitCmd(),
 		newSyncCmd(),
 		newFederationCmd(),
+		newCronCmd(),
 		newEventsCmd(),
 		newExportCmd(),
 		newImportCmd(),
@@ -149,9 +155,11 @@ func newRootCmd() *cobra.Command {
 		newQuickstartCmd(),
 		newWhoamiCmd(),
 		newHealthCmd(),
+		newDoctorCmd(),
 		newOpenAPICmd(),
 		newProjectsCmd(),
 		newTokensCmd(),
+		newTeamsCmd(),
 		newUICmd(),
 		newTUICmd(),
 		newUpdateCmd(),
@@ -159,6 +167,7 @@ func newRootCmd() *cobra.Command {
 		newWebAssetsCheckCmd(),
 	}
 	cmd.AddCommand(subs...)
+	applyRootHelp(cmd)
 	return cmd
 }
 
@@ -261,6 +270,7 @@ func emitJSONError(w io.Writer, err error, runEReached bool) {
 		Error struct {
 			Kind     errKind        `json:"kind"`
 			Code     string         `json:"code,omitempty"`
+			Hint     string         `json:"hint,omitempty"`
 			Message  string         `json:"message"`
 			ExitCode int            `json:"exit_code"`
 			Data     jsontext.Value `json:"data,omitempty"`
@@ -268,6 +278,7 @@ func emitJSONError(w io.Writer, err error, runEReached bool) {
 	}{}
 	env.Error.Kind = cli.Kind
 	env.Error.Code = cli.Code
+	env.Error.Hint = cli.Hint
 	env.Error.Message = cli.Message
 	env.Error.ExitCode = cli.ExitCode
 	env.Error.Data = cli.Data
@@ -282,6 +293,9 @@ func emitJSONError(w io.Writer, err error, runEReached bool) {
 func emitHumanError(w io.Writer, err error, runEReached bool) {
 	cli := cliErrorForErr(err, runEReached)
 	_, _ = fmt.Fprintln(w, "kata:", cli.Message) //nolint:gosec // G705: CLI stderr error text, not HTML.
+	if cli.Hint != "" {
+		_, _ = fmt.Fprintln(w, "hint:", cli.Hint)
+	}
 }
 
 func cliErrorForErr(err error, runEReached bool) *cliError {
@@ -327,36 +341,36 @@ func exitCodeForErr(err error, runEReached bool) int {
 	return exitCodeFor(err, runEReached)
 }
 
-// translateFlagError rewrites pflag's "unknown shorthand flag: 'N' in
-// -N..." message into a useful cliError when N is a digit, so users
-// who typed `kata show -1` get a clear pointer at the `--` separator
-// workaround (hammer-test finding #9) instead of a cryptic flag-parse
-// trace. All other flag errors pass through unchanged.
-//
-// The detection is intentionally narrow: we look for a leading digit
-// after the dash because that's the exact pflag message shape for the
-// negative-integer-as-positional case. Other "-x" flag typos still
-// produce pflag's regular message.
-func translateFlagError(_ *cobra.Command, err error) error {
+// translateFlagError adds command-specific help to unknown flags and keeps
+// the separator advice for negative numbers parsed as shorthand flags.
+func translateFlagError(cmd *cobra.Command, err error) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
 	const prefix = "unknown shorthand flag: '"
 	_, after, ok := strings.Cut(msg, prefix)
-	if !ok {
-		return err
+	if ok && after != "" && isDigit(after[0]) {
+		return &cliError{
+			Message: "negative numbers in positional args need the `--` " +
+				"separator (e.g. `kata show -- -1`)",
+			Kind:     kindUsage,
+			ExitCode: ExitUsage,
+		}
 	}
-	rest := after
-	if rest == "" || !isDigit(rest[0]) {
-		return err
+	if strings.HasPrefix(msg, "unknown flag:") || strings.HasPrefix(msg, prefix) {
+		path := "kata"
+		if cmd != nil {
+			path = cmd.CommandPath()
+		}
+		return &cliError{
+			Message:  msg,
+			Hint:     fmt.Sprintf("run %q for flags", path+" --help"),
+			Kind:     kindUsage,
+			ExitCode: ExitUsage,
+		}
 	}
-	return &cliError{
-		Message: "negative numbers in positional args need the `--` " +
-			"separator (e.g. `kata show -- -1`)",
-		Kind:     kindUsage,
-		ExitCode: ExitUsage,
-	}
+	return err
 }
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }

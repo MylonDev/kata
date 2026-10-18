@@ -3,8 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -25,6 +23,7 @@ import (
 	"go.kenn.io/kata/internal/config"
 	"go.kenn.io/kata/internal/db"
 	"go.kenn.io/kata/internal/federationcoord"
+	"go.kenn.io/kata/internal/federationsigning"
 )
 
 // projectScopedClaimActionEvent rewrites the lease action response's event
@@ -200,7 +199,8 @@ func handleClaimAcquire(
 	if err != nil {
 		return api.ClaimActionResponseBody{}, err
 	}
-	principal = boundSpokeClaimPrincipal(binding, principal)
+	incomingPrincipal := principal
+	principal = boundSpokeClaimPrincipal(binding, incomingPrincipal, cfg.DB.InstanceUID())
 	if binding.Role == db.FederationRoleHub {
 		result, err := cfg.DB.AcquireClaim(ctx, db.AcquireClaimParams{
 			ProjectID: projectID,
@@ -233,10 +233,14 @@ func handleClaimAcquire(
 	resp, err := remote.AcquireClaim(ctx, cred.HubProjectID, ref, forwardedClaimRequest(body, principal))
 	if err != nil {
 		if isTransportClaimError(err) {
+			pendingPrincipal := principal
+			if binding.RelayConfig != nil && incomingPrincipal.HolderInstanceUID != cfg.DB.InstanceUID() {
+				pendingPrincipal = incomingPrincipal
+			}
 			pending, enqueueErr := cfg.DB.EnqueuePendingClaim(ctx, db.PendingClaimParams{
 				ProjectID: projectID,
 				IssueRef:  ref,
-				Principal: principal,
+				Principal: pendingPrincipal,
 				ClaimKind: claimKindOrDefault(body.ClaimKind),
 				TTL:       ttlDuration(body.TTLSeconds),
 				Purpose:   strings.TrimSpace(body.Purpose),
@@ -248,10 +252,15 @@ func handleClaimAcquire(
 			return api.ClaimActionResponseBody{
 				Pending:    true,
 				RequestUID: pending.RequestUID,
-				Holder:     claimPrincipalOut(principal),
+				Holder:     claimPrincipalOut(pendingPrincipal),
 			}, nil
 		}
 		return api.ClaimActionResponseBody{}, claimForwardError(err)
+	}
+	resp = remapRelayClaimActionResponse(resp, binding, cfg.DB.InstanceUID(), principal, incomingPrincipal)
+	resp, err = remapCachedClaimActionResponse(ctx, cfg.DB, projectID, ref, resp)
+	if err != nil {
+		return api.ClaimActionResponseBody{}, claimAPIError(err)
 	}
 	if err := applyForwardedClaimAction(ctx, cfg.DB, projectID, ref, resp, true); err != nil {
 		return api.ClaimActionResponseBody{}, claimAPIError(err)
@@ -277,7 +286,8 @@ func handleClaimRenew(
 	if err != nil {
 		return api.ClaimActionResponseBody{}, err
 	}
-	principal = boundSpokeClaimPrincipal(binding, principal)
+	incomingPrincipal := principal
+	principal = boundSpokeClaimPrincipal(binding, incomingPrincipal, cfg.DB.InstanceUID())
 	if binding.Role == db.FederationRoleHub {
 		result, err := cfg.DB.RenewClaim(ctx, db.RenewClaimParams{
 			ProjectID: projectID,
@@ -303,6 +313,11 @@ func handleClaimRenew(
 	if err != nil {
 		return api.ClaimActionResponseBody{}, claimForwardError(err)
 	}
+	resp = remapRelayClaimActionResponse(resp, binding, cfg.DB.InstanceUID(), principal, incomingPrincipal)
+	resp, err = remapCachedClaimActionResponse(ctx, cfg.DB, projectID, ref, resp)
+	if err != nil {
+		return api.ClaimActionResponseBody{}, claimAPIError(err)
+	}
 	if err := applyForwardedClaimAction(ctx, cfg.DB, projectID, ref, resp, true); err != nil {
 		return api.ClaimActionResponseBody{}, claimAPIError(err)
 	}
@@ -327,7 +342,8 @@ func handleClaimRelease(
 	if err != nil {
 		return api.ClaimActionResponseBody{}, err
 	}
-	principal = boundSpokeClaimPrincipal(binding, principal)
+	incomingPrincipal := principal
+	principal = boundSpokeClaimPrincipal(binding, incomingPrincipal, cfg.DB.InstanceUID())
 	if binding.Role == db.FederationRoleHub {
 		result, err := cfg.DB.ReleaseClaim(ctx, db.ReleaseClaimParams{
 			ProjectID: projectID,
@@ -355,6 +371,11 @@ func handleClaimRelease(
 	resp, err := remote.ReleaseClaim(ctx, cred.HubProjectID, ref, forwardedClaimRequest(body, principal))
 	if err != nil {
 		return api.ClaimActionResponseBody{}, claimForwardError(err)
+	}
+	resp = remapRelayClaimActionResponse(resp, binding, cfg.DB.InstanceUID(), principal, incomingPrincipal)
+	resp, err = remapCachedClaimActionResponse(ctx, cfg.DB, projectID, ref, resp)
+	if err != nil {
+		return api.ClaimActionResponseBody{}, claimAPIError(err)
 	}
 	if err := applyForwardedClaimAction(ctx, cfg.DB, projectID, ref, resp, false); err != nil {
 		return api.ClaimActionResponseBody{}, claimAPIError(err)
@@ -388,6 +409,10 @@ func handleClaimStatus(ctx context.Context, cfg ServerConfig, projectID int64, r
 	resp, err := remote.ClaimStatus(ctx, cred.HubProjectID, ref)
 	if err != nil {
 		return api.ClaimStatusBody{}, claimForwardError(err)
+	}
+	resp, err = remapCachedClaimStatus(ctx, cfg.DB, projectID, ref, resp)
+	if err != nil {
+		return api.ClaimStatusBody{}, claimAPIError(err)
 	}
 	issueRef := ref
 	lease := resp.Lease
@@ -440,23 +465,107 @@ func beginClaimFederationTransport(
 	return finish, nil
 }
 
-func boundSpokeClaimPrincipal(binding db.FederationBinding, principal db.ClaimPrincipal) db.ClaimPrincipal {
-	if binding.Role != db.FederationRoleSpoke {
-		return principal
+func boundSpokeClaimPrincipal(
+	binding db.FederationBinding,
+	principal db.ClaimPrincipal,
+	localInstanceUID string,
+) db.ClaimPrincipal {
+	return db.BoundSpokeClaimPrincipal(binding, principal, localInstanceUID)
+}
+
+func remapRelayClaimActionResponse(
+	response api.ClaimActionResponseBody,
+	binding db.FederationBinding,
+	localInstanceUID string,
+	forwarded, incoming db.ClaimPrincipal,
+) api.ClaimActionResponseBody {
+	if binding.RelayConfig == nil || incoming.HolderInstanceUID == "" ||
+		incoming.HolderInstanceUID == localInstanceUID || !claimPrincipalOutMatches(response.Holder, forwarded) {
+		return response
 	}
-	actor := strings.TrimSpace(binding.Actor)
-	if actor == "" {
-		return principal
+	response.Holder = claimPrincipalOut(incoming)
+	response.Lease = remapIssueClaimOut(response.Lease, forwarded, incoming)
+	response.Claim = remapIssueClaimOut(response.Claim, forwarded, incoming)
+	return response
+}
+
+func claimPrincipalOutMatches(out api.ClaimPrincipalOut, principal db.ClaimPrincipal) bool {
+	return out.HolderInstanceUID == principal.HolderInstanceUID &&
+		out.Holder == principal.Holder && out.ClientKind == principal.ClientKind
+}
+
+func remapIssueClaimOut(
+	claim *api.IssueClaimOut,
+	from, to db.ClaimPrincipal,
+) *api.IssueClaimOut {
+	if claim == nil || claim.HolderInstanceUID != from.HolderInstanceUID ||
+		claim.Holder != from.Holder || claim.ClientKind != from.ClientKind {
+		return claim
 	}
-	// Existing clients keep their established actor/client-kind identity.
-	// Mounted callers carry an opaque subject-bound identity through the shared
-	// spoke credential so one subject cannot control another subject's lease.
-	if principal.AuthenticatedHost {
-		ownerDigest := sha256.Sum256([]byte("kata:spoke-host-claim-owner:v1\x00" + principal.Holder))
-		principal.ClientKind = "spoke-host:v1:" + base64.RawURLEncoding.EncodeToString(ownerDigest[:])
+	claim.HolderInstanceUID = to.HolderInstanceUID
+	claim.Holder = to.Holder
+	claim.ClientKind = to.ClientKind
+	return claim
+}
+
+func remapCachedClaimStatus(
+	ctx context.Context,
+	store db.Storage,
+	projectID int64,
+	issueRef string,
+	remote api.ClaimStatusBody,
+) (api.ClaimStatusBody, error) {
+	if !remote.Held {
+		return remote, nil
 	}
-	principal.Holder = actor
-	return principal
+	remoteLease := remote.Lease
+	if remoteLease == nil {
+		remoteLease = remote.Claim
+	}
+	if remoteLease == nil {
+		return remote, nil
+	}
+	cached, err := store.ClaimStatusReadOnly(ctx, projectID, issueRef, time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return remote, nil
+		}
+		return remote, err
+	}
+	if !cached.Held || cached.Claim == nil || cached.Claim.ClaimUID != remoteLease.ClaimUID {
+		return remote, nil
+	}
+	remoteHolder := claimPrincipalFromAPI(remote.Holder)
+	remote.Holder = claimPrincipalOut(cached.Holder)
+	remote.Lease = remapIssueClaimOut(remote.Lease, remoteHolder, cached.Holder)
+	remote.Claim = remapIssueClaimOut(remote.Claim, remoteHolder, cached.Holder)
+	return remote, nil
+}
+
+func remapCachedClaimActionResponse(
+	ctx context.Context,
+	store db.Storage,
+	projectID int64,
+	issueRef string,
+	remote api.ClaimActionResponseBody,
+) (api.ClaimActionResponseBody, error) {
+	if remote.Lease == nil && remote.Claim == nil {
+		return remote, nil
+	}
+	status := api.ClaimStatusBody{
+		Held:   true,
+		Holder: remote.Holder,
+		Lease:  remote.Lease,
+		Claim:  remote.Claim,
+	}
+	status, err := remapCachedClaimStatus(ctx, store, projectID, issueRef, status)
+	if err != nil {
+		return remote, err
+	}
+	remote.Holder = status.Holder
+	remote.Lease = status.Lease
+	remote.Claim = status.Claim
+	return remote, nil
 }
 
 func claimForwardClient(
@@ -472,13 +581,16 @@ func claimForwardClient(
 	if err != nil {
 		return nil, config.FederationCredential{}, internalAPIError(err)
 	}
+	if cred.RelayEnrollmentPending {
+		return nil, config.FederationCredential{}, api.NewError(http.StatusServiceUnavailable, "federation_offline", "relay enrollment pending", "finish bridge enrollment before forwarding claims", nil)
+	}
 	if strings.TrimSpace(cred.Token) == "" {
 		return nil, config.FederationCredential{}, api.NewError(http.StatusServiceUnavailable, "federation_offline", "federation claim credentials are unavailable", "", nil)
 	}
 	cred = config.FederationTransportCredential(
 		binding.HubURL, binding.HubProjectID, binding.AllowInsecure, cred,
 	)
-	client, err := newClaimHubClient(ctx, cred.HubURL, cred.Token, cred.AllowInsecure)
+	client, err := newClaimHubClient(ctx, cred.HubURL, cred.Token, cred.AllowInsecure, cred.Signing)
 	if err != nil {
 		return nil, config.FederationCredential{}, api.NewError(http.StatusServiceUnavailable, "federation_offline", err.Error(), "", nil)
 	}
@@ -502,6 +614,9 @@ func applyForwardedClaimAction(
 	resp api.ClaimActionResponseBody,
 	held bool,
 ) error {
+	if resp.Pending {
+		return nil
+	}
 	lease := resp.Lease
 	if lease == nil {
 		lease = resp.Claim
@@ -571,6 +686,9 @@ func claimHubNow(claim *api.IssueClaimOut) time.Time {
 
 func claimForwardError(err error) error {
 	if statusErr, ok := errors.AsType[*claimHubStatusError](err); ok {
+		if statusErr.StatusCode == http.StatusServiceUnavailable && hubStatusErrorCode(statusErr) == "federation_offline" {
+			return api.NewError(http.StatusServiceUnavailable, "federation_offline", statusErr.Error(), "", nil)
+		}
 		return api.NewError(statusErr.StatusCode, "hub_claim_failed", statusErr.Error(), "", nil)
 	}
 	return api.NewError(http.StatusServiceUnavailable, "federation_offline", err.Error(), "", nil)
@@ -599,7 +717,12 @@ func (e *claimHubStatusError) Error() string {
 
 var errClaimHubTransportUnavailable = errors.New("claim hub transport unavailable")
 
-func newClaimHubClient(ctx context.Context, baseURL, token string, allowInsecure bool) (*claimHubClient, error) {
+func newClaimHubClient(
+	ctx context.Context,
+	baseURL, token string,
+	allowInsecure bool,
+	signing *federationsigning.Source,
+) (*claimHubClient, error) {
 	httpClient, err := newClaimHubHTTPClient(ctx, baseURL)
 	if err != nil {
 		if errors.Is(err, errClaimHubTransportUnavailable) {
@@ -613,6 +736,11 @@ func newClaimHubClient(ctx context.Context, baseURL, token string, allowInsecure
 	}
 	if err := configureClaimHubBearerClient(httpClient, baseURL, token, allowInsecure); err != nil {
 		return nil, err
+	}
+	if signing != nil {
+		if err := federationsigning.ConfigureClient(httpClient, baseURL, token, *signing); err != nil {
+			return nil, err
+		}
 	}
 	return &claimHubClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -1069,11 +1197,12 @@ func refreshShowClaimStatus(ctx context.Context, cfg ServerConfig, issue db.Issu
 	}
 	if !binding.Enabled || binding.Role != db.FederationRoleSpoke {
 		if binding.Enabled && binding.Role == db.FederationRoleHub {
-			status, err := cfg.DB.ClaimStatus(ctx, issue.ProjectID, issue.UID, time.Now().UTC())
+			// Display reads must not compete with federation pushes for the
+			// writer lock. The sweeper and explicit status endpoint persist expiry.
+			status, err := cfg.DB.ClaimStatusReadOnly(ctx, issue.ProjectID, issue.UID, time.Now().UTC())
 			if err != nil {
 				return nil, claimAPIError(err)
 			}
-			cfg.Publish().EventsByProject(status.Events)
 			hubNow := status.HubNow
 			if hubNow.IsZero() {
 				return nil, nil
@@ -1110,6 +1239,10 @@ func refreshShowClaimStatus(ctx context.Context, cfg ServerConfig, issue db.Issu
 		}
 		return nil, markShowClaimStatusRefreshFailure(ctx, cfg.DB, issue, 0,
 			fmt.Sprintf("status refresh transport: %s", err.Error()), now)
+	}
+	resp, err = remapCachedClaimStatus(ctx, cfg.DB, binding.ProjectID, issue.UID, resp)
+	if err != nil {
+		return nil, claimAPIError(err)
 	}
 	if err := cfg.DB.ApplyClaimStatus(ctx, binding.ProjectID, issue.UID, claimStatusFromAPI(resp)); err != nil {
 		return nil, claimAPIError(err)

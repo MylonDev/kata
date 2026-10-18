@@ -24,6 +24,7 @@ func newConnectorCmd() *cobra.Command {
 		newConnectorListCmd(),
 		newConnectorStatusCmd(),
 		newConnectorFieldCmd(),
+		newConnectorServeCmd(),
 	)
 	return cmd
 }
@@ -230,7 +231,8 @@ func externalCLIResponseError(status int, body []byte, callErr error) error {
 			message = fmt.Sprintf("daemon request failed (HTTP %d %s)", status, statusText)
 		}
 		return &cliError{
-			Message: message, Kind: kindForStatus(status), ExitCode: mapStatusToExit(status, ""),
+			HTTPStatus: status,
+			Message:    message, Kind: kindForStatus(status), ExitCode: mapStatusToExit(status, ""),
 		}
 	}
 	return callErr

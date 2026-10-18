@@ -31,22 +31,25 @@ import (
 // derived from it.
 type Store struct {
 	*sql.DB
-	dsn                  string
-	schema               string
-	schemaOwner          string
-	instanceUID          string
-	readOnly             bool
-	installedFreshSchema bool
-	servingConn          *sql.Conn
-	federationLease      *federationRunnerLeaseState
-	federationLockDB     *sql.DB
-	idempotencyDB        *sql.DB
-	exportQ              exportQueryer
-	rotationStage        func(context.Context) error
-	uiReadStage          func(context.Context) error
-	uiProjectStatsRead   func()
-	uiLinkDetailRead     func()
-	externalRootNow      func() time.Time
+	dsn                          string
+	schema                       string
+	schemaOwner                  string
+	instanceUID                  string
+	readOnly                     bool
+	installedFreshSchema         bool
+	servingConn                  *sql.Conn
+	federationLease              *federationRunnerLeaseState
+	federationLockDB             *sql.DB
+	idempotencyDB                *sql.DB
+	exportQ                      exportQueryer
+	rotationStage                func(context.Context) error
+	uiReadStage                  func(context.Context) error
+	uiProjectStatsRead           func()
+	uiLinkDetailRead             func()
+	externalRootNow              func() time.Time
+	relayHistoryFullScanObserver func()
+	relayCheckpointCapacityBytes int64
+	relayHistoryCache            *relayHistoryValidationCache
 	// federationFoldObserver, when non-nil, is called with each project ID
 	// whose raw event log a federated materialization reads. Tests use it to
 	// assert the log is read once per project per pass; production leaves it
@@ -137,6 +140,21 @@ func (s *Store) RefreshInstanceUID(ctx context.Context) error {
 	}
 	s.instanceUID = v
 	return nil
+}
+
+// InstanceCreatedAt reads meta.instance_created_at, returning zero when the
+// instance UID predates it.
+func (s *Store) InstanceCreatedAt(ctx context.Context) (time.Time, error) {
+	var v string
+	err := s.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key=$1`, db.MetaKeyInstanceCreatedAt).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read %s: %w", db.MetaKeyInstanceCreatedAt, err)
+	}
+	return db.ParseInstanceCreatedAt(v)
 }
 
 // SchemaVersion reads meta.schema_version. Errors when missing or unparseable.
@@ -238,4 +256,30 @@ func (s *Store) cacheInstanceUIDIfPresent(ctx context.Context) error {
 	}
 	s.instanceUID = v
 	return nil
+}
+
+// ClaimScreenView atomically claims one screen's day across all clients sharing this database.
+func (s *Store) ClaimScreenView(ctx context.Context, screen, day string) (bool, error) {
+	var claimed bool
+	err := s.RetryTransient(ctx, func() error {
+		result, err := s.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES($1, $2)
+   ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value <> excluded.value`,
+			"screen_viewed:"+screen, s.instanceUID+":"+day)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		claimed = count == 1
+		return err
+	})
+	return claimed, err
+}
+
+// ReleaseScreenView preserves newer claims when an earlier enqueue fails.
+func (s *Store) ReleaseScreenView(ctx context.Context, screen, day string) error {
+	return s.RetryTransient(ctx, func() error {
+		_, err := s.ExecContext(ctx, `DELETE FROM meta WHERE key=$1 AND value=$2`,
+			"screen_viewed:"+screen, s.instanceUID+":"+day)
+		return err
+	})
 }

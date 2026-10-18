@@ -6,6 +6,10 @@ type ReconcileExternalRootByKeyBody = ReconcileExternalRootByKeyRequestBody
 
 type MapConnectorFieldBody = MapConnectorFieldRequestBody
 
+type ConnectFederationBridgeBody = ConnectFederationBridgeRequestBody
+
+type DisconnectFederationBridgeBody = DisconnectFederationBridgeRequestBody
+
 type CreateFederationEnrollmentBody = CreateFederationEnrollmentRequestBody
 
 type RotateFederationEnrollmentBody = RotateFederationEnrollmentRequestBody
@@ -16,15 +20,37 @@ type LeaveFederationReplicaBody = LeaveFederationReplicaRequestBody
 
 type RebindFederationReplicaBody = RebindFederationReplicaRequestBody
 
+type ConfigureFederationSigningBody = ConfigureFederationSigningRequestBody
+
+type RepinFederationRootKeyBody = RepinFederationRootKeyRequestBody
+
 type InitProjectBody = InitProjectRequestBody
 
 type ResolveProjectBody = ResolveProjectRequestBody
 
 type RenameProjectBody = RenameProjectRequestBody
 
+type SetProjectAccessBody = SetProjectAccessRequestBody
+
 type PurgeProjectBody = ProjectPurgeRequestBody
 
 type RewriteAuthorIdentityBody = RewriteAuthorIdentityRequestBody
+
+type CreateCronJobBody = PutCronJobBody
+
+type ArchiveCronJobBody = CronDefinitionActionBody
+
+type ReplaceCronJobBody = PutCronJobBody
+
+type RestoreCronJobBody = CronDefinitionActionBody
+
+type CreateCronWorkflowBody = PutCronWorkflowBody
+
+type ArchiveCronWorkflowBody = CronDefinitionActionBody
+
+type ReplaceCronWorkflowBody = PutCronWorkflowBody
+
+type RestoreCronWorkflowBody = CronDefinitionActionBody
 
 type EnableProjectFederationBody = EnableProjectFederationRequestBody
 
@@ -33,6 +59,12 @@ type IngestFederationProjectEventsBody = FederationIngestEventsRequestBody
 type RetryFederationQuarantineBody = RetryFederationQuarantineRequestBody
 
 type SkipFederationQuarantineBody = SkipFederationQuarantineRequestBody
+
+type AcceptRelayDeliveriesBody = RelayBatch
+
+type AckRelayDeliveriesBody = RelayAckRequestBody
+
+type DisconnectRelayEnrollmentBody = DisconnectRelayRequestBody
 
 type ImportIssuesBody = ImportRequestBody
 
@@ -104,4 +136,8 @@ type CreateRecurrenceBody = CreateRecurrenceRequestBody
 
 type PatchRecurrenceBody = PatchRecurrenceRequestBody
 
+type CreateTeamBody = CreateTeamRequestBody
+
 type CreateTokenBody = CreateTokenRequestBody
+
+type CaptureTelemetryEventBody = CaptureTelemetryEventRequestBody

@@ -16,6 +16,7 @@ import (
 	"golang.org/x/mod/semver"
 	"golang.org/x/sync/errgroup"
 
+	"go.kenn.io/kata/internal/commentref"
 	"go.kenn.io/kata/internal/metadata"
 	"go.kenn.io/kata/internal/shortid"
 	"go.kenn.io/kata/internal/teammate"
@@ -63,22 +64,34 @@ func (h toolHandlers) search(ctx context.Context, _ *sdkmcp.CallToolRequest, inp
 			return nil, SearchOutput{}, fmt.Errorf("status: %w", err)
 		}
 		status = &value
-		health, err := h.options.Client.Health(ctx)
-		if err != nil {
-			return nil, SearchOutput{}, err
-		}
-		reported := ""
-		if health.APISchemaVersion != nil {
-			reported = strings.TrimSpace(*health.APISchemaVersion)
-		}
-		if !semver.IsValid("v"+reported) || semver.Compare("v"+reported, "v0.20.0") < 0 {
-			return nil, SearchOutput{}, fmt.Errorf("status-filtered search requires daemon API 0.20.0 or newer; this daemon reports %q; upgrade the daemon", reported)
-		}
 	}
+	health, err := h.options.Client.Health(ctx)
+	if err != nil {
+		return nil, SearchOutput{}, err
+	}
+	reported := ""
+	if health.APISchemaVersion != nil {
+		reported = strings.TrimSpace(*health.APISchemaVersion)
+	}
+	validVersion := semver.IsValid("v" + reported)
+	if status != nil && (!validVersion || semver.Compare("v"+reported, "v0.20.0") < 0) {
+		return nil, SearchOutput{}, fmt.Errorf("status-filtered search requires daemon API 0.20.0 or newer; this daemon reports %q; upgrade the daemon", reported)
+	}
+	// Older supported daemons omit complete. Preserve their extra-row probe
+	// contract instead of treating an absent bool as explicit incompleteness.
+	pageMetadata := validVersion && semver.Compare("v"+reported, "v0.27.0") >= 0
 	projects, err := h.readProjects(ctx, input.Project)
 	if err != nil {
 		return nil, SearchOutput{}, err
 	}
+	stable := len(projects) == 1 && input.Mode == "lexical"
+	if input.Cursor != "" && !stable {
+		return nil, SearchOutput{}, errors.New("cursor requires single-project explicit lexical search")
+	}
+	if stable && !pageMetadata {
+		return nil, SearchOutput{}, errors.New("paginated discovery requires daemon API 0.27.0 or newer")
+	}
+
 	type projectSearch struct {
 		response *generated.SearchIssuesResponse
 		err      error
@@ -89,10 +102,18 @@ func (h toolHandlers) search(ctx context.Context, _ *sdkmcp.CallToolRequest, inp
 	for index := range projects {
 		group.Go(func() error {
 			limit64 := int64(limit + 1)
+			if pageMetadata {
+				limit64 = int64(limit)
+			}
+			var sortOrder *generated.SearchIssuesQuerySort
+			if stable {
+				sortOrder = new(generated.SearchIssuesQuerySort("oldest"))
+			}
 			response, searchErr := h.options.Client.SearchIssues(groupContext, &generated.SearchIssuesRequestOptions{
 				PathParams: &generated.SearchIssuesPath{ProjectID: projects[index].ID},
 				Query: &generated.SearchIssuesQuery{
-					Q:            query,
+					Q:      query,
+					Cursor: optionalString(input.Cursor), Sort: sortOrder,
 					Status:       status,
 					Limit:        &limit64,
 					Mode:         mode,
@@ -129,7 +150,7 @@ func (h toolHandlers) search(ctx context.Context, _ *sdkmcp.CallToolRequest, inp
 			// would misdescribe the merged results.
 			effectiveMode = "mixed"
 		}
-		if len(response.Results) > limit {
+		if len(response.Results) > limit || (pageMetadata && !response.Complete) {
 			truncated = true
 		}
 		for rank, hit := range response.Results {
@@ -179,111 +200,13 @@ func (h toolHandlers) search(ctx context.Context, _ *sdkmcp.CallToolRequest, inp
 		DegradedReason: strings.Join(degradedReasons, "; "),
 		Results:        results,
 		Truncated:      truncated,
-	}, nil
-}
-
-func (h toolHandlers) list(ctx context.Context, _ *sdkmcp.CallToolRequest, input ListInput) (*sdkmcp.CallToolResult, IssueListOutput, error) {
-	limit, err := boundedLimit(input.Limit)
-	if err != nil {
-		return nil, IssueListOutput{}, err
-	}
-	if input.Unowned && strings.TrimSpace(input.Owner) != "" {
-		return nil, IssueListOutput{}, errors.New("owner and unowned are mutually exclusive")
-	}
-	var status *generated.ListIssuesQueryStatus
-	var globalStatus *generated.ListAllIssuesQueryStatus
-	if input.Status != "" {
-		value := generated.ListIssuesQueryStatus(input.Status)
-		if err := value.Validate(); err != nil {
-			return nil, IssueListOutput{}, fmt.Errorf("status: %w", err)
-		}
-		status = &value
-		globalValue := generated.ListAllIssuesQueryStatus(input.Status)
-		globalStatus = &globalValue
-	}
-	priority, err := priorityQuery(input.Priority)
-	if err != nil {
-		return nil, IssueListOutput{}, err
-	}
-	maxPriority, err := priorityQuery(input.MaxPriority)
-	if err != nil {
-		return nil, IssueListOutput{}, err
-	}
-	projects, err := h.readProjects(ctx, input.Project)
-	if err != nil {
-		return nil, IssueListOutput{}, err
-	}
-	limit64 := int64(limit + 1)
-	owner := optionalString(input.Owner)
-	unowned := optionalTrue(input.Unowned)
-	issues := make([]IssueSummary, 0)
-	truncated := false
-	if h.options.Scope.Mode() == ScopeAllowlist && strings.TrimSpace(input.Project) == "" {
-		for _, project := range projects {
-			response, listErr := h.options.Client.ListIssues(ctx, &generated.ListIssuesRequestOptions{
-				PathParams: &generated.ListIssuesPath{ProjectID: project.ID},
-				Query: &generated.ListIssuesQuery{
-					Status: status, Priority: priority, MaxPriority: maxPriority, Limit: &limit64,
-					Unowned: unowned, Owner: owner, Label: compactStrings(input.Labels),
-					ExcludeLabel: compactStrings(input.ExcludeLabels), Meta: compactStrings(input.Metadata),
-				},
-			})
-			if listErr != nil {
-				return nil, IssueListOutput{}, listErr
+		Complete:       !truncated && !degraded,
+		NextCursor: func() *string {
+			if stable && len(searches) == 1 {
+				return searches[0].response.NextCursor
 			}
-			if len(response.Issues) > limit {
-				truncated = true
-			}
-			for _, issue := range response.Issues {
-				issues = append(issues, h.summaryFromIssueOut(project, issue))
-			}
-		}
-		sortIssueSummaries(issues)
-		truncated = truncated || len(issues) > limit
-	} else if len(projects) == 1 && (h.options.Scope.Mode() == ScopeBound || strings.TrimSpace(input.Project) != "") {
-		response, listErr := h.options.Client.ListIssues(ctx, &generated.ListIssuesRequestOptions{
-			PathParams: &generated.ListIssuesPath{ProjectID: projects[0].ID},
-			Query: &generated.ListIssuesQuery{
-				Status: status, Priority: priority, MaxPriority: maxPriority, Limit: &limit64,
-				Unowned: unowned, Owner: owner, Label: compactStrings(input.Labels),
-				ExcludeLabel: compactStrings(input.ExcludeLabels), Meta: compactStrings(input.Metadata),
-			},
-		})
-		if listErr != nil {
-			return nil, IssueListOutput{}, listErr
-		}
-		truncated = len(response.Issues) > limit
-		for _, issue := range response.Issues {
-			issues = append(issues, h.summaryFromIssueOut(projects[0], issue))
-		}
-	} else {
-		response, listErr := h.options.Client.ListAllIssues(ctx, &generated.ListAllIssuesRequestOptions{
-			Query: &generated.ListAllIssuesQuery{
-				Status: globalStatus, Priority: priority, MaxPriority: maxPriority, Limit: &limit64,
-				Unowned: unowned, Owner: owner, Label: compactStrings(input.Labels),
-				ExcludeLabel: compactStrings(input.ExcludeLabels), Meta: compactStrings(input.Metadata),
-			},
-		})
-		if listErr != nil {
-			return nil, IssueListOutput{}, listErr
-		}
-		allowed := projectIDSet(projects)
-		for _, issue := range response.Issues {
-			if _, ok := allowed[issue.ProjectID]; ok {
-				issues = append(issues, summaryFromGlobalIssue(issue))
-			}
-		}
-		truncated = len(response.Issues) > limit || len(issues) > limit
-	}
-	if len(issues) > limit {
-		issues = issues[:limit]
-	}
-	project, outputProjects := outputProjectScope(projects)
-	return successResult(), IssueListOutput{
-		Project:   project,
-		Projects:  outputProjects,
-		Issues:    issues,
-		Truncated: truncated,
+			return nil
+		}(),
 	}, nil
 }
 
@@ -365,6 +288,7 @@ func (h toolHandlers) ready(ctx context.Context, _ *sdkmcp.CallToolRequest, inpu
 		Projects:  outputProjects,
 		Issues:    issues,
 		Truncated: truncated,
+		Complete:  !truncated,
 	}, nil
 }
 
@@ -415,20 +339,68 @@ func (h toolHandlers) show(ctx context.Context, _ *sdkmcp.CallToolRequest, input
 	if commentLimit < 0 || commentLimit > maximumResultLimit {
 		return nil, ShowOutput{}, fmt.Errorf("comment_limit must be between 1 and %d when set", maximumResultLimit)
 	}
+	if input.Thread != "" || input.Inbound != "" || input.Kind != "" || input.Since != "" {
+		if err := h.requireCommentLinksAPI(ctx); err != nil {
+			return nil, ShowOutput{}, err
+		}
+	}
 	response, err := h.options.Client.ShowIssue(ctx, &generated.ShowIssueRequestOptions{
 		PathParams: &generated.ShowIssuePath{ProjectID: project.ID, Ref: ref},
+		Query:      &generated.ShowIssueQuery{Thread: optionalString(input.Thread), Inbound: optionalString(input.Inbound), Kind: optionalCommentEnum[generated.ShowIssueQueryKind](input.Kind), Since: optionalString(input.Since)},
 	})
 	if err != nil {
 		return nil, ShowOutput{}, err
 	}
-	comments := response.Comments
-	truncated := len(comments) > commentLimit
-	if truncated {
-		comments = comments[len(comments)-commentLimit:]
+	allowedProjects := map[string]bool{}
+	if h.options.Scope.Mode() != ScopeAll {
+		projects, err := h.options.Scope.Projects(ctx, h.options.Client, false)
+		if err != nil {
+			return nil, ShowOutput{}, err
+		}
+		for _, p := range projects {
+			allowedProjects[p.UID] = true
+		}
 	}
-	commentSummaries := make([]CommentSummary, 0, len(comments))
-	for _, comment := range comments {
-		commentSummaries = append(commentSummaries, commentSummary(comment))
+	commentSummaries := make([]CommentSummary, 0, len(response.Comments))
+	for _, comment := range response.Comments {
+		summary := commentReadSummary(comment)
+		summary.Handle = commentref.HandleForIssue(summary.Handle, summary.IssueUID, summary.IssueShortID, response.Issue.UID)
+		if h.options.Scope.Mode() != ScopeAll {
+			if summary.Reply != nil && !allowedProjects[summary.Reply.ProjectUID] {
+				if summary.Reply.ProjectUID == "" {
+					// Preserve the source assertion's state, but an unknown target
+					// lineage cannot establish authority to expose its identity.
+					summary.Reply = &commentref.Link{Kind: summary.Reply.Kind, Status: summary.Reply.Status}
+				} else {
+					summary.Reply = nil
+				}
+			}
+			backlinks := make([]commentref.Link, 0, len(summary.Backlinks))
+			for _, link := range summary.Backlinks {
+				if allowedProjects[link.ProjectUID] {
+					backlinks = append(backlinks, link)
+				}
+			}
+			summary.Backlinks = backlinks
+		}
+		commentSummaries = append(commentSummaries, summary)
+	}
+	truncated := len(commentSummaries) > commentLimit || (response.CommentsTruncated != nil && *response.CommentsTruncated)
+	if len(commentSummaries) > commentLimit {
+		kept := commentSummaries[len(commentSummaries)-commentLimit:]
+		if input.Thread != "" {
+			root, err := commentref.Parse(input.Thread)
+			if err != nil {
+				return nil, ShowOutput{}, err
+			}
+			for _, c := range commentSummaries[:len(commentSummaries)-commentLimit] {
+				if (root.UID != "" && strings.EqualFold(root.UID, c.UID)) || (root.Suffix != "" && strings.HasSuffix(strings.ToLower(c.UID), root.Suffix) && ((root.IssueRef == "" && c.IssueUID == response.Issue.UID) || (root.IssueRef != "" && strings.EqualFold(root.IssueRef, c.IssueShortID)))) {
+					kept[0] = c
+					break
+				}
+			}
+		}
+		commentSummaries = kept
 	}
 	labels := make([]string, 0, len(response.Labels))
 	for _, label := range response.Labels {
@@ -638,6 +610,11 @@ func (h toolHandlers) edit(ctx context.Context, _ *sdkmcp.CallToolRequest, input
 }
 
 func (h toolHandlers) comment(ctx context.Context, _ *sdkmcp.CallToolRequest, input CommentInput) (*sdkmcp.CallToolResult, CommentOutput, error) {
+	if input.ReplyTo != "" || input.Kind != "" || input.Force {
+		if err := h.requireCommentLinksAPI(ctx); err != nil {
+			return nil, CommentOutput{}, err
+		}
+	}
 	handle, err := teammate.Resolve(input.Teammate, h.options.Teammate)
 	if err != nil {
 		return nil, CommentOutput{}, err
@@ -666,9 +643,13 @@ func (h toolHandlers) comment(ctx context.Context, _ *sdkmcp.CallToolRequest, in
 	if key == "" {
 		return nil, CommentOutput{}, errors.New("idempotency_key must not be empty")
 	}
+	body := &generated.CreateCommentBody{Actor: &h.options.Actor, Body: input.Body, Teammate: optionalString(handle), ReplyTo: optionalString(input.ReplyTo), Kind: optionalCommentEnum[generated.CommentRequestBodyKind](input.Kind)}
+	if input.Force {
+		body.Force = &input.Force
+	}
 	response, err := h.options.Client.CreateComment(ctx, &generated.CreateCommentRequestOptions{
 		PathParams: &generated.CreateCommentPath{ProjectID: strconv.FormatInt(project.ID, 10), Ref: ref},
-		Body:       &generated.CreateCommentBody{Actor: &h.options.Actor, Body: input.Body, Teammate: optionalString(handle)},
+		Body:       body,
 		Header:     &generated.CreateCommentHeaders{IdempotencyKey: &key},
 	})
 	if err != nil {
@@ -1245,6 +1226,12 @@ func projectIDSet(projects []ProjectIdentity) map[int64]struct{} {
 
 func (h toolHandlers) summaryFromIssue(project ProjectIdentity, issue generated.Issue) IssueSummary {
 	return IssueSummary{
+		Author:              issue.Author,
+		AccountableActor:    issue.AccountableActor,
+		SourceActor:         issue.SourceActor,
+		AuthorityUID:        issue.AuthorityUID,
+		Teammate:            issue.Teammate,
+		Verification:        (*string)(issue.Verification),
 		UID:                 issue.UID,
 		Ref:                 issue.ShortID,
 		QualifiedRef:        project.Name + "#" + issue.ShortID,
@@ -1267,6 +1254,12 @@ func (h toolHandlers) summaryFromIssueOut(project ProjectIdentity, issue generat
 		qualified = project.Name + "#" + issue.ShortID
 	}
 	return IssueSummary{
+		Author:              issue.Author,
+		AccountableActor:    issue.AccountableActor,
+		SourceActor:         issue.SourceActor,
+		AuthorityUID:        issue.AuthorityUID,
+		Teammate:            issue.Teammate,
+		Verification:        (*string)(issue.Verification),
 		WebURL:              issue.WebURL,
 		UID:                 issue.UID,
 		Ref:                 issue.ShortID,
@@ -1283,26 +1276,39 @@ func (h toolHandlers) summaryFromIssueOut(project ProjectIdentity, issue generat
 		ScheduledOn:         metadataString(issue.Metadata, "scheduled_on"),
 		Timezone:            metadataString(issue.Metadata, "timezone"),
 		updatedAt:           issue.UpdatedAt,
+		metadata:            issue.Metadata,
 	}
 }
 
 func summaryFromGlobalIssue(issue generated.ListGlobalIssueOut) IssueSummary {
 	return IssueSummary{
-		WebURL: issue.WebURL,
-		UID:    issue.UID, Ref: issue.ShortID, QualifiedRef: issue.QualifiedID,
+		Author:           issue.Author,
+		AccountableActor: issue.AccountableActor,
+		SourceActor:      issue.SourceActor,
+		AuthorityUID:     issue.AuthorityUID,
+		Teammate:         issue.Teammate,
+		Verification:     (*string)(issue.Verification),
+		WebURL:           issue.WebURL,
+		UID:              issue.UID, Ref: issue.ShortID, QualifiedRef: issue.QualifiedID,
 		Title: issue.Title, Status: issue.Status, Owner: issue.Owner,
 		AssignmentExpiresOn: formatOptionalTime(issue.AssignmentExpiresOn), Priority: issue.Priority,
 		Labels: new(nonNilStrings(issue.Labels)), Blocked: issue.Blocked,
 		Revision: issue.Revision, UpdatedAt: formatTime(issue.UpdatedAt),
 		ScheduledOn: metadataString(issue.Metadata, "scheduled_on"), Timezone: metadataString(issue.Metadata, "timezone"),
-		updatedAt: issue.UpdatedAt,
+		updatedAt: issue.UpdatedAt, metadata: issue.Metadata,
 	}
 }
 
 func summaryFromReadyGlobalIssue(issue generated.ReadyGlobalIssueOut) IssueSummary {
 	return IssueSummary{
-		WebURL: issue.WebURL,
-		UID:    issue.UID, Ref: issue.ShortID, QualifiedRef: issue.QualifiedID,
+		Author:           issue.Author,
+		AccountableActor: issue.AccountableActor,
+		SourceActor:      issue.SourceActor,
+		AuthorityUID:     issue.AuthorityUID,
+		Teammate:         issue.Teammate,
+		Verification:     (*string)(issue.Verification),
+		WebURL:           issue.WebURL,
+		UID:              issue.UID, Ref: issue.ShortID, QualifiedRef: issue.QualifiedID,
 		Title: issue.Title, Status: issue.Status, Owner: issue.Owner,
 		AssignmentExpiresOn: formatOptionalTime(issue.AssignmentExpiresOn), Priority: issue.Priority,
 		Labels: new(nonNilStrings(issue.Labels)), Blocked: issue.Blocked,
@@ -1343,11 +1349,15 @@ func commentSummary(comment generated.Comment) CommentSummary {
 		handle = *comment.Teammate
 	}
 	return CommentSummary{
-		Teammate:  handle,
-		UID:       comment.UID,
-		Author:    comment.Author,
-		Body:      comment.Body,
-		CreatedAt: formatTime(comment.CreatedAt),
+		AccountableActor: comment.AccountableActor,
+		SourceActor:      comment.SourceActor,
+		AuthorityUID:     comment.AuthorityUID,
+		Verification:     (*string)(comment.Verification),
+		Teammate:         handle,
+		UID:              comment.UID,
+		Author:           comment.Author,
+		Body:             comment.Body,
+		CreatedAt:        formatTime(comment.CreatedAt),
 	}
 }
 
@@ -1645,4 +1655,67 @@ func formatOptionalTime(value *time.Time) *string {
 	}
 	formatted := formatTime(*value)
 	return &formatted
+}
+
+func (h toolHandlers) requireCommentLinksAPI(ctx context.Context) error {
+	health, err := h.options.Client.Health(ctx)
+	if err != nil {
+		return err
+	}
+	reported := ""
+	if health.APISchemaVersion != nil {
+		reported = *health.APISchemaVersion
+	}
+	if !semver.IsValid("v"+reported) || semver.Compare("v"+reported, "v0.28.0") < 0 {
+		return fmt.Errorf("typed comment links require daemon API 0.28.0 or newer; daemon reports %q; upgrade the daemon", reported)
+	}
+	return nil
+}
+
+func commentReadSummary(c generated.CommentOut) CommentSummary {
+	out := CommentSummary{
+		AccountableActor:   c.AccountableActor,
+		SourceActor:        c.SourceActor,
+		AuthorityUID:       c.AuthorityUID,
+		Verification:       (*string)(c.Verification),
+		BacklinksTruncated: commentValue(c.BacklinksTruncated),
+		UID:                c.UID,
+		Handle:             commentValue(c.Handle),
+		Author:             c.Author,
+		Teammate:           commentValue(c.Teammate),
+		Body:               c.Body,
+		CreatedAt:          formatTime(c.CreatedAt),
+		IssueUID:           commentValue(c.IssueUID),
+		IssueShortID:       commentValue(c.IssueShortID),
+		Backlinks:          []commentref.Link{},
+	}
+	if c.EditedAt != nil {
+		out.EditedAt = formatTime(*c.EditedAt)
+	}
+	if c.Reply != nil {
+		link := commentLinkSummary(*c.Reply)
+		out.Reply = &link
+	}
+	for _, link := range c.Backlinks {
+		out.Backlinks = append(out.Backlinks, commentLinkSummary(link))
+	}
+	return out
+}
+func commentLinkSummary(r generated.CommentLink) commentref.Link {
+	return commentref.Link{Body: commentValue(r.Body), CreatedAt: commentValue(r.CreatedAt), EditedAt: r.EditedAt, UID: commentValue(r.UID), Handle: commentValue(r.Handle), Kind: r.Kind, Author: commentValue(r.Author), Teammate: commentValue(r.Teammate), IssueUID: commentValue(r.IssueUID), IssueShortID: commentValue(r.IssueShortID), ProjectUID: commentValue(r.ProjectUID), ProjectID: commentValue(r.ProjectID), Status: commentValue(r.Status), TargetEdited: commentValue(r.TargetEdited)}
+}
+func commentValue[T any](v *T) T {
+	if v != nil {
+		return *v
+	}
+	var zero T
+	return zero
+}
+
+func optionalCommentEnum[T ~string](value string) *T {
+	if value == "" {
+		return nil
+	}
+	converted := T(value)
+	return &converted
 }

@@ -13,6 +13,8 @@ import (
 
 	"go.kenn.io/kata/internal/api"
 	"go.kenn.io/kata/internal/db"
+	"go.kenn.io/kata/internal/shortid"
+	"go.kenn.io/kata/internal/transcript"
 )
 
 // registerActionsHandlers installs POST /actions/close and /actions/reopen.
@@ -33,6 +35,11 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 		actor, err := attributedActor(ctx, in.Body.Actor)
 		if err != nil {
 			return nil, err
+		}
+		if in.Body.Transcript != nil {
+			if err := in.Body.Transcript.Validate(); err != nil {
+				return nil, api.NewError(400, "validation", err.Error(), "", nil)
+			}
 		}
 		// Owner-local TUI closes bypass substance / evidence validation:
 		// the interactive human path is "press x to close" and a 40-char
@@ -80,7 +87,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 			if match != nil {
 				idempotencyFingerprint = closeIdempotencyFingerprint(
 					match.IssueUID, in.Ref, actor, in.Body.Reason, in.Body.Message, in.Body.Source,
-					in.Body.Evidence, in.Body.DryRun, ifMatchRev)
+					in.Body.Evidence, in.Body.DryRun, ifMatchRev, in.Body.Transcript)
 				return closeIdempotencyResponse(ctx, cfg, match, idempotencyFingerprint)
 			}
 		}
@@ -91,7 +98,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 		if in.IdempotencyKey != "" {
 			idempotencyFingerprint = closeIdempotencyFingerprint(
 				issue.UID, in.Ref, actor, in.Body.Reason, in.Body.Message, in.Body.Source,
-				in.Body.Evidence, in.Body.DryRun, ifMatchRev)
+				in.Body.Evidence, in.Body.DryRun, ifMatchRev, in.Body.Transcript)
 		}
 		if ifMatchRev != nil && issue.Revision != *ifMatchRev {
 			return nil, api.NewError(412, "revision_conflict",
@@ -108,7 +115,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 			if in.IdempotencyKey != "" {
 				return nil, api.NewError(409, "issue_already_closed",
 					"issue was already closed by another request",
-					"omit the idempotency key to accept the current state", nil)
+					"omit --idempotency-key to accept the current state", nil)
 			}
 			out := &api.MutationResponse{}
 			out.Body.Issue = issue
@@ -191,6 +198,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 				IssueID: issue.ID, ExpectedProjectID: in.ProjectID,
 				Reason: in.Body.Reason, Actor: actor,
 				Message: in.Body.Message, Evidence: dbEvidence, IfMatchRev: ifMatchRev,
+				Transcript:     in.Body.Transcript,
 				IdempotencyKey: in.IdempotencyKey, IdempotencyFingerprint: idempotencyFingerprint,
 				DisallowRecurrenceEffects: issueScopeFromContext(ctx) != nil,
 			})
@@ -201,6 +209,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 		})
 		if err == nil && changed {
 			cfg.Publish().Events(in.ProjectID, events)
+			captureCoreAction(ctx, cfg, "issue_closed", in.Surface)
 		}
 		if err != nil {
 			// A connection can fail after the database commits. The keyed
@@ -216,6 +225,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 				if match != nil {
 					if len(events) > 0 && events[0].UID == match.Event.UID {
 						cfg.Publish().Events(in.ProjectID, events)
+						captureCoreAction(ctx, cfg, "issue_closed", in.Surface)
 					}
 					return closeIdempotencyResponse(ctx, cfg, match, idempotencyFingerprint)
 				}
@@ -266,7 +276,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
 			}
 			return nil, api.NewError(409, "issue_already_closed",
 				"issue was closed by another request before this close committed",
-				"retry after reopening, or omit the idempotency key to accept the current state", nil)
+				"retry after reopening, or omit --idempotency-key to accept the current state", nil)
 		}
 		evt, err = scopedMutationEvent(ctx, cfg.DB, evt)
 		if err != nil {
@@ -392,7 +402,8 @@ func closeIdempotencyResponse(
 }
 
 func scopedCloseRefusal(ctx context.Context, unrestricted, scoped string) string {
-	if issueScopeFromContext(ctx) != nil {
+	_, restricted := db.AuthorizedProjects(ctx)
+	if restricted || issueScopeFromContext(ctx) != nil {
 		return scoped
 	}
 	return unrestricted
@@ -402,18 +413,68 @@ func scopedMutationEvent(
 	ctx context.Context, store db.Storage, event *db.Event,
 ) (*db.Event, error) {
 	scope := issueScopeFromContext(ctx)
-	if event == nil || scope == nil {
+	if event == nil {
 		return event, nil
+	}
+	if scope == nil {
+		if _, restricted := db.AuthorizedProjects(ctx); !restricted {
+			return event, nil
+		}
+		return projectScopedMutationEvent(ctx, store, event)
 	}
 	allowed, _, err := issueScopedAllowedIDSet(ctx, store)
 	if err != nil {
 		return nil, err
 	}
-	projected, ok := projectIssueScopedEvent(*event, allowed, scope.ProjectUID)
-	if !ok {
+	projectedEvents, visibleEvents, err := projectIssueScopedEvents(ctx, store, []db.Event{*event}, allowed, scope.ProjectUID)
+	if err != nil {
+		return nil, internalAPIError(err)
+	}
+	if !visibleEvents[0] {
 		return nil, nil
 	}
-	return &projected, nil
+	return &projectedEvents[0], nil
+}
+
+// projectScopedMutationEvent applies the event-read reference boundary to
+// mutation receipts. A receipt may refer to issues that are no longer inside
+// the caller's authorized project scope, even when its subject issue remains
+// accessible.
+func projectScopedMutationEvent(
+	ctx context.Context, store db.Storage, event *db.Event,
+) (*db.Event, error) {
+	reset, err := db.EventRequiresProjectScopeReset(ctx, *event,
+		func(uid string) (db.Issue, error) {
+			return store.IssueByUID(ctx, uid, db.IncludeDeletedYes)
+		},
+		func(projectUID, ref string) (db.Issue, error) {
+			parsed, err := shortid.Parse(ref)
+			if err != nil {
+				return db.Issue{}, db.ErrNotFound
+			}
+			if parsed.ULID != "" {
+				return store.IssueByUID(ctx, parsed.ULID, db.IncludeDeletedYes)
+			}
+
+			var project db.Project
+			if parsed.Project != "" {
+				project, err = store.ProjectByNameIncludingArchived(ctx, parsed.Project)
+			} else {
+				project, err = store.ProjectByUID(ctx, projectUID)
+			}
+			if err != nil {
+				return db.Issue{}, err
+			}
+			return store.IssueByShortID(ctx, project.ID, parsed.ShortID, db.IncludeDeletedYes)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if reset {
+		return nil, nil
+	}
+	return event, nil
 }
 
 // scopedMutationEvents is the multi-event form of scopedMutationEvent for
@@ -431,13 +492,16 @@ func scopedMutationEvents(
 	if err != nil {
 		return nil, true, err
 	}
+	projected, visible, err := projectIssueScopedEvents(ctx, store, events, allowed, scope.ProjectUID)
+	if err != nil {
+		return nil, true, internalAPIError(err)
+	}
 	projectedEvents := make([]db.Event, 0, len(events))
-	for _, event := range events {
-		projected, ok := projectIssueScopedEvent(event, allowed, scope.ProjectUID)
-		if !ok {
+	for index := range events {
+		if !visible[index] {
 			continue
 		}
-		projectedEvents = append(projectedEvents, projected)
+		projectedEvents = append(projectedEvents, projected[index])
 	}
 	return projectedEvents, true, nil
 }
@@ -447,21 +511,30 @@ func closeIdempotencyFingerprint(
 	evidence []api.Evidence,
 	dryRun bool,
 	ifMatchRev *int64,
+	ref *transcript.Transcript,
 ) string {
+	// The session identifies the request; its URL is a derived locator, so a
+	// changed AgentsView base still replays the original close.
+	var session *transcript.Transcript
+	if ref != nil {
+		session = &transcript.Transcript{Agent: ref.Agent, SessionID: ref.SessionID}
+	}
 	encoded, _ := json.Marshal(struct {
-		IssueUID   string         `json:"issue_uid"`
-		RequestRef string         `json:"request_ref"`
-		Actor      string         `json:"actor"`
-		Reason     string         `json:"reason"`
-		Message    string         `json:"message"`
-		Source     string         `json:"source"`
-		Evidence   []api.Evidence `json:"evidence"`
-		DryRun     bool           `json:"dry_run"`
-		IfMatchRev *int64         `json:"if_match_revision"`
+		IssueUID   string                 `json:"issue_uid"`
+		RequestRef string                 `json:"request_ref"`
+		Actor      string                 `json:"actor"`
+		Reason     string                 `json:"reason"`
+		Message    string                 `json:"message"`
+		Source     string                 `json:"source"`
+		Evidence   []api.Evidence         `json:"evidence"`
+		DryRun     bool                   `json:"dry_run"`
+		IfMatchRev *int64                 `json:"if_match_revision"`
+		Transcript *transcript.Transcript `json:"transcript,omitempty"`
 	}{
 		IssueUID: issueUID, RequestRef: requestRef,
 		Actor: actor, Reason: reason, Message: message,
 		Source: source, Evidence: evidence, DryRun: dryRun, IfMatchRev: ifMatchRev,
+		Transcript: session,
 	})
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])

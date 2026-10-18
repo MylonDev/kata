@@ -132,6 +132,7 @@ const (
 // meaningful for spoke bindings; hub bindings keep the local project identity
 // and replay horizon.
 type FederationBinding struct {
+	RelayConfig          *RelayBindingConfig
 	ProjectID            int64
 	Role                 FederationRole
 	HubURL               string
@@ -192,6 +193,11 @@ type FederationQuarantine struct {
 // FederationEnrollment mirrors federation_enrollments. TokenHash stores only
 // the hash of an enrollment token; plaintext tokens are never persisted.
 type FederationEnrollment struct {
+	RelayBindingUID                   string
+	RelayProtocolVersion              int
+	ParentTokenID                     *int64
+	RelayResetEpoch                   int64
+	RelayServeDownstream              bool
 	ID                                int64
 	TokenHash                         string
 	SpokeInstanceUID                  string
@@ -375,6 +381,7 @@ type IssueQualifier struct {
 // Issue mirrors a row in issues. Priority is 0..4 with 0 = highest priority
 // and 4 = lowest; nil means no priority is set.
 type Issue struct {
+	AttributionView
 	ID                  int64      `json:"id"`
 	UID                 string     `json:"uid"`
 	ProjectID           int64      `json:"project_id"`
@@ -419,13 +426,17 @@ type IssueContent struct {
 
 // Comment mirrors a row in comments.
 type Comment struct {
-	ID        int64     `json:"id"`
-	UID       string    `json:"uid"`
-	IssueID   int64     `json:"issue_id"`
-	Author    string    `json:"author"`
-	Teammate  string    `json:"teammate,omitempty"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
+	AttributionView
+	ReplyToUID string     `json:"reply_to_uid,omitempty"`
+	ReplyKind  string     `json:"reply_kind,omitempty"`
+	EditedAt   *time.Time `json:"edited_at,omitempty"`
+	ID         int64      `json:"id"`
+	UID        string     `json:"uid"`
+	IssueID    int64      `json:"issue_id"`
+	Author     string     `json:"author"`
+	Teammate   string     `json:"teammate,omitempty"`
+	Body       string     `json:"body"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 // Event mirrors a row in events. IssueShortID and RelatedIssueShortID are
@@ -483,6 +494,14 @@ type Link struct {
 	Type         string    `json:"type"`
 	Author       string    `json:"author"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// ReplaceParentAndEventsResult contains the committed replacement link and
+// the unlink/link events emitted by the same transaction.
+type ReplaceParentAndEventsResult struct {
+	Link          Link  `json:"link"`
+	UnlinkedEvent Event `json:"unlinked_event"`
+	LinkedEvent   Event `json:"linked_event"`
 }
 
 // IssueLabel mirrors a row in issue_labels.
@@ -596,10 +615,11 @@ type Evidence struct {
 	IssueRef  string   `json:"issue_ref,omitempty"` // duplicate-of, superseded-by
 }
 
-// PurgeLog mirrors a row in purge_log. Snapshots the issue identity at purge
-// time so audits survive any future project rename. EventsDeletedMinID/MaxID
-// and PurgeResetAfterEventID are nullable: NULL when no events were attached
-// to the purged issue.
+// PurgeLog mirrors a row in purge_log. It snapshots the issue identity at purge
+// time so audits survive any future project rename. Deleted event ranges remain
+// NULL when no events were attached. PurgeResetAfterEventID is populated for
+// every successful issue purge so snapshot readers invalidate cached state;
+// replayed historical purge rows may omit it.
 type PurgeLog struct {
 	ID                     int64     `json:"id"`
 	UID                    string    `json:"uid"`

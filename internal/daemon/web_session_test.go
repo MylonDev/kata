@@ -3,8 +3,10 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,13 +77,22 @@ func TestWebLocalSessionIsLimitedToSPAOperations(t *testing.T) {
 	}{
 		{name: "snapshot", method: http.MethodGet, path: "/api/v1/ui/snapshot", want: http.StatusNoContent},
 		{name: "daemon roster", method: http.MethodGet, path: "/api/v1/ui/daemons", want: http.StatusNoContent},
+		{name: "project sync status", method: http.MethodGet, path: "/api/v1/projects/7/federation/status", want: http.StatusNoContent},
+		{name: "global sync status", method: http.MethodGet, path: "/api/v1/federation/status", want: http.StatusForbidden},
+		{name: "proxied project sync status", method: http.MethodGet, path: "/api/v1/ui/proxy/api/v1/projects/7/federation/status", want: http.StatusForbidden},
+		{name: "project federation mutation", method: http.MethodPost, path: "/api/v1/projects/7/federation/status", want: http.StatusForbidden},
 		{name: "credential audit", method: http.MethodGet, path: "/api/v1/tokens", want: http.StatusForbidden},
+		{name: "native cron capabilities", method: http.MethodGet, path: "/api/v1/projects/7/cron/capabilities", want: http.StatusForbidden},
+		{name: "native cron definitions", method: http.MethodGet, path: "/api/v1/projects/7/cron/jobs", want: http.StatusForbidden},
+		{name: "native cron run observation", method: http.MethodPut, path: "/api/v1/projects/7/cron/runs/01K00000000000000000000001", want: http.StatusForbidden},
 		{name: "issue reference", method: http.MethodGet, path: "/api/v1/ui/issue-reference?project_id=7&ref=abc4", want: http.StatusNoContent},
 		{name: "proxied snapshot", method: http.MethodGet, path: "/api/v1/ui/proxy/api/v1/ui/snapshot", want: http.StatusNoContent},
 		{name: "proxied daemon roster", method: http.MethodGet, path: "/api/v1/ui/proxy/api/v1/ui/daemons", want: http.StatusForbidden},
 		{name: "proxied project metadata", method: http.MethodPost, path: "/api/v1/ui/proxy/api/v1/projects/7/metadata", want: http.StatusNoContent},
 		{name: "proxied federation", method: http.MethodPost, path: "/api/v1/ui/proxy/api/v1/federation/replicas", want: http.StatusForbidden},
 		{name: "project creation", method: http.MethodPost, path: "/api/v1/projects", want: http.StatusNoContent},
+		{name: "telemetry", method: http.MethodPost, path: "/api/v1/ui/telemetry", want: http.StatusNoContent},
+		{name: "proxied telemetry", method: http.MethodPost, path: "/api/v1/ui/proxy/api/v1/ui/telemetry", want: http.StatusForbidden},
 		{name: "project metadata", method: http.MethodPost, path: "/api/v1/projects/7/metadata", want: http.StatusNoContent},
 		{name: "full issue lookup", method: http.MethodGet, path: "/api/v1/projects/7/issues/abc4", want: http.StatusForbidden},
 		{name: "deleted issue lookup", method: http.MethodGet, path: "/api/v1/projects/7/issues/abc4?include_deleted=true", want: http.StatusForbidden},
@@ -717,4 +728,92 @@ func newDeterministicSessionManager(t *testing.T, origin, instance string) *WebS
 	})
 	require.NoError(t, err)
 	return manager
+}
+
+func TestLoginListenersPreserveOrdinaryBearerAuthority(t *testing.T) {
+	for _, kind := range []ListenerKind{ListenerBrowser, ListenerSharedTCP} {
+		for _, identity := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/identity=%t", kind, identity), func(t *testing.T) {
+				manager := newDeterministicSessionManager(t, "https://daemon.example", "instance_a")
+				manager.auth = config.AuthConfig{Token: "configured-token", RequireTokenIdentity: identity}
+				if identity {
+					manager.auth.Token = ""
+				}
+				policy := ListenerPolicy{Kind: kind, Origin: manager.Origin(), RequireBrowserSession: true}
+				handler, err := ApplyListenerPolicy(requireBrowserSession(manager, policy, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })), policy)
+				require.NoError(t, err)
+				for _, path := range []string{"/api/v1/projects", "/api/v1/federation/enrollments"} {
+					for _, method := range []string{http.MethodGet, http.MethodPost} {
+						request := httptest.NewRequest(method, manager.Origin()+path, strings.NewReader(`{}`))
+						request.Header.Set("Content-Type", "application/json")
+						request.Header.Set("Authorization", "Bearer configured-token")
+						response := httptest.NewRecorder()
+						handler.ServeHTTP(response, request)
+						assert.Equal(t, http.StatusNoContent, response.Code, "%s %s", method, path)
+					}
+				}
+				for name, headers := range map[string]map[string]string{
+					"origin":  {"Origin": manager.Origin()},
+					"cookie":  {"Cookie": "kata_session_instance_a=ambient-cookie"},
+					"session": {webSessionHeader: "missing-session"},
+					"csrf":    {webCSRFHeader: "missing-csrf"},
+					"fetch":   {"Sec-Fetch-Site": "cross-site"},
+				} {
+					request := httptest.NewRequest(http.MethodPost, manager.Origin()+"/api/v1/federation/enrollments", strings.NewReader(`{}`))
+					request.Header.Set("Authorization", "Bearer configured-token")
+					request.Header.Set("Content-Type", "application/json")
+					for key, value := range headers {
+						request.Header.Set(key, value)
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					assert.NotEqual(t, http.StatusNoContent, response.Code, name)
+				}
+				request := httptest.NewRequest(http.MethodPost, "https://attacker.example/api/v1/federation/enrollments", strings.NewReader(`{}`))
+				request.Header.Set("Authorization", "Bearer configured-token")
+				request.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				assert.Equal(t, http.StatusBadRequest, response.Code, "bearer must never bypass Host validation")
+			})
+		}
+	}
+}
+
+func TestKeylessBrowserListenerDoesNotGrantAuthorityForArbitraryBearer(t *testing.T) {
+	manager := newDeterministicSessionManager(t, "https://daemon.example", "instance_a")
+	policy := ListenerPolicy{Kind: ListenerBrowser, Origin: manager.Origin(), RequireBrowserSession: true}
+	handler, err := ApplyListenerPolicy(requireBrowserSession(manager, policy, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })), policy)
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPost, manager.Origin()+"/api/v1/federation/enrollments", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer arbitrary-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusUnauthorized, response.Code)
+}
+
+func TestBrowserAccessAdministrationBoundary(t *testing.T) {
+	for _, principal := range []Principal{{Kind: PrincipalBootstrap}, {Kind: PrincipalStaticToken}, {Kind: PrincipalWebLocal}, {Kind: PrincipalDBToken, TokenID: 7, Actor: "member"}, {Kind: PrincipalTrustedProxy}, {}} {
+		t.Run(string(principal.Kind), func(t *testing.T) {
+			manager := newDeterministicSessionManager(t, "http://127.0.0.1:27123", "adminboundary")
+			manager.db = &webSessionActiveTokenStore{token: db.APIToken{ID: 7, Actor: "member"}}
+			issued, err := manager.IssueSession(principal, "/kata")
+			require.NoError(t, err)
+			wantAdmin := principal.Kind == PrincipalBootstrap || principal.Kind == PrincipalStaticToken
+			require.Equal(t, wantAdmin, manager.CanAdministerAccess(principal))
+			// This tests the separate administrative exception; ordinary writers
+			// retain their existing path, so use a read-only manager for every role.
+			manager.writable = false
+			require.False(t, manager.CanAdministerAccess(principal))
+			handler := requireBrowserSession(manager, ListenerPolicy{Kind: ListenerBrowser, Origin: manager.Origin(), RequireBrowserSession: true}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+			request := httptest.NewRequest(http.MethodPost, manager.Origin()+"/api/v1/teams", strings.NewReader(`{"name":"blocked"}`))
+			request.AddCookie(manager.Cookie(issued.Cookie))
+			request.Header.Set(webSessionHeader, issued.Session)
+			request.Header.Set(webCSRFHeader, issued.CSRF)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			assert.Equal(t, http.StatusForbidden, response.Code)
+		})
+	}
 }

@@ -1141,6 +1141,24 @@ func TestReadDaemonConfig_AutostartIdentityModeKeepsConfiguredBootstrapToken(t *
 	assert.Equal(t, "bootstrap-token", cfg.Auth.Token)
 }
 
+func TestReadDaemonConfig_AutostartIdentityModeKeepsConfiguredTokenFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KATA_HOME", home)
+	t.Setenv("KATA_AUTOSTART", "1")
+	configuredTokenFile := filepath.Join(home, "bootstrap-token")
+	envTokenFile := filepath.Join(home, "client-token")
+	t.Setenv("KATA_AUTH_TOKEN_FILE", envTokenFile)
+	writePrivateCredentialFixture(t, configuredTokenFile, []byte("bootstrap-token\n"))
+	writePrivateCredentialFixture(t, envTokenFile, []byte("client-db-token\n"))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"),
+		[]byte(fmt.Sprintf("[auth]\ntoken_file = %q\nrequire_token_identity = true\n", configuredTokenFile)), 0o600))
+
+	cfg, err := config.ReadDaemonConfig()
+	require.NoError(t, err)
+	assert.Equal(t, configuredTokenFile, cfg.Auth.TokenFile)
+	assert.Equal(t, "bootstrap-token", cfg.Auth.Token)
+}
+
 func TestReadDaemonConfig_AuthTokenEnvWorksWithoutTOML(t *testing.T) {
 	t.Setenv("KATA_HOME", t.TempDir())
 	t.Setenv("KATA_AUTH_TOKEN", "from-env")
@@ -1487,4 +1505,28 @@ func TestApplyDaemonConfigEnv_AuthProxyListeners(t *testing.T) {
 		[]string{"unix:///s1", "100.64.0.5:7777"},
 		cfg.Auth.Proxy.TrustedProxyListeners,
 		"KATA_TRUSTED_PROXY_LISTENERS must split on commas, trim, drop empties, override config.toml")
+}
+
+// Literal affixes must survive config loading, including leading and trailing spaces.
+func TestEmbeddingAffixesLoadVerbatim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KATA_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte(`
+[search.embeddings]
+base_url = "http://127.0.0.1:9/v1"
+model = "example-model"
+document_prefix = "title: none | text: "
+document_suffix = " document end "
+query_prefix = "task: search result | query: "
+query_suffix = " query end "
+request_dimensions = true
+`), 0o600))
+	cfg, err := config.ReadDaemonConfig()
+	require.NoError(t, err)
+	ec := cfg.Search.Embeddings
+	assert.Equal(t, "title: none | text: ", ec.DocumentPrefix)
+	assert.Equal(t, " document end ", ec.DocumentSuffix)
+	assert.Equal(t, "task: search result | query: ", ec.QueryPrefix)
+	assert.Equal(t, " query end ", ec.QuerySuffix)
+	assert.True(t, ec.RequestDimensions)
 }

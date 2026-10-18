@@ -41,16 +41,21 @@ var ErrSchemaCutoverRequired = errors.New("schema cutover required")
 // consistent snapshot even if other writers commit mid-export.
 type Store struct {
 	*sql.DB
-	path               string
-	instanceUID        string
-	readOnly           bool
-	readQ              readQuerier
-	idempotencyLocks   *idempotencyLockSet
-	rotationStage      func(context.Context) error
-	uiReadStage        func(context.Context) error
-	uiProjectStatsRead func()
-	uiLinkDetailRead   func()
-	externalRootNow    func() time.Time
+	path                         string
+	instanceUID                  string
+	replaceTargetMetadata        bool
+	readOnly                     bool
+	readQ                        readQuerier
+	idempotencyLocks             *idempotencyLockSet
+	rotationStage                func(context.Context) error
+	uiReadStage                  func(context.Context) error
+	uiProjectStatsRead           func()
+	uiLinkDetailRead             func()
+	externalRootNow              func() time.Time
+	federationIngestPrepared     func()
+	relayHistoryFullScanObserver func()
+	relayCheckpointCapacityBytes int64
+	relayHistoryCache            *relayHistoryValidationCache
 }
 
 // readQuerier is the read-only query surface shared between *sql.DB and *sql.Tx.
@@ -92,19 +97,20 @@ func Open(ctx context.Context, path string, opts ...db.OpenOption) (*Store, erro
 	}
 	pragmas = append(pragmas,
 		fmt.Sprintf("_pragma=synchronous(%s)", synchronous),
-		"_pragma=busy_timeout(5000)",
+		fmt.Sprintf("_pragma=busy_timeout(%d)", sqliteBusyTimeout.Milliseconds()),
 	)
 	dsn := fmt.Sprintf("file:%s?%s", sqliteURIPath(path), strings.Join(pragmas, "&"))
-	sdb, err := sql.Open("sqlite", dsn)
+	// Writers on this handle take turns through one write queue; reads stay
+	// concurrent.
+	sdb, err := openQueuedSQLite(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	// Single writer is fine for v1; SetMaxOpenConns left at default for reads.
 	if err := sqliteconfig.ConfigureWAL(ctx, sdb, fast); err != nil {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("configure %s: %w", path, err)
 	}
-	d := &Store{DB: sdb, path: path, idempotencyLocks: newIdempotencyLockSet()}
+	d := &Store{DB: sdb, path: path, idempotencyLocks: newIdempotencyLockSet(), relayHistoryCache: newRelayHistoryValidationCache(), relayCheckpointCapacityBytes: cfg.RelayCheckpointCapacity}
 	d.readQ = sdb
 	if err := d.bootstrap(ctx); err != nil {
 		_ = sdb.Close()
@@ -160,6 +166,21 @@ func (d *Store) RefreshInstanceUID(ctx context.Context) error {
 	}
 	d.instanceUID = v
 	return nil
+}
+
+// InstanceCreatedAt reads meta.instance_created_at, returning zero when the
+// instance UID predates it.
+func (d *Store) InstanceCreatedAt(ctx context.Context) (time.Time, error) {
+	var v string
+	err := d.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key=?`, db.MetaKeyInstanceCreatedAt).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read %s: %w", db.MetaKeyInstanceCreatedAt, err)
+	}
+	return db.ParseInstanceCreatedAt(v)
 }
 
 // bootstrap initializes a fresh database from schema.sql or refuses to open
@@ -245,10 +266,29 @@ func (d *Store) ensureInstanceUIDOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("generate instance_uid: %w", err)
 	}
-	if _, err := d.ExecContext(ctx,
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin seed instance_uid: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO meta(key, value) VALUES('instance_uid', ?)
-		 ON CONFLICT(key) DO NOTHING`, fresh); err != nil {
+		 ON CONFLICT(key) DO NOTHING`, fresh)
+	if err != nil {
 		return fmt.Errorf("seed instance_uid: %w", err)
+	}
+	// Only the opener that created the UID records its creation time.
+	if seeded, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("seed instance_uid: %w", err)
+	} else if seeded == 1 {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING`,
+			db.MetaKeyInstanceCreatedAt, db.FormatInstanceCreatedAt(time.Now())); err != nil {
+			return fmt.Errorf("seed %s: %w", db.MetaKeyInstanceCreatedAt, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit seed instance_uid: %w", err)
 	}
 	var stored string
 	if err := d.QueryRowContext(ctx,
@@ -274,7 +314,7 @@ func openReadOnly(ctx context.Context, path string) (*Store, error) {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("ping read-only %s: %w", path, err)
 	}
-	s := &Store{DB: sdb, path: path, readOnly: true, idempotencyLocks: newIdempotencyLockSet()}
+	s := &Store{DB: sdb, path: path, readOnly: true, idempotencyLocks: newIdempotencyLockSet(), relayHistoryCache: newRelayHistoryValidationCache()}
 	s.readQ = sdb
 	return s, nil
 }
@@ -457,3 +497,29 @@ func (d *Store) hasUserTables(ctx context.Context) (bool, error) {
 
 // SQLite opens a URI, so literal #/?/% in a filesystem path must be escaped.
 func sqliteURIPath(path string) string { return (&url.URL{Path: filepath.ToSlash(path)}).EscapedPath() }
+
+// ClaimScreenView atomically claims one screen's day across all clients sharing this database.
+func (d *Store) ClaimScreenView(ctx context.Context, screen, day string) (bool, error) {
+	var claimed bool
+	err := d.RetryTransient(ctx, func() error {
+		result, err := d.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?, ?)
+   ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value <> excluded.value`,
+			"screen_viewed:"+screen, d.instanceUID+":"+day)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		claimed = count == 1
+		return err
+	})
+	return claimed, err
+}
+
+// ReleaseScreenView preserves newer claims when an earlier enqueue fails.
+func (d *Store) ReleaseScreenView(ctx context.Context, screen, day string) error {
+	return d.RetryTransient(ctx, func() error {
+		_, err := d.ExecContext(ctx, `DELETE FROM meta WHERE key=? AND value=?`,
+			"screen_viewed:"+screen, d.instanceUID+":"+day)
+		return err
+	})
+}

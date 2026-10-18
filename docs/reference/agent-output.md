@@ -1,7 +1,7 @@
 ---
 title: Agent output format
 description: Reference Kata's compact, stable agent output format and its command-specific response contracts.
-last_edited: 2026-10-02
+last_edited: 2026-10-18
 ---
 
 # Agent output format
@@ -74,8 +74,8 @@ Ordinary command output does not repeat the version, to keep transcripts small.
 ## Errors
 
 ```text
-ERR comment validation: comment body is required
-Hint: pass --body, --body-file, or --body-stdin
+ERR list not_found: no .kata.toml ancestor and no git ancestor
+Hint: run "kata init --project <name>" in the workspace root, or pass --project <name>
 ```
 
 - The first line is `ERR <command> <kind>: <message>`.
@@ -83,14 +83,17 @@ Hint: pass --body, --body-file, or --body-stdin
   qualified refs, for example
   `ERR create conflict: 1 existing issue matches this title (example-project#abc4)`.
 - `<kind>` reuses the CLI error taxonomy: `usage`, `validation`, `not_found`,
-  `conflict`, `confirm`, `daemon_unavailable`, `internal`.
-- Optional follow-up lines use fixed field names such as `Hint:`, `Code:`, and
-  `Exit-Code:`.
+  `conflict`, `confirm`, `daemon_unavailable`, `checks_failed`, `internal`.
+  `checks_failed` means `kata doctor` completed and found failed checks;
+  consult its findings for the setup problems and suggested fixes.
+- An optional second line, `Hint: <next step>`, names a command or flag that
+  can resolve the error. It is always a single line.
 - A top-level parse error, before any subcommand runs, uses `kata` as the
   command token: `ERR kata usage: unknown command "cretae"`.
 - In `--format json` errors include daemon-provided details in `error.data`
-  when present; in `--format human`
-  they remain the existing human text.
+  and next-step guidance in `error.hint` when present. An absent or empty hint
+  is omitted. Human errors print that guidance on a second `hint:` line;
+  agent errors use a separate `Hint:` line.
 
 ## Success shapes
 
@@ -171,6 +174,12 @@ OK list count=3
 - issue=j9k2 status=closed title="Old task" revision=3
 ```
 
+List and search headers include `complete=true|false` when the daemon returns
+page metadata. A page with continuation adds `next_cursor=...`; a list requested
+with `--include-total` also adds `total=<n>`. Treat the cursor as opaque and
+continue with the same filters. See [CLI reference](cli.md) for the
+CLI flags and [HTTP listing](http-api.md#listing-issues) for the scan contract.
+
 Empty reads emit the header with `count=0` and no rows:
 
 ```text
@@ -245,6 +254,34 @@ List rows append revision after title. Existing fields keep their names,
 positions, and meanings, so `agent_format` stays `1`.
 A daemon without `[search.embeddings]` reports `mode=lexical` and omits
 `degraded=`. It includes the same added issue context.
+
+#### Teams, project access, bridges and root keys
+
+The team and project-access commands follow the mutation and read shapes.
+`teams list` is a read with one row per team; `teams show` reports its
+members as a comma-separated list and omits `members=` when the team is
+empty, as `projects access` omits `teams=` for `visibility=all`:
+
+```text
+OK teams count=1
+- team=reviewers uid=01HZNQ7VFPK1XGD8R5MABCD4EA revision=2
+OK teams-create team=reviewers uid=01HZNQ7VFPK1XGD8R5MABCD4EA
+OK teams-show team=reviewers uid=01HZNQ7VFPK1XGD8R5MABCD4EA revision=2 members=alice,bob
+OK teams-members-add team=01HZNQ7VFPK1XGD8R5MABCD4EA actor=alice
+OK teams-members-remove team=01HZNQ7VFPK1XGD8R5MABCD4EA actor=alice
+OK projects-access project=spoke-project visibility=teams revision=3 teams=01HZNQ7VFPK1XGD8R5MABCD4EA
+```
+
+The bridge and root-key commands emit one line each. `warning=` appears only
+when the daemon reported one, and `key_file=` only when the daemon has a key
+file path:
+
+```text
+OK federation-bridge-connect project=spoke-project status=ready direction=bidirectional hub=example-hub upstream_account=member local_account=local-member
+OK federation-bridge-status project=spoke-project state=connected direction=bidirectional credential_status=active hub=example-hub upstream_account=member local_account=local-member
+OK federation-bridge-disconnect project=spoke-project status=disconnected warning="the hub grant was not revoked"
+OK federation-root-key-repin project=hub-project status=ready method=unsigned_repin key_id=01HZ... previous_key_id=01HY... creates_key_file=true active_relay_enrollments=2 key_file=/srv/kata/federation-root.key
+```
 
 #### Single-result `next`
 

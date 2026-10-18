@@ -20,6 +20,10 @@ const maxProjectMergeHLCValue int64 = maxProjectMergeID
 // TargetProjectID is the exact new project ID; every other value is added to
 // source IDs from the project snapshot.
 type ProjectMergeOffsets struct {
+	CronJob      int64
+	CronWorkflow int64
+	CronRun      int64
+
 	TargetProjectID int64
 	Alias           int64
 	SyncBinding     int64
@@ -61,6 +65,12 @@ func PrepareProjectMergeRecords(
 	importedExternalMappings := make(map[externalFieldMappingIdentity]struct{})
 	for _, rec := range recs {
 		switch rec := rec.(type) {
+		case *RelayOutboxExport, *RelayInboxExport, *RelayCursorExport:
+			return nil, fmt.Errorf("project merge does not accept hub-local relay delivery records")
+		case *RootKeyPin, *AttributionReceipt, *EntityProvenance:
+			return nil, fmt.Errorf("project merge does not accept trusted provenance; use enrolled federation reset")
+		case *Team, *TeamMembership, *ProjectAccessPolicy:
+			return nil, fmt.Errorf("project merge does not accept hub-local access policy records")
 		case *ProjectExport:
 			if rec.UID == SystemProjectUID || rec.Name == SystemProjectName {
 				return nil, fmt.Errorf("project merge requires one non-system project")
@@ -135,6 +145,21 @@ func PrepareProjectMergeRecords(
 		cloned := cloneImportRecord(rec)
 		var err error
 		switch payload := cloned.(type) {
+		case *CronJobExport:
+			if err = requireMergeProjectID(payload.ProjectID, projectID, payload.ImportKind()); err == nil {
+				payload.ProjectID = offsets.TargetProjectID
+				payload.ID, err = addMergeOffset(payload.ID, offsets.CronJob, payload.ImportKind())
+			}
+		case *CronWorkflowExport:
+			if err = requireMergeProjectID(payload.ProjectID, projectID, payload.ImportKind()); err == nil {
+				payload.ProjectID = offsets.TargetProjectID
+				payload.ID, err = addMergeOffset(payload.ID, offsets.CronWorkflow, payload.ImportKind())
+			}
+		case *CronRunExport:
+			if err = requireMergeProjectID(payload.ProjectID, projectID, payload.ImportKind()); err == nil {
+				payload.ProjectID = offsets.TargetProjectID
+				payload.ID, err = addMergeOffset(payload.ID, offsets.CronRun, payload.ImportKind())
+			}
 		case *ProjectExport:
 			payload.ID = offsets.TargetProjectID
 		case *AliasExport:
@@ -374,6 +399,15 @@ func shiftEventPointers(first, last, reset *int64, offset int64) error {
 
 func cloneImportRecord(rec ImportRecord) ImportRecord {
 	switch rec := rec.(type) {
+	case *CronJobExport:
+		value := *rec
+		return &value
+	case *CronWorkflowExport:
+		value := *rec
+		return &value
+	case *CronRunExport:
+		value := *rec
+		return &value
 	case *MetaKV:
 		v := *rec
 		return &v

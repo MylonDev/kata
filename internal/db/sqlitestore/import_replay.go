@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -35,7 +36,11 @@ func (d *Store) ImportReplay(ctx context.Context, recs []db.ImportRecord, opts d
 	if err != nil {
 		return err
 	}
-	return d.RefreshInstanceUID(ctx)
+	d.invalidateRelayHistoryValidationCache()
+	if err := d.RefreshInstanceUID(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *Store) importReplay(ctx context.Context, recs []db.ImportRecord, opts db.ImportOptions) error {
@@ -72,8 +77,33 @@ func (d *Store) importReplay(ctx context.Context, recs []db.ImportRecord, opts d
 			return err
 		}
 	} else {
+		// Reserve SQLite's writer before reading ownership. This also waits for
+		// an already-started writer, then observes its committed evidence. The
+		// zero-row update changes no data and retains the reservation to commit.
+		if _, err := tx.ExecContext(ctx, `UPDATE meta SET value=value WHERE 0`); err != nil {
+			return fmt.Errorf("reserve restore writer: %w", err)
+		}
 		if err := clearReplayTarget(ctx, tx, opts.RequireFreshTarget, d.instanceUID); err != nil {
 			return err
+		}
+	}
+	var targetIdentity replayInstanceIdentity
+	if !opts.MergeProject {
+		if targetIdentity, err = readReplayInstanceIdentity(ctx, tx); err != nil {
+			return err
+		}
+		// Installing an already-prepared replacement has file-replacement
+		// semantics for metadata as well as rows. Ordinary replay keeps its
+		// existing target-metadata policy. Ownership was checked before either.
+		if d.replaceTargetMetadata {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key NOT IN ('instance_uid','instance_created_at')`); err != nil {
+				return fmt.Errorf("clear replacement metadata: %w", err)
+			}
+		}
+		// meta survives the clear; drop the target's creation time so a source
+		// UID never inherits it.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key=?`, db.MetaKeyInstanceCreatedAt); err != nil {
+			return fmt.Errorf("clear import target %s: %w", db.MetaKeyInstanceCreatedAt, err)
 		}
 	}
 
@@ -115,6 +145,11 @@ func (d *Store) importReplay(ctx context.Context, recs []db.ImportRecord, opts d
 		return err
 	}
 	if !opts.MergeProject {
+		if !d.replaceTargetMetadata {
+			if err := restoreReplayInstanceCreatedAt(ctx, tx, targetIdentity); err != nil {
+				return err
+			}
+		}
 		if err := replayAPITokenProjection(ctx, tx); err != nil {
 			return err
 		}
@@ -168,6 +203,16 @@ func projectMergeOffsets(ctx context.Context, tx *sql.Tx) (db.ProjectMergeOffset
 	if err != nil {
 		return db.ProjectMergeOffsets{}, fmt.Errorf("inspect project merge ID ranges: %w", err)
 	}
+	for _, entry := range []struct {
+		table string
+		value *int64
+	}{
+		{"cron_jobs", &offsets.CronJob}, {"cron_workflows", &offsets.CronWorkflow}, {"cron_runs", &offsets.CronRun},
+	} {
+		if err := tx.QueryRowContext(ctx, "SELECT MAX((SELECT COALESCE(MAX(id),0) FROM "+entry.table+"),COALESCE((SELECT seq FROM sqlite_sequence WHERE name=$1),0))", entry.table).Scan(entry.value); err != nil {
+			return offsets, err
+		}
+	}
 	return offsets, nil
 }
 
@@ -182,6 +227,12 @@ func refuseProjectMergeUIDCollisions(ctx context.Context, tx *sql.Tx, recs []db.
 			checks = append(checks, uidCheck{"issues", "uid", "issue", rec.UID})
 		case *db.CommentExport:
 			checks = append(checks, uidCheck{"comments", "uid", "comment", rec.UID})
+		case *db.CronJobExport:
+			checks = append(checks, uidCheck{"cron_jobs", "uid", "cron job", rec.UID})
+		case *db.CronWorkflowExport:
+			checks = append(checks, uidCheck{"cron_workflows", "uid", "cron workflow", rec.UID})
+		case *db.CronRunExport:
+			checks = append(checks, uidCheck{"cron_runs", "uid", "cron run", rec.UID})
 		case *db.RecurrenceExport:
 			checks = append(checks, uidCheck{"recurrences", "uid", "recurrence", rec.UID})
 		case *db.IssueClaimExport:
@@ -263,6 +314,12 @@ func clearReplayTarget(
 	}
 	// Virtual and shadow FTS tables are excluded by pragma_table_list's type;
 	// deleting issues/comments maintains them through the schema triggers.
+	for _, table := range []string{"cron_runs", "cron_jobs", "cron_workflows"} {
+		//nolint:gosec // Table comes from the fixed cron table list.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return err
+		}
+	}
 	for _, table := range tables {
 		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+quoted); err != nil { //nolint:gosec // catalog identifier is quoted above
@@ -275,22 +332,70 @@ func clearReplayTarget(
 	return nil
 }
 
+// replayInstanceIdentity is the target's instance UID and creation time
+// before replay; createdAt is empty when the UID predates recording it.
+type replayInstanceIdentity struct {
+	uid       string
+	createdAt string
+}
+
+func readReplayInstanceIdentity(ctx context.Context, tx *sql.Tx) (replayInstanceIdentity, error) {
+	var identity replayInstanceIdentity
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(CASE WHEN key='instance_uid' THEN value END), ''),
+		       COALESCE(MAX(CASE WHEN key=? THEN value END), '')
+		FROM meta`, db.MetaKeyInstanceCreatedAt).Scan(&identity.uid, &identity.createdAt)
+	if err != nil {
+		return identity, fmt.Errorf("read import target instance identity: %w", err)
+	}
+	return identity, nil
+}
+
+// restoreReplayInstanceCreatedAt keeps the creation time paired with the
+// instance UID replay ends with: the target's own when its UID survived, or
+// only what the source supplied when the source's UID replaced it.
+func restoreReplayInstanceCreatedAt(ctx context.Context, tx *sql.Tx, target replayInstanceIdentity) error {
+	var finalUID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key='instance_uid'`).Scan(&finalUID); err != nil {
+		return fmt.Errorf("read restored instance_uid: %w", err)
+	}
+	var err error
+	switch {
+	case finalUID != target.uid:
+		return nil
+	case target.createdAt == "":
+		_, err = tx.ExecContext(ctx, `DELETE FROM meta WHERE key=?`, db.MetaKeyInstanceCreatedAt)
+	default:
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES(?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			db.MetaKeyInstanceCreatedAt, target.createdAt)
+	}
+	if err != nil {
+		return fmt.Errorf("restore %s: %w", db.MetaKeyInstanceCreatedAt, err)
+	}
+	return nil
+}
+
 func validateFreshReplayTarget(
 	ctx context.Context,
 	tx *sql.Tx,
 	tables []string,
 	expectedInstanceUID string,
 ) error {
-	var instanceUID, schemaVersion string
-	var metaRows int
+	var instanceUID, schemaVersion, policyRevision string
+	var metaRows, unknownKeys int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*),
 		       COALESCE(MAX(CASE WHEN key='instance_uid' THEN value END), ''),
-		       COALESCE(MAX(CASE WHEN key='schema_version' THEN value END), '')
-		FROM meta`).Scan(&metaRows, &instanceUID, &schemaVersion); err != nil {
+		       COALESCE(MAX(CASE WHEN key='schema_version' THEN value END), ''),
+ COALESCE(MAX(CASE WHEN key='project_access_revision' THEN value END), ''),
+ COALESCE(SUM(CASE WHEN key NOT IN ('instance_uid','schema_version','created_by_version','project_access_revision') THEN 1 ELSE 0 END),0)
+		FROM meta WHERE key<>?`, db.MetaKeyInstanceCreatedAt).Scan(&metaRows, &instanceUID, &schemaVersion, &policyRevision, &unknownKeys); err != nil {
 		return fmt.Errorf("inspect fresh import metadata: %w", err)
 	}
-	if metaRows != 3 || instanceUID != expectedInstanceUID ||
+	if metaRows != 4 || unknownKeys != 0 || policyRevision != "1" || instanceUID != expectedInstanceUID ||
 		schemaVersion != strconv.Itoa(db.CurrentSchemaVersion()) {
 		return fmt.Errorf("import requires a fresh target: metadata changed")
 	}
@@ -339,8 +444,40 @@ const (
 // per-reason aggregate notes.
 func importRecord(ctx context.Context, tx *sql.Tx, r db.ImportRecord, opts db.ImportOptions, skippedLinkIDs map[int64]struct{}) (linkSkip, error) {
 	switch rec := r.(type) {
+	case *db.CronJobExport, *db.CronWorkflowExport, *db.CronRunExport:
+		return linkSkipNone, db.ReplayCronRecord(ctx, tx, rec, false)
 	case *db.MetaKV:
 		return linkSkipNone, importMeta(ctx, tx, rec, opts)
+	case *db.EmbeddingArtifactExport:
+		return linkSkipNone, importEmbeddingArtifact(ctx, tx, rec)
+	case *db.RootKeyPin:
+		active := 1
+		if rec.Retired {
+			active = 0
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO federation_root_keys(project_uid,authority_uid,key_id,public_key,active) VALUES(?,?,?, ?,?)`, rec.ProjectUID, rec.AuthorityUID, rec.KeyID, base64.StdEncoding.EncodeToString(rec.PublicKey), active)
+		return linkSkipNone, err
+	case *db.AttributionReceipt:
+		return linkSkipNone, persistReceiptTx(db.WithRelayStateCapture(ctx), tx, *rec, nil, false)
+	case *db.EntityProvenance:
+		_, err := tx.ExecContext(ctx, `INSERT INTO federation_entity_provenance(project_uid,kind,entity_uid,event_uid) VALUES(?,?,?,?)`, rec.ProjectUID, rec.Kind, rec.EntityUID, rec.EventUID)
+		return linkSkipNone, err
+	case *db.Team:
+		_, err := tx.ExecContext(ctx, `INSERT INTO teams(uid,name,revision) VALUES(?,?,?)`, rec.UID, rec.Name, rec.Revision)
+		return linkSkipNone, err
+	case *db.TeamMembership:
+		_, err := tx.ExecContext(ctx, `INSERT INTO team_memberships(team_uid,actor) VALUES(?,?)`, rec.TeamUID, rec.Actor)
+		return linkSkipNone, err
+	case *db.ProjectAccessPolicy:
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_access_policies(project_uid,visibility,revision) VALUES(?,?,?)`, rec.ProjectUID, rec.Visibility, rec.Revision); err != nil {
+			return linkSkipNone, err
+		}
+		for _, teamUID := range rec.TeamUIDs {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO project_access_teams(project_uid,team_uid) VALUES(?,?)`, rec.ProjectUID, teamUID); err != nil {
+				return linkSkipNone, err
+			}
+		}
+		return linkSkipNone, nil
 	case *db.ProjectExport:
 		return linkSkipNone, importProject(ctx, tx, rec)
 	case *db.AliasExport:
@@ -371,6 +508,8 @@ func importRecord(ctx context.Context, tx *sql.Tx, r db.ImportRecord, opts db.Im
 		)
 	case *db.ExternalFieldStateExport:
 		return linkSkipNone, importExternalFieldState(ctx, tx, rec)
+	case *db.RelayOutboxExport, *db.RelayInboxExport, *db.RelayCursorExport:
+		return linkSkipNone, importRelayState(ctx, tx, rec)
 	case *db.FederationBindingExport:
 		return linkSkipNone, importFederationBinding(ctx, tx, rec)
 	case *db.FederationSyncStatusExport:
@@ -594,8 +733,8 @@ func importIssueEmbedding(_ context.Context, _ *sql.Tx, _ *db.IssueEmbeddingExpo
 
 func importComment(ctx context.Context, tx *sql.Tx, c *db.CommentExport) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO comments(id, uid, issue_id, author, body, created_at, teammate) VALUES(?, ?, ?, ?, ?, ?, NULLIF(?, ''))`,
-		c.ID, c.UID, c.IssueID, c.Author, c.Body, c.CreatedAt, c.Teammate)
+		`INSERT INTO comments(id, uid, issue_id, author, body, created_at, teammate, reply_to_uid, reply_kind, edited_at) VALUES(?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))`,
+		c.ID, c.UID, c.IssueID, c.Author, c.Body, c.CreatedAt, c.Teammate, c.ReplyToUID, c.ReplyKind, c.EditedAt)
 	return wrapImportErr(db.ImportKindComment, err)
 }
 
@@ -949,18 +1088,22 @@ func importFederationBinding(ctx context.Context, tx *sql.Tx, b *db.FederationBi
 	if b.AllowInsecure {
 		allowInsecure = 1
 	}
-	_, err := tx.ExecContext(ctx,
+	raw, err := db.EncodeRelayBindingConfig(b.RelayConfig)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO federation_bindings(
 		   project_id, role, hub_url, hub_project_id, hub_project_uid,
 		   replay_horizon_event_id, pull_cursor_event_id, push_enabled,
 		   push_cursor_event_id, bound_actor, allow_insecure, enabled,
-		   created_at, updated_at, last_sync_at
+		   created_at, updated_at, last_sync_at, relay_config
 		 )
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		b.ProjectID, b.Role, b.HubURL, b.HubProjectID, b.HubProjectUID,
 		b.ReplayHorizonEventID, b.PullCursorEventID, pushEnabled,
 		b.PushCursorEventID, actor, allowInsecure, enabled,
-		b.CreatedAt, b.UpdatedAt, b.LastSyncAt)
+		b.CreatedAt, b.UpdatedAt, b.LastSyncAt, raw)
 	return wrapImportErr(db.ImportKindFederationBinding, err)
 }
 
@@ -1002,13 +1145,13 @@ func importFederationEnrollment(ctx context.Context, tx *sql.Tx, e *db.Federatio
 		   bound_actor, allow_adoption_snapshot_authors,
 		   adoption_baseline_open, adoption_baseline_next_source_event_id,
 		   adoption_baseline_end_source_event_id,
-		   created_at, updated_at, revoked_at
+		   created_at, updated_at, revoked_at,relay_binding_uid,relay_protocol_version,parent_token_id,relay_reset_epoch,relay_serve_downstream
 		 )
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?)`,
 		e.ID, e.TokenHash, e.SpokeInstanceUID, e.ProjectID, e.Capabilities,
 		actor, e.AllowAdoptionSnapshotAuthors, e.AdoptionBaselineOpen,
 		e.AdoptionBaselineNextSourceEventID, e.AdoptionBaselineEndSourceEventID,
-		e.CreatedAt, e.UpdatedAt, e.RevokedAt)
+		e.CreatedAt, e.UpdatedAt, e.RevokedAt, e.RelayBindingUID, e.RelayProtocolVersion, e.ParentTokenID, relayExportEpoch(e.RelayResetEpoch), e.RelayServeDownstream)
 	return wrapImportErr(db.ImportKindFederationEnrollment, err)
 }
 
@@ -1387,7 +1530,7 @@ func upsertSequence(ctx context.Context, tx *sql.Tx, name string, seq int64) err
 }
 
 func reconcileSequences(ctx context.Context, tx *sql.Tx) error {
-	for _, table := range []string{"projects", "project_aliases", "issue_sync_bindings", "issues", "comments", "links", "import_mappings", "events", "purge_log", "project_purge_log", "api_tokens", "federation_enrollments"} {
+	for _, table := range []string{"projects", "project_aliases", "issue_sync_bindings", "issues", "comments", "links", "import_mappings", "events", "purge_log", "project_purge_log", "api_tokens", "federation_enrollments", "federation_relay_outbox"} {
 		var maxID int64
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COALESCE(MAX(id), 0) FROM `+table).Scan(&maxID); err != nil {
@@ -1496,4 +1639,11 @@ func checkForeignKeyViolations(ctx context.Context, tx *sql.Tx) error {
 		sb.WriteString("\n  (output capped at 20 rows per table)")
 	}
 	return errors.New(sb.String())
+}
+
+func relayExportEpoch(epoch int64) int64 {
+	if epoch == 0 {
+		return 1
+	}
+	return epoch
 }

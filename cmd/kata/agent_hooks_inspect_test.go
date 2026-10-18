@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,9 +55,29 @@ func nativeContractHandlers(t *testing.T, agent agenthook.Agent, path string) []
 	return handlers
 }
 
+// nativeHandlerCommandLine joins a handler's command with any exec-form args.
+func nativeHandlerCommandLine(handler map[string]any) string {
+	command, _ := handler["command"].(string)
+	if command == "" {
+		command, _ = handler["bash"].(string)
+	}
+	args, _ := handler["args"].([]any)
+	for _, arg := range args {
+		text, _ := arg.(string)
+		command += " " + text
+	}
+	return command
+}
+
 func installHookFixture(t *testing.T, agent agenthook.Agent, path, executable, marker string, hook agenthook.Hook) {
 	t.Helper()
-	_, err := agenthook.Install(agent, agenthook.InstallOptions{ConfigPath: path, Executable: executable, Arguments: []string{"--source", marker}, Marker: "--source " + marker, Hooks: []agenthook.Hook{hook}})
+	arguments := []string{"--source", marker}
+	if marker == legacyAgentContractHookSource {
+		arguments = []string{"agent-hook", "contract", string(agent), "--source", marker}
+	} else if mode, ok := strings.CutPrefix(marker, legacyAttentionHookSource); ok {
+		arguments = []string{"attention-hook", mode, "--source", marker}
+	}
+	_, err := agenthook.Install(agent, agenthook.InstallOptions{ConfigPath: path, Executable: executable, Arguments: arguments, Marker: "--source " + marker, Hooks: []agenthook.Hook{hook}})
 	require.NoError(t, err)
 }
 
@@ -78,7 +99,7 @@ func TestAgentHooksInstallAllProfiles(t *testing.T) {
 				hook.Event = agenthook.EventUserPromptSubmit
 			}
 			installHookFixture(t, profile.Agent, path, "foreign-before", "example-before", hook)
-			out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", string(profile.Agent), "--executable", executable)
+			out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", string(profile.Agent), "--executable", executable)
 			require.NoError(t, err, stderr)
 			if profile.Agent == agenthook.AgentCodex {
 				require.Contains(t, out, "Codex runs new hooks only after you trust them: open Codex and run /hooks.")
@@ -87,7 +108,7 @@ func TestAgentHooksInstallAllProfiles(t *testing.T) {
 			}
 			handlers := nativeContractHandlers(t, profile.Agent, path)
 			require.Len(t, handlers, 2)
-			commands, err := agenthook.BuildCommand(executable, "agent-hooks", "contract", string(profile.Agent), "--source", agentContractHookSource)
+			commands, err := agenthook.BuildCommand(executable, "agent-hook", "contract", string(profile.Agent), "--source", "kata-agent-contract-hook")
 			require.NoError(t, err)
 			owned := handlers[1]
 			command := owned["command"]
@@ -99,6 +120,11 @@ func TestAgentHooksInstallAllProfiles(t *testing.T) {
 			expected := commands.Native
 			if profile.Agent == agenthook.AgentCopilot {
 				expected = commands.POSIX
+			}
+			// Claude on Windows receives the executable and arguments separately.
+			if profile.Agent == agenthook.AgentClaude && runtime.GOOS == "windows" {
+				expected = executable
+				require.Equal(t, []any{"agent-hook", "contract", "claude", "--source", "kata-agent-contract-hook"}, owned["args"])
 			}
 			require.Equal(t, expected, command)
 			timeoutKey := "timeout"
@@ -127,7 +153,7 @@ func TestAgentHooksInstallAllProfiles(t *testing.T) {
 			require.NoError(t, err)
 			stat, err := os.Stat(path)
 			require.NoError(t, err)
-			out, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", string(profile.Agent), "--executable", executable)
+			out, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", string(profile.Agent), "--executable", executable)
 			require.NoError(t, err, stderr)
 			require.Contains(t, out, "unchanged")
 			require.NotContains(t, out, "Codex runs")
@@ -139,16 +165,12 @@ func TestAgentHooksInstallAllProfiles(t *testing.T) {
 			require.Equal(t, stat.ModTime(), afterStat.ModTime())
 			replacement := filepath.Join(t.TempDir(), "new-kata.exe")
 			require.NoError(t, os.WriteFile(replacement, []byte("fixture"), 0o700)) //nolint:gosec // G306: executable fixture.
-			_, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", string(profile.Agent), "--executable", replacement)
+			_, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", string(profile.Agent), "--executable", replacement)
 			require.NoError(t, err, stderr)
 			handlers = nativeContractHandlers(t, profile.Agent, path)
 			require.Len(t, handlers, 3)
-			for i, marker := range []string{"example-before", "example-after", agentContractHookSource} {
-				command, _ := handlers[i]["command"].(string)
-				if command == "" {
-					command, _ = handlers[i]["bash"].(string)
-				}
-				require.Contains(t, command, marker)
+			for i, marker := range []string{"example-before", "example-after", "agent-hook contract"} {
+				require.Contains(t, nativeHandlerCommandLine(handlers[i]), marker)
 			}
 		})
 	}
@@ -161,7 +183,7 @@ func TestAgentHooksInstallCompleteOwnedSet(t *testing.T) {
 		t.Run(problem, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "hooks.json")
 			planned, err := agenthook.PlanInstall(agenthook.AgentCodex, agenthook.InstallOptions{
-				ConfigPath: path, Executable: os.Args[0], Arguments: []string{"agent-hooks", "contract", "codex", "--source", agentContractHookSource},
+				ConfigPath: path, Executable: os.Args[0], Arguments: []string{"agent-hook", "contract", "codex", "--source", legacyAgentContractHookSource},
 				Marker: agentContractMarker, Hooks: []agenthook.Hook{contractRegistrationHook(agenthook.AgentCodex)},
 			})
 			require.NoError(t, err)
@@ -183,7 +205,7 @@ func TestAgentHooksInstallCompleteOwnedSet(t *testing.T) {
 			data, err := json.Marshal(doc)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(path, data, 0o600))
-			out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--config", path, "--executable", os.Args[0])
+			out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", "codex", "--config", path, "--executable", os.Args[0])
 			require.NoError(t, err, stderr)
 			require.Contains(t, out, "re-trust")
 			require.Contains(t, out, "/hooks")
@@ -194,31 +216,6 @@ func TestAgentHooksInstallCompleteOwnedSet(t *testing.T) {
 	}
 }
 
-func TestAgentHooksInstallCanonicalNeverCallsKitInstall(t *testing.T) {
-	isolateAgentHookHomes(t)
-	t.Chdir(t.TempDir())
-	path := filepath.Join(t.TempDir(), "hooks.json")
-	_, err := agenthook.Install(agenthook.AgentCodex, agenthook.InstallOptions{
-		ConfigPath: path, Executable: os.Args[0], Arguments: []string{"agent-hooks", "contract", "codex", "--source", agentContractHookSource},
-		Marker: agentContractMarker, Hooks: []agenthook.Hook{contractRegistrationHook(agenthook.AgentCodex)},
-	})
-	require.NoError(t, err)
-	root := newRootCmd()
-	group, _, err := root.Find([]string{"agent-hooks"})
-	require.NoError(t, err)
-	original, _, err := group.Find([]string{"install"})
-	require.NoError(t, err)
-	group.RemoveCommand(original)
-	calls := 0
-	group.AddCommand(newAgentHooksInstallCmdWithInstaller(func(agenthook.Agent, agenthook.InstallOptions) (agenthook.Result, error) {
-		calls++
-		return agenthook.Result{}, nil
-	}))
-	_, stderr, err := executeAgentHookRoot(t, root, unreadableHookInput{}, "agent-hooks", "install", "codex", "--config", path, "--executable", os.Args[0])
-	require.NoError(t, err, stderr)
-	require.Zero(t, calls)
-}
-
 func TestAgentHooksInstallPreflight(t *testing.T) {
 	home := isolateAgentHookHomes(t)
 	t.Chdir(t.TempDir())
@@ -226,8 +223,8 @@ func TestAgentHooksInstallPreflight(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	require.NoError(t, os.WriteFile(path, []byte("{broken"), 0o600))
-	out, _, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "claude", "codex", "--executable", os.Args[0], "--json")
-	require.Error(t, err)
+	out, _, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "claude", "codex", "--executable", os.Args[0], "--json")
+	require.ErrorContains(t, err, strconv.Quote(path))
 	require.Empty(t, out)
 	_, err = os.Stat(filepath.Join(home, "claude"))
 	require.ErrorIs(t, err, os.ErrNotExist)
@@ -235,16 +232,16 @@ func TestAgentHooksInstallPreflight(t *testing.T) {
 
 func TestAgentHooksInstallUsageAndCompletion(t *testing.T) {
 	isolateAgentHookHomes(t)
-	for _, args := range [][]string{{}, {"--all", "claude"}, {"claude", "droid"}, {"unknown"}, {"--all", "--config", "x"}, {"--config", "x"}, {"claude", "codex", "--config", "x"}, {"claude", "--config="}, {"claude", "--executable="}} {
-		out, stderr, err := executeAgentHook(t, unreadableHookInput{}, append([]string{"agent-hooks", "install"}, args...)...)
+	for _, args := range [][]string{{"--all", "claude"}, {"claude", "kimi", "--contract-only"}, {"unknown"}, {"--all", "--config", "x"}, {"--config", "x"}, {"claude", "codex", "--config", "x"}, {"claude", "--config="}, {"claude", "--executable="}} {
+		out, stderr, err := executeAgentHook(t, unreadableHookInput{}, append([]string{"agent-hook", "install"}, args...)...)
 		require.Error(t, err, strings.Join(args, " "))
 		require.Empty(t, out)
 		require.Equal(t, ExitUsage, exitCodeForErr(err, runEEntered), stderr)
 	}
-	out, _, err := executeAgentHook(t, unreadableHookInput{}, "__complete", "agent-hooks", "install", "claude", "")
+	out, _, err := executeAgentHook(t, unreadableHookInput{}, "__complete", "agent-hook", "install", "claude", "")
 	require.NoError(t, err)
 	require.Contains(t, out, "codex\n")
-	require.NotContains(t, out, "droid")
+	require.Contains(t, out, "droid")
 	require.NotContains(t, out, "claude\n")
 	require.Contains(t, out, ":4")
 }
@@ -254,7 +251,7 @@ func TestAgentHooksInstallAllAndWorkspaceHint(t *testing.T) {
 	workspace := t.TempDir()
 	t.Chdir(workspace)
 	require.NoError(t, os.Mkdir(filepath.Join(home, "copilot"), 0o700))
-	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "--all", "--executable", os.Args[0], "--json")
+	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--all", "--executable", os.Args[0], "--json")
 	require.NoError(t, err, stderr)
 	var report struct {
 		Version int                 `json:"kata_api_version"`
@@ -264,7 +261,7 @@ func TestAgentHooksInstallAllAndWorkspaceHint(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &report))
 	require.Equal(t, 1, report.Version)
 	require.Equal(t, "install", report.Action)
-	require.Len(t, report.Results, 8)
+	require.Len(t, report.Results, len(agentHookCapabilities()))
 	for _, result := range report.Results {
 		require.NotNil(t, result.Warnings)
 		if result.Harness == "copilot" {
@@ -276,16 +273,16 @@ func TestAgentHooksInstallAllAndWorkspaceHint(t *testing.T) {
 	_, err = os.Stat(filepath.Join(home, "gemini", ".gemini"))
 	require.ErrorIs(t, err, os.ErrNotExist)
 	workspaceConfig := filepath.Join(workspace, ".codex", "hooks.json")
-	installHookFixture(t, agenthook.AgentCodex, workspaceConfig, "kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, workspaceConfig, "kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 	before, err := os.ReadFile(workspaceConfig) //nolint:gosec // G304: selected workspace fixture under temp directory.
 	require.NoError(t, err)
-	out, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--executable", os.Args[0])
+	out, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "codex", "--executable", os.Args[0])
 	require.NoError(t, err, stderr)
 	require.Contains(t, out, "run kata init --with-codex-hooks here to drop the workspace duplicate")
 	after, err := os.ReadFile(workspaceConfig) //nolint:gosec // G304: selected workspace fixture under temp directory.
 	require.NoError(t, err)
 	require.Equal(t, before, after)
-	out, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--config", workspaceConfig, "--executable", os.Args[0])
+	out, stderr, err = executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "codex", "--config", workspaceConfig, "--executable", os.Args[0])
 	require.NoError(t, err, stderr)
 	require.NotContains(t, out, "workspace duplicate")
 }
@@ -295,8 +292,8 @@ func TestAgentHooksInstallHermesMigratesEvent(t *testing.T) {
 	t.Chdir(t.TempDir())
 	path, err := agenthook.ConfigPath(agenthook.AgentHermes)
 	require.NoError(t, err)
-	installHookFixture(t, agenthook.AgentHermes, path, "kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
-	_, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "hermes", "--executable", os.Args[0])
+	installHookFixture(t, agenthook.AgentHermes, path, "kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	_, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", "hermes", "--executable", os.Args[0])
 	require.NoError(t, err, stderr)
 	document := nativeHookDocument(t, agenthook.AgentHermes, path)
 	require.NotContains(t, document["hooks"], "on_session_start")
@@ -317,7 +314,7 @@ func TestAgentHooksInstallExecutableOverride(t *testing.T) {
 	for _, override := range []string{name, executable} {
 		t.Run(override, func(t *testing.T) {
 			config := filepath.Join(t.TempDir(), "hooks.json")
-			_, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--config", config, "--executable", override)
+			_, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", "codex", "--config", config, "--executable", override)
 			require.NoError(t, err, stderr)
 			status, err := readAgentHookStatus(agenthook.AgentCodex, config, "")
 			require.NoError(t, err)
@@ -335,7 +332,7 @@ func TestAgentHooksInstallExecutableOverride(t *testing.T) {
 	for _, override := range invalid {
 		t.Run(override, func(t *testing.T) {
 			config := filepath.Join(t.TempDir(), "hooks.json")
-			_, _, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--config", config, "--executable", override)
+			_, _, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", "codex", "--config", config, "--executable", override)
 			require.ErrorContains(t, err, "executable")
 			_, err = os.Stat(config)
 			require.ErrorIs(t, err, os.ErrNotExist, "invalid executable must fail before writing hooks")
@@ -351,7 +348,7 @@ func TestAgentHooksInstallMalformedWorkspaceIsAdvisory(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	broken := []byte(`{"hooks": [`)
 	require.NoError(t, os.WriteFile(path, broken, 0o600))
-	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--executable", os.Args[0])
+	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", "codex", "--executable", os.Args[0])
 	require.NoError(t, err, stderr)
 	require.Contains(t, out, "installed")
 	require.Contains(t, out, "inspect workspace hooks")
@@ -369,9 +366,9 @@ func TestAgentHooksInstallTrackedDuplicateHint(t *testing.T) {
 	t.Chdir(workspace)
 	runGit(t, workspace, "init", "-q")
 	path := filepath.Join(workspace, ".codex", "hooks.json")
-	installHookFixture(t, agenthook.AgentCodex, path, "kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, path, "kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 	runGit(t, workspace, "add", ".codex/hooks.json")
-	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "codex", "--executable", os.Args[0])
+	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "codex", "--executable", os.Args[0])
 	require.NoError(t, err, stderr)
 	require.Contains(t, out, "tracked")
 	require.Contains(t, out, "keeps")

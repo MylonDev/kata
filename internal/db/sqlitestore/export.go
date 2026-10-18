@@ -306,18 +306,19 @@ func (d *Store) ExportIssueSyncStatus(ctx context.Context, f db.ExportFilter) it
 // ExportComments streams comments ordered by id, scoped via the parent issue
 // (project + soft-delete rides on issues).
 func (d *Store) ExportComments(ctx context.Context, f db.ExportFilter) iter.Seq2[db.CommentExport, error] {
-	query := `SELECT comments.id, comments.uid, comments.issue_id, comments.author, comments.body, CAST(comments.created_at AS TEXT), comments.teammate
+	query := `SELECT comments.id, comments.uid, comments.issue_id, comments.author, comments.body, CAST(comments.created_at AS TEXT), comments.teammate, comments.reply_to_uid, comments.reply_kind, CAST(comments.edited_at AS TEXT)
 	          FROM comments
 	          JOIN issues ON issues.id = comments.issue_id` +
 		exportWhere("issues", f) + ` ORDER BY comments.id ASC`
 	return streamRows(ctx, d.readQ, "comments", query, exportArgs(f),
 		func(rows *sql.Rows) (db.CommentExport, error) {
 			var rec db.CommentExport
-			var teammate sql.NullString
-			if err := rows.Scan(&rec.ID, &rec.UID, &rec.IssueID, &rec.Author, &rec.Body, &rec.CreatedAt, &teammate); err != nil {
+			var teammate, replyTo, replyKind, editedAt sql.NullString
+			if err := rows.Scan(&rec.ID, &rec.UID, &rec.IssueID, &rec.Author, &rec.Body, &rec.CreatedAt, &teammate, &replyTo, &replyKind, &editedAt); err != nil {
 				return db.CommentExport{}, scanError("comment", err)
 			}
 			rec.Teammate = teammate.String
+			rec.ReplyToUID, rec.ReplyKind, rec.EditedAt = replyTo.String, replyKind.String, editedAt.String
 			return rec, nil
 		})
 }
@@ -531,19 +532,28 @@ func (d *Store) ExportFederationBindings(ctx context.Context, f db.ExportFilter)
 	                 replay_horizon_event_id, pull_cursor_event_id, push_enabled,
 	                 push_cursor_event_id, bound_actor, allow_insecure, enabled,
 	                 CAST(created_at AS TEXT), CAST(updated_at AS TEXT),
-	                 CAST(last_sync_at AS TEXT)
+	                 CAST(last_sync_at AS TEXT), relay_config
 	          FROM federation_bindings`
 	query, args := withProjectIDFilter(query, f, "project_id")
 	query += ` ORDER BY project_id ASC`
 	return streamRows(ctx, d.readQ, "federation_bindings", query, args,
 		func(rows *sql.Rows) (db.FederationBindingExport, error) {
 			var rec db.FederationBindingExport
+			var relayConfig *string
 			var enabled, pushEnabled, allowInsecure int
 			if err := rows.Scan(&rec.ProjectID, &rec.Role, &rec.HubURL, &rec.HubProjectID,
 				&rec.HubProjectUID, &rec.ReplayHorizonEventID, &rec.PullCursorEventID,
 				&pushEnabled, &rec.PushCursorEventID, &rec.Actor, &allowInsecure, &enabled,
-				&rec.CreatedAt, &rec.UpdatedAt, &rec.LastSyncAt); err != nil {
+				&rec.CreatedAt, &rec.UpdatedAt, &rec.LastSyncAt, &relayConfig); err != nil {
 				return db.FederationBindingExport{}, scanError("federation_binding", err)
+			}
+			var err error
+			rec.RelayConfig, err = db.DecodeRelayBindingConfig(relayConfig)
+			if err != nil {
+				return db.FederationBindingExport{}, err
+			}
+			if f.ProjectID != nil {
+				rec.RelayConfig = nil
 			}
 			rec.PushEnabled = pushEnabled == 1
 			rec.AllowInsecure = allowInsecure == 1
@@ -604,23 +614,27 @@ func (d *Store) ExportFederationEnrollments(ctx context.Context, f db.ExportFilt
 	                 allow_adoption_snapshot_authors,
 	                 adoption_baseline_open, adoption_baseline_next_source_event_id,
 	                 adoption_baseline_end_source_event_id,
-	                 CAST(created_at AS TEXT), CAST(updated_at AS TEXT), CAST(revoked_at AS TEXT)
+	                 CAST(created_at AS TEXT), CAST(updated_at AS TEXT), CAST(revoked_at AS TEXT),relay_binding_uid,relay_protocol_version,parent_token_id,relay_reset_epoch,relay_serve_downstream
 	          FROM federation_enrollments`
 	query, args := withProjectIDFilter(query, f, "project_id")
+	if f.ProjectID != nil {
+		query += ` AND relay_protocol_version=0 AND parent_token_id IS NULL AND relay_binding_uid IS NULL`
+	}
 	query += ` ORDER BY id ASC`
 	return streamRows(ctx, d.readQ, "federation_enrollments", query, args,
 		func(rows *sql.Rows) (db.FederationEnrollmentExport, error) {
 			var rec db.FederationEnrollmentExport
 			var allow int
-			var baselineOpen int
+			var baselineOpen, serveDownstream int
 			if err := rows.Scan(&rec.ID, &rec.TokenHash, &rec.SpokeInstanceUID, &rec.ProjectID,
 				&rec.Capabilities, &rec.Actor, &allow, &baselineOpen,
 				&rec.AdoptionBaselineNextSourceEventID, &rec.AdoptionBaselineEndSourceEventID,
-				&rec.CreatedAt, &rec.UpdatedAt, &rec.RevokedAt); err != nil {
+				&rec.CreatedAt, &rec.UpdatedAt, &rec.RevokedAt, &rec.RelayBindingUID, &rec.RelayProtocolVersion, &rec.ParentTokenID, &rec.RelayResetEpoch, &serveDownstream); err != nil {
 				return db.FederationEnrollmentExport{}, scanError("federation_enrollment", err)
 			}
 			rec.AllowAdoptionSnapshotAuthors = allow != 0
 			rec.AdoptionBaselineOpen = baselineOpen != 0
+			rec.RelayServeDownstream = serveDownstream != 0
 			return rec, nil
 		})
 }
@@ -753,32 +767,35 @@ func (d *Store) ExportProjectPurgeLog(ctx context.Context, f db.ExportFilter) it
 // events stay in the source project, so requiring the subject's project to
 // equal the event's would silently drop every event of a moved issue.
 func (d *Store) ExportEvents(ctx context.Context, f db.ExportFilter) iter.Seq2[db.EventExport, error] {
-	// Scrub related_issue_id/_uid when the peer is missing entirely (any
-	// event type, either id-keyed or uid-keyed) OR, on a project-filtered
-	// export, when the peer issue lives in an omitted project (cross-project
-	// links export from both sides at storage v16, so the filtered envelope
-	// would otherwise carry a peer the importer never receives) OR, on live-
-	// only export, when an issue.links_changed peer is soft-deleted (kata#1
-	// history-preservation rule). Peer-missing must be checked first so
-	// `peer.deleted_at` doesn't dereference a NULL row. The peer JOIN matches
-	// by id when present, and falls back to uid for federation-inserted events
-	// that carry only related_issue_uid.
-	scrubCondition := `(peer.id IS NULL AND (events.related_issue_id IS NOT NULL OR events.related_issue_uid IS NOT NULL))`
-	// scrubArgs collects the args bound inside the SELECT-list CASE
-	// expressions; they precede every WHERE-clause arg because the CASE
-	// expressions appear first in the query. scrubCondition is embedded once
-	// per related-id/uid expression, so each placeholder it carries is bound
-	// twice.
+	// Missing peer rows require a numeric-FK scrub. Comment events retain their
+	// portable target UID when a target has been purged, so their content hash
+	// and removed-target evidence survive export and restore. Link history keeps
+	// its peer UID when no local peer exists, because federation-inserted link
+	// events carry only that UID. A project-filtered export still strips
+	// references to a peer in an omitted project.
+	relatedIDScrub := `(peer.id IS NULL AND (events.related_issue_id IS NOT NULL OR events.related_issue_uid IS NOT NULL))`
+	relatedUIDScrub := `(peer.id IS NULL AND (events.related_issue_id IS NOT NULL OR events.related_issue_uid IS NOT NULL) AND events.type NOT IN ('issue.commented', 'issue.links_changed'))`
+	// SELECT-list args precede every WHERE-clause arg. Each expression binds
+	// its own project filter when the peer is in an omitted project.
 	var scrubArgs []any
 	if f.ProjectID != nil {
-		scrubCondition += ` OR (peer.id IS NOT NULL AND peer.project_id <> ?)`
+		relatedIDScrub += ` OR (peer.id IS NOT NULL AND peer.project_id <> ?)`
+		relatedUIDScrub += ` OR (peer.id IS NOT NULL AND peer.project_id <> ?)`
 		scrubArgs = append(scrubArgs, *f.ProjectID, *f.ProjectID)
 	}
 	if !f.IncludeDeleted {
-		scrubCondition += ` OR (events.type = 'issue.links_changed' AND peer.deleted_at IS NOT NULL)`
+		relatedIDScrub += ` OR (events.type = 'issue.links_changed' AND peer.deleted_at IS NOT NULL) OR (events.type = 'issue.commented' AND peer.deleted_at IS NOT NULL)`
+		relatedUIDScrub += ` OR (events.type = 'issue.links_changed' AND peer.deleted_at IS NOT NULL)`
 	}
-	relatedIDExpr := `CASE WHEN ` + scrubCondition + ` THEN NULL ELSE events.related_issue_id END`
-	relatedUIDExpr := `CASE WHEN ` + scrubCondition + ` THEN NULL ELSE events.related_issue_uid END`
+	relatedIDExpr := `CASE WHEN ` + relatedIDScrub + ` THEN NULL ELSE events.related_issue_id END`
+	// Root receipts sign related_issue_uid as part of the event hash. Keep that
+	// value when a signed event's peer is omitted, while clearing its local FK.
+	relatedUIDScrub = `(` + relatedUIDScrub + `) AND NOT EXISTS (
+		SELECT 1 FROM federation_event_provenance signed_receipt
+		 WHERE signed_receipt.project_uid=export_project.uid
+		   AND signed_receipt.event_uid=events.uid
+		   AND signed_receipt.content_hash=events.content_hash)`
+	relatedUIDExpr := `CASE WHEN ` + relatedUIDScrub + ` THEN NULL ELSE events.related_issue_uid END`
 	issueIDExpr := `events.issue_id`
 	var subjectArgs []any
 	if f.ProjectID != nil {
@@ -827,11 +844,12 @@ func (d *Store) ExportEvents(ctx context.Context, f db.ExportFilter) iter.Seq2[d
 	if !f.IncludeDeleted {
 		// Drop events whose related peer is soft-deleted, by id or by uid
 		// (the latter covers federation-inserted UID-only events).
-		// issue.links_changed events are exempt: they retain their peer
-		// reference for history reconstruction.
+		// issue.links_changed and issue.commented events remain useful when
+		// their peer is soft-deleted. The comment event keeps the portable UID
+		// while its numeric FK is scrubbed above.
 		clauses = append(clauses,
 			`(events.issue_id IS NULL OR EXISTS (SELECT 1 FROM issues WHERE issues.id = events.issue_id AND issues.deleted_at IS NULL))`,
-			`(events.type = 'issue.links_changed'
+			`(events.type IN ('issue.links_changed', 'issue.commented')
 			  OR ((events.related_issue_id IS NULL OR NOT EXISTS (SELECT 1 FROM issues WHERE issues.id = events.related_issue_id AND issues.deleted_at IS NOT NULL))
 			      AND (events.related_issue_uid IS NULL OR NOT EXISTS (SELECT 1 FROM issues WHERE issues.uid = events.related_issue_uid AND issues.deleted_at IS NOT NULL))))`,
 		)

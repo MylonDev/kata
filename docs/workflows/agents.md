@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-09-28
+last_edited: 2026-10-17
 ---
 
 # Agent workflows
@@ -7,53 +7,309 @@ last_edited: 2026-09-28
 kata is designed to survive the parts of agent work that chat does not: context
 compaction, multiple workers, incomplete attempts, and close discipline.
 
+## Choose the daemon and project
+
+Project bridges and team visibility require Kata 0.19.0 or later.
+
+Select the daemon and project before reading or changing work. `--daemon <name>`
+sends commands to a configured daemon; it does not copy a project. A federation
+bridge keeps a selected project in the receiving daemon's database, where agents
+use the usual issue commands. Follow [Share projects between hubs](../guide/project-relays.md)
+for the operator setup, then verify the replica before taking work.
+
+On an identity-enabled daemon, access follows the authenticated account and its
+project teams. `--as`, `KATA_AUTHOR` and `--teammate` do not grant team access.
+Issue-scoped credentials remain limited to their issue and descendants.
+
+An operator with daemon-owner authority can inspect recorded connection state
+with `kata federation bridge status --project <project> --json` and sync
+diagnostics with `kata federation status --json`. Ordinary workers should ask
+the operator to diagnose transport failures rather than change enrollment.
+A connected bridge may still have pending work. Reads use the local copy;
+`pending` creation attribution waits for root acceptance. See the guide's
+[sync explanation](../guide/project-relays.md#what-sync-means-for-your-work).
+
+## Hookless harnesses
+
+For consumer Muse, generate standing instructions, a Kata skill, and a recurring
+poll specification. This support requires Kata 0.19.0 or later.
+
+```sh
+kata agent-hook instructions install muse --home /path/to/muse-home --actor example-agent --dry --json
+kata agent-hook instructions install muse --home /path/to/muse-home --actor example-agent
+kata agent-hook instructions status muse --home /path/to/muse-home
+kata agent-hook instructions uninstall muse --home /path/to/muse-home
+```
+
+`--home` is required and names the Muse home directory. The installer manages a
+block in `AGENTS.md`, `workspace/skills/kata/SKILL.md`, and
+`workspace/skills/kata/POLL.md` beneath that home. `--dry`
+reads existing files and prints the proposed contents without writing files or
+creating directories. All three artifacts include the canonical hook contract.
+
+Installation preserves bytes outside the marked blocks and existing file modes.
+Reinstalling identical instructions leaves files untouched. Each marker must stay
+on its own line; LF or CRLF line endings and a missing final newline are accepted. An existing unmarked
+skill or poll file, malformed markers, or a symlink at the home or inside its
+managed tree causes an error before writes. Parent aliases such as macOS's
+`/var` are resolved before planning; reported artifact paths use that resolved
+prefix. Uninstall removes the managed blocks and keeps foreign text. It deletes
+the skill and poll files when they become empty but keeps `AGENTS.md`, even when
+empty. It does not remove directories, poll
+state, credentials, or a task created in Muse. Cancel that task in Muse first.
+
+These are instruction-following prompts, not enforcement. Muse must read its
+instructions and skill at conversation start and before claiming completion.
+The generated instructions ask it to read the exact actor's inbox, the bound
+project's ready and attention views, and record evidence before reporting done.
+`status` reports files on disk; it cannot establish that Muse loaded them.
+There are no native attention hooks, idle wakeup, or guaranteed session-end
+handling. The agent updates `work.attention` and `work.attention_msg` itself.
+
+### Create the recurring poll
+
+After choosing authentication, ask Muse to create a task from `POLL.md` through
+its own scheduled-task UI or agent interface. Kata installs neither cron nor a
+Muse task. The spec proposes a five-minute interval; the human confirms the
+schedule, workspace, daemon, actor, and delivery destination in Muse.
+
+Each run reads `kata inbox --for <actor> --json` and drains
+`kata events --after <cursor> --limit 100 --json`. Keep the cursor and previously
+delivered request identities in durable state scoped to that daemon, project,
+and exact actor. Save state atomically after successful reads and delivery.
+Notify the human only about new or changed inbox requests, not every event or
+every unchanged poll. Do not clear a request merely because it was read.
+On `reset_required`, discard cached projections, refresh the inbox and ready
+and attention views, then resume from `reset_after_id`. Failures retain the
+last successfully processed state and retry on the next run.
+
+### Choose authentication explicitly
+
+Installation chooses neither of these options and never reads or prints
+credentials:
+
+- **Owner-only token file:** the human provisions a token file with mode `0600`
+  in a directory with mode `0700`. A private launcher reads it into
+  `KATA_AUTH_TOKEN` for each CLI invocation. Never put the token on argv, in the
+  instruction files, or in poll state; do not enable shell tracing. Kata has no
+  client `auth.token_file` setting. This option exposes the secret to the local
+  process and filesystem, which the human must approve.
+- **Custom connector:** the human hosts `kata mcp serve --http` behind an HTTPS
+  endpoint and configures a Muse connector whose outbound bearer comes from the
+  connector's secret settings. The MCP listener bearer is separate from the bridge's daemon
+  credential. Follow the [HTTP transport rules](../reference/mcp.md#transport).
+  The generated CLI poll is not automatically a connector integration: map its
+  inbox, events, ready, and attention reads to connector tools and confirm the
+  equivalent cursor and notification behavior before enabling the task.
+
+For federation enrollment, follow the [federation guide](../operations/federation.md)
+and verify the joined project before selecting it for polling. This installer
+does not enroll an agent, initialize a project, or configure embeddings.
+
 ## Contract in every session
 
 Load Kata's contract in every coding-agent session on this machine:
 
 ```sh
-kata agent-hooks install --all
+kata agent-hook install
 ```
 
-These commands are available on `main`; they are not included in 0.18.0.
-The installer adds user-level hooks where harness config roots already exist.
+These commands require Kata 0.19.0 or later.
+User scope is the default. Bare installation discovers configured agents and
+installs their contract plus every available attention direction. Dedicated agent
+configuration directories count as evidence; `.github/` and `.agents/` alone do
+not. `--all` uses the same discovery. Name agents to select them explicitly, even
+when their configuration does not exist yet.
 
-Name a harness explicitly, such as `kata agent-hooks install claude codex`,
-to create its config when needed. Kata supports Claude Code, Codex, Copilot,
-Cursor, Gemini CLI, Hermes and Qwen Code. After installing a Codex hook, open
-Codex and run `/hooks` to trust it. Kata does not automate that trust.
-
-Most harnesses load the contract at SessionStart. Hermes uses its first-turn
-`pre_llm_call` hook because its SessionStart event does not inject context.
-The payload must contain a nonempty text `extra.user_message`;
-`extra.is_first_turn: true` selects the first turn. See the
-[Hermes payload limits](../reference/cli.md#contract-injection). The contract
-text is the same inside and outside Kata workspaces.
-Attention hooks stay workspace-only.
-
-For a second Codex home, select its config file:
+Use selected agents, project scope, or project initialization:
 
 ```sh
-kata agent-hooks install codex --config /path/to/second-codex-home/hooks.json
-kata agent-hooks status codex --config /path/to/second-codex-home/hooks.json
+kata agent-hook install codex pi
+kata agent-hook install codex --local
+kata init --agent-hooks=codex,pi
+kata agent-hook install codex --contract-only
 ```
 
-`status` reports the selected user config and the current workspace without a
-daemon. If a workspace also has a Codex contract hook, run
-`kata init --with-codex-hooks` there to apply the
+`init --agent-hooks` accepts comma-separated names and installs a project contract
+plus available attention directions. Add `--contract-only` to omit attention.
+`--local` is shorthand for `--scope project`; automatic local setup can use
+configured user agents as evidence, selecting only project-capable targets.
+Conflicting scope or component flags fail before writes.
+
+Use `--contract-only` or `--attention=false` when a script only needs the
+contract; `--attention` remains accepted. Repeatable `init --with-agent-hooks`
+also installs project bundles. The older `--with-hooks` and
+`--with-codex-hooks` retain their commands and trust identities. Do not combine
+another hook selector with `--agent-hooks`.
+
+Project hooks use `kata` from each teammate's PATH. Use `--executable` on
+`agent-hook install` to choose another executable explicitly; user setup
+defaults to an absolute path. If init reports a hook error after creating or
+binding the project, the binding remains. Fix the error and rerun init. Its
+[structured error](../reference/cli.md#workspace-initialization) records the
+completed project result separately from the hook failure.
+
+Most contract hooks use SessionStart; Hermes uses first-turn
+`pre_llm_call`, Kimi Code uses UserPromptSubmit, and Antigravity uses its first
+PreInvocation. Pi, Amp, OpenCode and OpenClaw use native code extensions.
+The contract also loads outside Kata workspaces. Attention requires a tracked
+issue in `KATA_REF` and uses the native workspace for routing.
+
+### Hook target coverage
+
+These are native capabilities. Runtime trust, permissions and environment
+policy can prevent a configured hook from running.
+
+| Harness name | Contract | Attention start | Native terminal end | Scope notes |
+| --- | --- | --- | --- | --- |
+| `claude` | Yes | Yes | Yes | User/project; project trust required |
+| `codex` | Yes | Yes | Yes | User/project; trust through `/hooks`; current SessionEnd runtime required |
+| `gemini` | Yes | Yes | Yes | User/project |
+| `copilot` | Yes | Yes | Yes | User/project |
+| `cursor` | Yes | Yes | Yes | User/project; editor session hooks differ from cloud agents |
+| `qwen` | Yes | Yes | Yes | User/project |
+| `hermes` | Yes | Yes | Yes | User only; `on_session_finalize` ends a session, `on_session_reset` starts its replacement |
+| `droid` (`factory`) | Yes | Yes | Yes | User/project; native hooks.json with settings.json fallback |
+| `antigravity` (`agy`) | Yes | Launcher | Launcher | User/project; first-invocation context |
+| `amp` | Yes | Yes | Launcher | User or project installations; simultaneous owned user/project configurations rejected |
+| `opencode` | Yes | Yes | Launcher | User/project; runtime version selects the matching v1/v2 API |
+| `pi` | Yes | Yes | Yes | User/project; Pi 0.99.1 or newer; graceful quit only |
+| `openclaw` | Yes | Yes | Yes | User/project; OpenClaw 2026.9.7 or newer; authorized workspace capture required; shared inbox is opt-in |
+| `kimi-code` | Yes | Yes | Yes | User only; UserPromptSubmit context |
+| `kimi` | No | Yes | Yes | Archived Kimi CLI; user only; use committed AGENTS.md for context |
+| `muse` | Yes | Opt-in/launcher | Opt-in/launcher | User/project contract; managed attention requires explicit user opt-in |
+| `grok` | No | Yes | Yes | Official xAI Grok; user/project; avoid duplicate Claude/Cursor compatibility hooks |
+| `zcode` | Yes | Yes | Launcher | Official Z.ai ZCode; user only |
+
+`--contract-only` skips attention-only targets during automatic discovery.
+Muse needs permission to forward Kata environment variables for native attention;
+without that permission, setup reports a partial contract-only result. Stop,
+agent-end, idle and ordinary completed turns
+never count as terminal exits. Abrupt process death cannot run native cleanup.
+Use the [launcher recipe](../operations/agent-orchestration.md#keep-attention-truthful-with-hooks)
+for targets without a terminal hook and older runtimes.
+
+When inbox context is enabled, code extensions refresh the selected
+exact-recipient inbox at prompt boundaries. Cleared requests or read failures
+remove stale inbox text. OpenClaw defaults this behavior off and requires
+`--share-inbox`. Loaded project extensions take precedence per capability where
+the native host permits it.
+Amp plugins run in separate processes, so Kata instead rejects conflicting owned
+user/project installations and records project scopes in a local scope index.
+Multiple Amp project installations are supported.
+
+### Native extension setup
+
+```sh
+kata agent-hook install pi openclaw
+kata agent-hook install opencode
+kata agent-hook install muse --managed-attention
+kata agent-hook status pi --json
+```
+
+Pi uses its structured extension API; reload extensions or restart Pi and
+complete project trust. Amp hidden context requires plugin SDK
+`0.0.0-20260526003443-g9106a62` (May 26, 2026) or newer; there is no separately
+verified numeric Amp CLI floor. OpenCode v1 uses `@opencode-ai/plugin` with the
+system-transform API (1.0.154 or newer); v2 uses `@opencode/plugin` (2.0.0 or
+newer) and a separate generator. V1 discovers `plugin/kata-user.js` or
+`plugin/kata-project.js` under its native config root; v2 uses
+`plugins/kata-user/` or `plugins/kata-project/` packages. Setup probes the selected
+`opencode --version` with a bounded timeout and chooses a supported stable v1 or
+v2 release. Prerelease, unsupported, or ambiguous output does not select an API.
+Use `--api v1|v2` as an advanced override when runtime detection is unavailable;
+it cannot override a known incompatible runtime. Reinstall preserves owned API
+metadata and discovery paths, including when the runtime probe is unavailable.
+A runtime/API mismatch fails before writes;
+uninstall the existing bundle before changing its API. Follow the installed
+plugin's dependency/reload guidance. An exact owned v2 package manifest retains
+registration ownership if its generated entrypoint is missing, so repair and
+removal can recover safely. Edited or ambiguous artifacts remain preserved.
+
+OpenClaw installs a native package and its discovery/permission registration.
+Prompt/workspace capture must be authorized even for attention-only setup.
+Existing deny policies remain in place; status reports unavailable components.
+Inbox context is off by default. `kata agent-hook install openclaw --share-inbox`
+opts in to adding the Gateway's `KATA_INBOX_USER` inbox to every
+prompt handled by the Kata plugin. This is shared across conversations on that
+Gateway; installation and status warn about that scope. Use
+`--share-inbox=false` to disable it without removing the other hooks.
+Reinstalling without the option preserves
+a choice made with this option. Older bundles have no recorded opt-in and are
+updated with sharing off. The recipient is read from the Gateway environment at
+runtime rather than stored in OpenClaw config.
+Kata manages standard JSON configs. JSON5 comments, `$include`, Nix and
+read-only setups need native OpenClaw plugin management; Kata rejects those
+mutations before writing instead of flattening operator configuration.
+Gateway session reset/new RPC and graceful shutdown were exercised against
+2026.9.7; channel-specific slash-command routing is not asserted by installation.
+
+Ordinary Muse hooks clear inherited Kata environment. An explicit single-Muse
+user installation at a terminal can ask once to forward the required variable
+names. Muse passes the user-wide `managed_hooks_env_vars` allowlist to every
+managed hook, including hooks installed by other tools; it includes
+`KATA_AUTH_TOKEN` when set. Review all managed hooks before granting.
+`--managed-attention` supplies that grant for automation and implies attention.
+A valid existing managed path and sufficient allowlist can be reused without
+another grant. Automatic discovery, project setup, JSON, agent output, and
+noninteractive runs never prompt or expand user policy; they report `partial`
+when attention needs permission. The grant stores no credential values,
+preserves existing operator paths/policy, and retains that policy on uninstall.
+Remove the names from Muse settings to revoke it. Its launching environment
+must supply `KATA_REF` and the usual Kata routing/identity variables. Project
+Muse hooks use launcher attention. Native project discovery for Hermes, Kimi
+CLI, Kimi Code and ZCode
+is unverified, so `--scope project` is rejected for them.
+
+### Inspect, customize and remove
+
+```sh
+kata agent-hook install codex --config /path/to/second-codex-home/hooks.json
+kata agent-hook status codex --config /path/to/second-codex-home/hooks.json
+kata agent-hook install pi --source ./agent-prompt.txt
+kata agent-hook uninstall pi
+kata agent-hook uninstall pi --contract-only
+```
+
+`status` stays offline and reports capabilities separately from owned configured
+contract/start/end components. It cannot prove loading, trust or permissions.
+Bare `status` shows both scopes; a named target defaults to user scope. Bare JSON
+keeps user rows in `harnesses` and project rows in `workspace.harnesses`.
+`--local` or `--scope project` inspects the selected workspace configuration.
+OpenCode status and uninstall never run a version probe.
+An unreadable or malformed selected config makes status exit nonzero after
+collecting the other targets. JSON puts that partial report in `error.data`;
+each failed row identifies the config path in `inspection_error`.
+`--config` requires one target and a supported native config-file override;
+Pi and Amp auto-discovered extensions reject it. An executable override can pin
+stable Kata commands. Installer `--source` is data for owned code extensions;
+command-hook installers reject it and preserve authored custom-source commands.
+Relative user-scope source paths are saved as absolute paths from the install
+command's working directory. Project-scope source paths stay relative to the
+selected workspace.
+
+Contract-only reinstall is additive and leaves existing attention enabled.
+Default uninstall removes the full owned bundle; `uninstall --contract-only`
+(or `--attention=false`) removes contracts while preserving independent
+attention, including attention-only extensions where needed. Generated code
+records a digest so unchanged extensions remain upgradeable and removable
+when Kata's templates change. Foreign hooks and edited code, metadata or
+package manifests are preserved.
+Automatic skips and Muse partial setup return success with per-target reasons.
+Bare installation and `--all` with no configured agents return a successful
+skipped report and make no changes. Explicit OpenCode detection failures and
+foreign artifacts are errors.
+All targets are planned before publication. The shared publisher snapshots,
+locks and stages artifacts, then rolls back its unchanged writes after failure;
+it reports retained artifacts when external changes prevent safe rollback.
+Runtime locks stay in the OS temporary directory, outside workspace configs.
+
+If user and workspace Codex contract hooks overlap, run
+`kata init --agent-hooks=codex` or `kata init --with-codex-hooks` there for the
 [workspace deduplication rules](../reference/cli.md#workspace-initialization).
-Kata leaves committed managed guidance in place and reports its overlap as
-informational. Other Codex homes and other workspaces are not edited.
-
-To remove user hooks, run `kata agent-hooks uninstall <harness>...` or
-`kata agent-hooks uninstall --all`. Workspaces initialized while the Codex
-user hook existed may have skipped their contract hook. Rerun
-`kata init --with-codex-hooks` in those workspaces to restore it.
-
-See [user installation and removal](../reference/cli.md#user-installation-and-removal)
-for config overrides, stable executable selection, no-write repeat installs,
-and output fields. The [agent-hooks reference](../reference/cli.md#agent-hooks)
-explains how coding-agent hooks differ from daemon event hooks.
+Tracked workspace hooks remain for teammates. Removing a user contract may
+require rerunning that init flag to restore a previously skipped workspace hook.
+See the [CLI reference](../reference/cli.md#agent-hook) for output fields.
 
 ## Session start
 
@@ -138,9 +394,10 @@ Guidance files produce tendency, not contract: an agent can still end a session
 without updating its issue. For Claude Code workspaces,
 `kata init --with-hooks` additionally installs the
 [attention harness hooks](../operations/agent-orchestration.md#keep-attention-truthful-with-hooks)
-as two command-hook lifecycle entries: `SessionStart` runs `kata agent-hooks attention
-start` for new, resumed, and cleared sessions (but not context compaction), and
-`SessionEnd` runs `kata agent-hooks attention end` only for terminal exits rather
+as two command-hook lifecycle entries: `SessionStart` runs
+`kata attention-hook start` for new, resumed, and cleared sessions (but not
+context compaction), and
+`SessionEnd` runs `kata attention-hook end` only for terminal exits rather
 than clear/resume transitions. Both use the
 launcher-provided `KATA_REF` and intentionally do nothing when it is absent.
 
@@ -148,12 +405,29 @@ For Codex CLI workspaces, `kata init --with-codex-hooks` installs attention and,
 when needed, contract `SessionStart` hooks in `.codex/hooks.json`. The contract
 hook injects the canonical briefing on startup, resume, clear, and context
 compaction. The attention hook runs
-`kata agent-hooks attention start` on startup, resume, and clear (but not compaction),
-using the same launcher-provided `KATA_REF`. Codex has no stable session-end
-hook event yet, so pair the attention hook with a launcher wrapper that runs
-`kata agent-hooks attention end` after the Codex invocation exits; see
+`kata attention-hook start` on startup, resume, and clear (but not compaction),
+using the same launcher-provided `KATA_REF`. It also installs
+`kata attention-hook end` on genuine SessionEnd. Older Codex runtimes without
+that event need launcher cleanup; see
 [agent orchestration](../operations/agent-orchestration.md#keep-attention-truthful-with-hooks)
 for the recipe.
+
+For direct Codex prompt injection, `kata agent-contract-hook` emits the default
+SessionStart response without reading stdin. An optional local prompt replaces
+the entire briefing:
+
+```sh
+kata agent-contract-hook --source ./agent-prompt.txt
+```
+
+A missing file uses the built-in contract; an empty file supplies an empty
+prompt. Invalid text or unreadable paths fail before any response. The native
+`kata agent-hook contract <harness>` form accepts the same file option.
+Attention hooks do not inject prompts. New installs use bare commands; the
+visible attention commands continue to accept only the exact legacy ownership
+marker for their mode. See the [CLI reference](../reference/cli.md#workspace-attention)
+for the supported forms and the
+[contract reference](../reference/cli.md#contract-injection) for file semantics.
 
 ## Teammate heads-up
 
@@ -234,6 +508,230 @@ context.
 Harness adapters live outside Kata. `quickstart`, `--with-agents`, and the hook
 installers do not install a runtime scheduler or wakeup adapter.
 
+## Reply to a finding
+
+Point workers at the comment they need to answer. A typed link records whether
+an agent builds on, reproduces, contradicts, or replaces that finding. The log
+stays chronological; Kata stores a reference without copying the target's body.
+Comment replies require Kata 0.19.0 or later and daemon API `0.28.0`. Reply
+notifications, broadcasts, and `wait --until reply`, described from
+[How replies reach the inbox](#how-replies-reach-the-inbox) onward, are planned.
+
+### Find and use comment handles
+
+Read `kata show abc4` to find a comment's handle. Handles use a lowercase suffix
+of the comment UID, starting at 6 characters and extending until unique in the
+project. Resolution is case-insensitive. Copy the displayed handle; a full
+26-character comment UID is always accepted, and JSON keeps full UIDs.
+
+| Target | Handle form | Example |
+| --- | --- | --- |
+| Comment on the current issue | `c:<suffix>` | `c:xbzxrq` |
+| Comment on another issue in the same project | `<issue>:<suffix>` | `d4ex:xbzxrq` |
+| Project-qualified issue in the same project | `<project>#<issue>:<suffix>` | `spoke-project#d4ex:xbzxrq` |
+
+Project qualification does not permit cross-project replies. Use issue-level
+`--related` for context from another project. Each comment links to one target;
+to answer two findings, post two replies. The target must exist and be visible
+to the actor. The reply's issue must be open, but the target's issue may be
+closed. A comment cannot target itself. Editing a reply never changes its link.
+
+Choose the kind explicitly:
+
+| Flag | Meaning | Body requirement |
+| --- | --- | --- |
+| `--reply <cref>` | Responds to or builds on the target | Explain the response |
+| `--confirm <cref>` | Reproduced or verified the target | At least 40 characters of evidence |
+| `--refute <cref>` | Contradicts the target | At least 40 characters of evidence |
+| `--supersede <cref>` | Replaces the target; the target is outdated | Explain the replacement |
+
+```sh
+kata comment abc4 --reply c:xbzxrq -m "This builds on the finding."
+kata comment abc4 --confirm c:xbzxrq -m "Reproduced the result with the documented retry steps."
+kata comment abc4 --refute d4ex:xbzxrq -m "The retry still fails when the connection drops twice."
+kata comment abc4 --supersede c:xbzxrq -m "The updated finding replaces this one."
+```
+
+Kinds are assertions by the attributed actor, not facts Kata verifies. Teammate
+attribution is trusted within that actor; it is not a signed identity or an
+access boundary.
+
+If the same actor and teammate already linked the same target with the same
+kind, Kata refuses the duplicate with `409` and the existing comment's handle.
+Use `--force` only for a deliberate second assertion. For retries, pass
+`kata comment --idempotency-key <key>` and reuse that key with the same body,
+target, and kind. The receipt protects retries on one daemon; it does not
+promise exactly-once delivery across daemons.
+
+### Read replies and changed findings
+
+`kata show` displays each handle, its reply kind and target, and backlinks from
+comments that refer to it. Backlinks from other issues include their issue ref.
+Readers only see authorized comments and links.
+
+```sh
+kata show abc4 --thread c:xbzxrq
+kata show abc4 --inbound coordinator
+kata show abc4 --inbound coordinator --kind refute
+kata show abc4 --since c:xbzxrq
+```
+
+`--thread <cref>` reads the target and its replies transitively across the
+project, in chronological order. It is cycle-safe and capped at 50 comments;
+truncation is stated. `--inbound [<actor>[/<teammate>]]` finds comments anywhere
+in the project that link to that author's comments on this issue. Use
+`--kind <reply|confirm|refute|supersede>` with either view to select a kind.
+
+`--since <cref>` reads comments after that handle in `(created_at, uid)` order.
+A late federated comment can sort before the handle. Use the inbox to learn
+about replies; `--since` is a reading aid.
+
+The TUI and Web UI show nonzero counts for authorized direct incoming kinds on
+original comments. Place the summary immediately below the comment body and
+before expanded backlinks. Omit zero kinds and keep the order reply, confirm,
+refute, supersede. For example:
+
+```text
+Replies 1 | Confirmations 2 | Refutations 1 | Superseding replies 1
+```
+
+Open a kind's count to inspect each directly linked comment in chronological
+order, with its author, teammate when present, time, handle, and body, then jump
+to it and return focus to the original. The TUI uses a keyboard picker through
+the existing comment navigation pattern; the Web UI uses keyboard-accessible,
+labelled controls with names such as “Show 2 confirmation replies”. Text carries
+the meaning. Symbols and theme colors may supplement the text.
+
+Kata filters links by authorization before counting or rendering. Counts
+include only directly linked comments the reader may access. If the authorized
+list is incomplete or paginated, use the server's authorized total when
+available; otherwise mark the count as partial, such as `2+`. Never infer a
+complete count from a partial list or an unfiltered client cache. Counts are
+comments, not votes or a truth score; Kata does not resolve conflicting
+assertions automatically. Conflicting assertions stay visible together, and a
+superseding reply does not hide or strike through its target. Replies also show
+their outgoing relation, such as `Confirms c:ab12cd by worker-a`. Pending,
+removed, moved, and edited target states remain visible. Retrying a failed
+refresh does not duplicate rows or inflate counts.
+
+A target not yet received through federation displays as `(pending)`; a purged
+target as `(removed)`; a target whose issue moved to another project as
+`(moved)`. If the target was edited after the reply was created, Kata labels it
+`(target edited after reply)`. Read the current finding before relying on an
+older confirmation. Kata records the edit without claiming to verify content.
+
+### How replies reach the inbox
+
+Planned: Kata 0.19.0 does not write reply notifications to the inbox or accept
+the `notify --re`, `notify --broadcast`, or `wait --until reply` options shown
+in this section. Use `kata show --inbound` and targeted `kata notify --to`
+requests until they ship.
+
+Every linked comment notifies the target's author and teammate. Replies to your
+own comments do not notify you. Each issue has one `notify.<recipient>` slot
+per exact recipient; later link notifications replace earlier ones. The inbox
+shows the latest kind and comment handle. Its count, if present, is only a hint.
+A link never replaces a human request without a `re` comment pointer. The reply
+still appears in `show` when that request takes precedence.
+
+A `confirm` also reaches the issue owner, the parent owner's address for a
+child issue, and up to 8 earlier linkers of the same target, newest first. A
+recipient already awaiting a link notification about that target is skipped.
+The parent owner's slot is written on the child issue; coordinators can find it
+with `kata inbox --for coordinator --all` without `--project` or `--workspace`.
+
+An inbox slot's `re` is the comment UID the recipient should open. Posting
+`--reply` to that comment clears the matching slot in the same transaction.
+Only slots with `re` auto-clear; ordinary human requests still require explicit
+`notify --clear` after handling. To point one worker at a specific comment:
+
+```sh
+kata notify abc4 --to coordinator/teammate-1 --re c:xbzxrq \
+  --message "Please check this finding"
+```
+
+Linked comments also update notification metadata and advance the issue
+revision. Writers using `meta set --if-match` can see more `412` conflicts.
+Read the current revision before retrying a guarded write.
+
+### Coordinate a group
+
+Planned: this workflow depends on the reply notifications described in
+[How replies reach the inbox](#how-replies-reach-the-inbox), which Kata 0.19.0
+does not include.
+
+Post a finding, copy its handle from `show`, and request the relevant worker's
+attention with `--to ... --re`. The worker responds with one of the four kinds.
+The coordinator reads its exact inbox and inbound links:
+
+```sh
+kata inbox --for coordinator
+kata wait abc4 --until reply --timeout 5m
+kata inbox --for coordinator
+kata show abc4 --inbound coordinator
+```
+
+`wait --until reply` observes changes to the waiter's notification slot after
+its first poll. Use the same actor/teammate identity as the intended recipient;
+`KATA_INBOX_USER` selects an inbox read, not comment attribution. A notification
+already present at the first poll does not satisfy the wait. A later slot
+replacement or clear can satisfy it, so inspect the inbox and linked comments
+to learn what changed. Fast replies can arrive before that first poll; inspect
+the inbox before waiting and after a timeout. Latest-wins slots can replace a
+reply between polls. There is no comment-target filter for this wait.
+
+Waiting does not claim work, launch an agent, or install wakeup integration.
+The [external harness](#teammate-heads-up) still maps exact addresses to workers
+and handles idle runtimes.
+
+When a response needs ownership, a separate branch, or tracked completion,
+a comment-sized task becomes a child issue. Create it with `--parent <ref>`
+and an idempotency key, then have its worker `kata claim` the child. Comments
+record findings and replies; child issues record accountable work. Parent links
+group that work without gating readiness.
+
+### Broadcast only when the group needs it
+
+Planned: this workflow depends on the reply notifications described in
+[How replies reach the inbox](#how-replies-reach-the-inbox), which Kata 0.19.0
+does not include.
+
+A coordinator can request attention from everyone working on an issue:
+
+```sh
+kata notify abc4 --broadcast --re c:xbzxrq \
+  --message "Please check this finding"
+kata wait abc4 --until reply --timeout 5m
+kata inbox --for coordinator
+```
+
+`--re <cref>` is optional. Broadcast reaches the issue owner and each distinct
+commenter, plus owners and commenters on open child issues one level deep,
+using local links. By default commenters are addressed as actors; add
+`--teammates` to include their teammate addresses. The sender, `system`, and
+integration authors are excluded. All recipient slots are written on the
+broadcast issue in one metadata event. The inbox labels it as a broadcast.
+
+Broadcast refuses closed issues. More than 50 recipients is an error; Kata
+never truncates the list. `--json` returns the resolved recipients.
+
+Limits apply per writing daemon, not globally across federated daemons:
+
+- One broadcast per sender (`actor[/teammate]`) per issue per 10 minutes.
+- At most 3 broadcasts per issue per hour across all senders.
+- No identical message from the same sender within that hour.
+
+A refusal returns `429 broadcast_rate_limited` with `retry_after_seconds`,
+`window`, `last_broadcast_at`, `last_broadcast_by`, and `last_message_prefix`.
+It emits no events and does not extend the window. Prefer a targeted
+`--to ... --re` request when rate-limited. Broadcast stays out of the
+per-session contract and remains a planned coordinator workflow in this guide.
+
+For federation rollout, upgrade hubs to the comment-link schema before their
+spokes. A schema-30 hub rejects pushes from a schema-31 spoke. Older CLIs ignore
+the new comment fields. Follow the [federation upgrade guide](../operations/federation.md)
+for the participating daemons.
+
 ## Use Kata through MCP
 
 Agents with an MCP client can start Kata as a stdio server bound to the current
@@ -253,7 +751,7 @@ kata mcp serve \
   --http-token-env KATA_MCP_HTTP_TOKEN
 ```
 
-The server starts with 14 section loaders. An agent loads only the detailed
+The server starts with section loaders. An agent loads only the detailed
 issue, project, administration, automation, or event tools needed for its task.
 Pass `--workspace` or `--project` for an explicit project, `--projects` for a
 fixed allowlist, or `--all` to use every project visible to the
@@ -427,8 +925,7 @@ Closing as you finish each issue leaves a better audit trail. See
 If work is incomplete:
 
 ```sh
-kata label add abc4 needs-review --agent
-kata comment abc4 --body "Drafted remote-daemon docs; still need token identity verification." --agent
+kata label add abc4 needs-review --comment "Drafted remote-daemon docs; still need token identity verification." --agent
 ```
 
 ## Poll events during long runs

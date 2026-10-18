@@ -36,6 +36,10 @@ type DigestGlobalResponse = DigestResponseBody
 
 type DigestGlobalErrorResponse = ErrorEnvelope
 
+type DoctorResponse = DoctorResponseBody
+
+type DoctorErrorResponse = ErrorEnvelope
+
 type PollEventsResponse = PollEventsBody
 
 type PollEventsErrorResponse = ErrorEnvelope
@@ -44,6 +48,18 @@ type PollEventsErrorResponse = ErrorEnvelope
 type StreamEventsResponse = []byte
 
 type StreamEventsErrorResponse = ErrorEnvelope
+
+type ConnectFederationBridgeResponse = FederationBridgeBody
+
+type ConnectFederationBridgeErrorResponse = ErrorEnvelope
+
+type GetFederationBridgeStatusResponse = FederationBridgeStatusBody
+
+type GetFederationBridgeStatusErrorResponse = ErrorEnvelope
+
+type DisconnectFederationBridgeResponse = FederationBridgeDisconnectResult
+
+type DisconnectFederationBridgeErrorResponse = ErrorEnvelope
 
 type ListFederationEnrollmentsResponse = ListFederationEnrollmentsBody
 
@@ -72,6 +88,12 @@ type LeaveFederationReplicaErrorResponse = ErrorEnvelope
 type RebindFederationReplicaResponse = RebindFederationReplicaResponseBody
 
 type RebindFederationReplicaErrorResponse = ErrorEnvelope
+
+type ConfigureFederationSigningErrorResponse = ErrorEnvelope
+
+type RepinFederationRootKeyResponse = FederationRootKeyRepinResult
+
+type RepinFederationRootKeyErrorResponse = ErrorEnvelope
 
 type GetFederationStatusResponse = FederationStatusBody
 
@@ -121,6 +143,14 @@ type RenameProjectResponse = ShowProjectResponseBody
 
 type RenameProjectErrorResponse = ErrorEnvelope
 
+type GetProjectAccessResponse = ProjectAccessResponseBody
+
+type GetProjectAccessErrorResponse = ErrorEnvelope
+
+type SetProjectAccessResponse = ProjectAccessResponseBody
+
+type SetProjectAccessErrorResponse = ErrorEnvelope
+
 type PurgeProjectResponse = ProjectPurgeResponseBody
 
 type PurgeProjectErrorResponse = ErrorEnvelope
@@ -132,6 +162,70 @@ type RewriteAuthorIdentityErrorResponse = ErrorEnvelope
 type DetachProjectAliasResponse = DetachProjectAliasResponseBody
 
 type DetachProjectAliasErrorResponse = ErrorEnvelope
+
+type GetCronCapabilitiesResponse = CronCapabilitiesResponseBody
+
+type GetCronCapabilitiesErrorResponse = ErrorEnvelope
+
+type ListCronJobsResponse = ListCronJobsResponseBody
+
+type ListCronJobsErrorResponse = ErrorEnvelope
+
+type CreateCronJobResponse = CronJobResponseBody
+
+type CreateCronJobErrorResponse = ErrorEnvelope
+
+type ArchiveCronJobResponse = CronJobResponseBody
+
+type ArchiveCronJobErrorResponse = ErrorEnvelope
+
+type ShowCronJobResponse = CronJobResponseBody
+
+type ShowCronJobErrorResponse = ErrorEnvelope
+
+type ReplaceCronJobResponse = CronJobResponseBody
+
+type ReplaceCronJobErrorResponse = ErrorEnvelope
+
+type RestoreCronJobResponse = CronJobResponseBody
+
+type RestoreCronJobErrorResponse = ErrorEnvelope
+
+type ListCronRunsResponse = CronRunsResponseBody
+
+type ListCronRunsErrorResponse = ErrorEnvelope
+
+type ShowCronRunResponse = CronRunResponseBody
+
+type ShowCronRunErrorResponse = ErrorEnvelope
+
+type ObserveCronRunResponse = ObserveCronRunResponseBody
+
+type ObserveCronRunErrorResponse = ErrorEnvelope
+
+type ListCronWorkflowsResponse = ListCronWorkflowsResponseBody
+
+type ListCronWorkflowsErrorResponse = ErrorEnvelope
+
+type CreateCronWorkflowResponse = CronWorkflowResponseBody
+
+type CreateCronWorkflowErrorResponse = ErrorEnvelope
+
+type ArchiveCronWorkflowResponse = CronWorkflowResponseBody
+
+type ArchiveCronWorkflowErrorResponse = ErrorEnvelope
+
+type ShowCronWorkflowResponse = CronWorkflowResponseBody
+
+type ShowCronWorkflowErrorResponse = ErrorEnvelope
+
+type ReplaceCronWorkflowResponse = CronWorkflowResponseBody
+
+type ReplaceCronWorkflowErrorResponse = ErrorEnvelope
+
+type RestoreCronWorkflowResponse = CronWorkflowResponseBody
+
+type RestoreCronWorkflowErrorResponse = ErrorEnvelope
 
 type DigestProjectResponse = DigestResponseBody
 
@@ -168,6 +262,26 @@ type RetryFederationQuarantineErrorResponse = ErrorEnvelope
 type SkipFederationQuarantineResponse = FederationQuarantineSummary
 
 type SkipFederationQuarantineErrorResponse = ErrorEnvelope
+
+type OfferRelayDeliveriesResponse = RelayBatchResponse
+
+type OfferRelayDeliveriesErrorResponse = ErrorEnvelope
+
+type GetRelayResetResponse = RelayResetCheckpoint
+
+type GetRelayResetErrorResponse = ErrorEnvelope
+
+type AcceptRelayDeliveriesResponse = RelayAcceptance
+
+type AcceptRelayDeliveriesErrorResponse = ErrorEnvelope
+
+type AckRelayDeliveriesResponse = RelayAckResponseBody
+
+type AckRelayDeliveriesErrorResponse = ErrorEnvelope
+
+type DisconnectRelayEnrollmentResponse = DisconnectRelayResponseBody
+
+type DisconnectRelayEnrollmentErrorResponse = ErrorEnvelope
 
 type GetProjectFederationStatusResponse = FederationStatusBody
 
@@ -337,6 +451,10 @@ type PatchIssueMetadataResponse = PatchIssueMetadataResponseBody
 
 type PatchIssueMetadataErrorResponse = ErrorEnvelope
 
+type IssuePlanningDatesResponse = IssuePlanningDates
+
+type IssuePlanningDatesErrorResponse = ErrorEnvelope
+
 type ListLabelsResponse = LabelsListResponseBody
 
 type ListLabelsErrorResponse = ErrorEnvelope
@@ -395,6 +513,30 @@ type ReadyIssuesGlobalResponse = ReadyGlobalResponseBody
 
 type ReadyIssuesGlobalErrorResponse = ErrorEnvelope
 
+type ListTeamsResponse = ListTeamsResponseBody
+
+type ListTeamsErrorResponse = ErrorEnvelope
+
+type CreateTeamResponse = TeamResponseBody
+
+type CreateTeamErrorResponse = ErrorEnvelope
+
+type DeleteTeamResponse = AccessAdministrationResponseBody
+
+type DeleteTeamErrorResponse = ErrorEnvelope
+
+type ShowTeamResponse = ShowTeamResponseBody
+
+type ShowTeamErrorResponse = ErrorEnvelope
+
+type RemoveTeamMemberResponse = AccessAdministrationResponseBody
+
+type RemoveTeamMemberErrorResponse = ErrorEnvelope
+
+type AddTeamMemberResponse = AccessAdministrationResponseBody
+
+type AddTeamMemberErrorResponse = ErrorEnvelope
+
 type ListTokensResponse = ListTokensResponseBody
 
 type ListTokensErrorResponse = ErrorEnvelope
@@ -418,6 +560,10 @@ type ReadUILaunchTargetErrorResponse = ErrorEnvelope
 type ReadUIReferencesResponse = UIReferencesResponseBody
 
 type ReadUISnapshotResponse = UISnapshotResponseBody
+
+type CaptureTelemetryEventResponse = CaptureTelemetryEventResponseBody
+
+type CaptureTelemetryEventErrorResponse = ErrorEnvelope
 
 type AuditClosesResp struct {
 	HTTPResponse *http.Response
@@ -475,17 +621,51 @@ type DigestGlobalResp struct {
 	JSON200      *DigestGlobalResponse
 }
 
+type DoctorResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *DoctorResponse
+}
+
+type PollEventsResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
+}
+
 type PollEventsResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
 	StatusCode   int
 	JSON200      *PollEventsResponse
+	Headers200   *PollEventsResp200Headers
 }
 
 type StreamEventsResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
 	StatusCode   int
+}
+
+type ConnectFederationBridgeResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ConnectFederationBridgeResponse
+}
+
+type GetFederationBridgeStatusResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetFederationBridgeStatusResponse
+}
+
+type DisconnectFederationBridgeResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *DisconnectFederationBridgeResponse
 }
 
 type ListFederationEnrollmentsResp struct {
@@ -535,6 +715,19 @@ type RebindFederationReplicaResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *RebindFederationReplicaResponse
+}
+
+type ConfigureFederationSigningResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+}
+
+type RepinFederationRootKeyResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *RepinFederationRootKeyResponse
 }
 
 type GetFederationStatusResp struct {
@@ -621,6 +814,20 @@ type RenameProjectResp struct {
 	JSON200      *RenameProjectResponse
 }
 
+type GetProjectAccessResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetProjectAccessResponse
+}
+
+type SetProjectAccessResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *SetProjectAccessResponse
+}
+
 type PurgeProjectResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
@@ -642,6 +849,123 @@ type DetachProjectAliasResp struct {
 	JSON200      *DetachProjectAliasResponse
 }
 
+type GetCronCapabilitiesResp200Headers struct {
+	XKataEventFeatures string `header:"X-Kata-Event-Features"`
+}
+
+type GetCronCapabilitiesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetCronCapabilitiesResponse
+	Headers200   *GetCronCapabilitiesResp200Headers
+}
+
+type ListCronJobsResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ListCronJobsResponse
+}
+
+type CreateCronJobResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON201      *CreateCronJobResponse
+}
+
+type ArchiveCronJobResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ArchiveCronJobResponse
+}
+
+type ShowCronJobResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ShowCronJobResponse
+}
+
+type ReplaceCronJobResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ReplaceCronJobResponse
+}
+
+type RestoreCronJobResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *RestoreCronJobResponse
+}
+
+type ListCronRunsResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ListCronRunsResponse
+}
+
+type ShowCronRunResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ShowCronRunResponse
+}
+
+type ObserveCronRunResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ObserveCronRunResponse
+}
+
+type ListCronWorkflowsResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ListCronWorkflowsResponse
+}
+
+type CreateCronWorkflowResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON201      *CreateCronWorkflowResponse
+}
+
+type ArchiveCronWorkflowResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ArchiveCronWorkflowResponse
+}
+
+type ShowCronWorkflowResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ShowCronWorkflowResponse
+}
+
+type ReplaceCronWorkflowResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ReplaceCronWorkflowResponse
+}
+
+type RestoreCronWorkflowResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *RestoreCronWorkflowResponse
+}
+
 type DigestProjectResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
@@ -649,11 +973,22 @@ type DigestProjectResp struct {
 	JSON200      *DigestProjectResponse
 }
 
+type PollProjectEventsResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
+}
+
 type PollProjectEventsResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
 	StatusCode   int
 	JSON200      *PollProjectEventsResponse
+	Headers200   *PollProjectEventsResp200Headers
+}
+
+type GetProjectFederationResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
 }
 
 type GetProjectFederationResp struct {
@@ -661,6 +996,12 @@ type GetProjectFederationResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *GetProjectFederationResponse
+	Headers200   *GetProjectFederationResp200Headers
+}
+
+type EnableProjectFederationResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
 }
 
 type EnableProjectFederationResp struct {
@@ -668,6 +1009,12 @@ type EnableProjectFederationResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *EnableProjectFederationResponse
+	Headers200   *EnableProjectFederationResp200Headers
+}
+
+type PollFederationProjectEventsResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
 }
 
 type PollFederationProjectEventsResp struct {
@@ -675,6 +1022,12 @@ type PollFederationProjectEventsResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *PollFederationProjectEventsResponse
+	Headers200   *PollFederationProjectEventsResp200Headers
+}
+
+type IngestFederationProjectEventsResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
 }
 
 type IngestFederationProjectEventsResp struct {
@@ -682,6 +1035,12 @@ type IngestFederationProjectEventsResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *IngestFederationProjectEventsResponse
+	Headers200   *IngestFederationProjectEventsResp200Headers
+}
+
+type GetFederationProjectMetadataResp200Headers struct {
+	XKataEventFeatures         string `header:"X-Kata-Event-Features"`
+	XKataRequiredEventFeatures string `header:"X-Kata-Required-Event-Features"`
 }
 
 type GetFederationProjectMetadataResp struct {
@@ -689,6 +1048,7 @@ type GetFederationProjectMetadataResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *GetFederationProjectMetadataResponse
+	Headers200   *GetFederationProjectMetadataResp200Headers
 }
 
 type RetryFederationQuarantineResp struct {
@@ -703,6 +1063,41 @@ type SkipFederationQuarantineResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *SkipFederationQuarantineResponse
+}
+
+type OfferRelayDeliveriesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *OfferRelayDeliveriesResponse
+}
+
+type GetRelayResetResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetRelayResetResponse
+}
+
+type AcceptRelayDeliveriesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *AcceptRelayDeliveriesResponse
+}
+
+type AckRelayDeliveriesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *AckRelayDeliveriesResponse
+}
+
+type DisconnectRelayEnrollmentResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *DisconnectRelayEnrollmentResponse
 }
 
 type GetProjectFederationStatusResp struct {
@@ -1079,6 +1474,13 @@ type PatchIssueMetadataResp struct {
 	Headers200   *PatchIssueMetadataResp200Headers
 }
 
+type IssuePlanningDatesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *IssuePlanningDatesResponse
+}
+
 type ListLabelsResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
@@ -1179,6 +1581,48 @@ type ReadyIssuesGlobalResp struct {
 	JSON200      *ReadyIssuesGlobalResponse
 }
 
+type ListTeamsResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ListTeamsResponse
+}
+
+type CreateTeamResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *CreateTeamResponse
+}
+
+type DeleteTeamResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *DeleteTeamResponse
+}
+
+type ShowTeamResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ShowTeamResponse
+}
+
+type RemoveTeamMemberResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *RemoveTeamMemberResponse
+}
+
+type AddTeamMemberResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *AddTeamMemberResponse
+}
+
 type ListTokensResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
@@ -1236,4 +1680,11 @@ type ReadUISnapshotResp struct {
 	StatusCode   int
 	JSON200      *ReadUISnapshotResponse
 	Headers200   *ReadUISnapshotResp200Headers
+}
+
+type CaptureTelemetryEventResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON202      *CaptureTelemetryEventResponse
 }

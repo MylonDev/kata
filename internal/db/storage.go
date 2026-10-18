@@ -16,9 +16,63 @@ import (
 // Production entry points hold a db.Storage; backend selection happens
 // through the storeopen DSN dispatcher.
 type Storage interface {
+	// Shared definitions, native recurring delivery and independently attributed execution evidence.
+	ObserveCronRun(context.Context, ObserveCronRun) (CronRunObservationResult, error)
+	CronRun(context.Context, int64, string) (CronRun, error)
+	ListCronRuns(context.Context, CronRunList) ([]CronRun, error)
+	PutCronJob(context.Context, PutCronJob) (CronJob, []Event, error)
+	PutCronWorkflow(context.Context, PutCronWorkflow) (CronWorkflow, Event, error)
+	CronJob(context.Context, int64, string) (CronJob, error)
+	CronWorkflow(context.Context, int64, string) (CronWorkflow, error)
+	ListCronJobs(context.Context, CronList) ([]CronJob, error)
+	ListRecurringCronJobs(context.Context, string, int) ([]RecurringCronCandidate, error)
+	DispatchRecurringCron(context.Context, DispatchRecurringCronIn) (DispatchRecurringCronOut, error)
+	ListCronWorkflows(context.Context, CronList) ([]CronWorkflow, error)
+	ExportCronJobs(context.Context, ExportFilter) iter.Seq2[CronJobExport, error]
+	ExportCronWorkflows(context.Context, ExportFilter) iter.Seq2[CronWorkflowExport, error]
+	ExportCronRuns(context.Context, ExportFilter) iter.Seq2[CronRunExport, error]
+
+	ExportRelayState(ctx context.Context) iter.Seq2[ImportRecord, error]
+	AcceptRelayDeliveries(ctx context.Context, bindingUID string, batch RelayBatch) (RelayAcceptance, error)
+	SetRelayBindingConfig(ctx context.Context, projectID int64, config RelayBindingConfig, expected ...RelayBindingConfig) (FederationBinding, error)
+	CreateRelayEnrollment(ctx context.Context, p CreateRelayEnrollmentParams) (CreatedFederationEnrollment, error)
+	PendingRelayDeliveries(ctx context.Context, bindingUID, stream string, limit int) ([]RelayEnvelope, error)
+	AckRelayDeliveries(ctx context.Context, bindingUID string, epoch int64, stream string, through int64, digest string) error
+	// root acceptance proofs, independent of compactable event history
+	RotateRootAuthority(ctx context.Context, transition RootKeyTransition) error
+	RootKeyTransitions(ctx context.Context, projectUID string) ([]RootKeyTransition, error)
+	PinRootAuthority(ctx context.Context, pin RootKeyPin) error
+	RootAuthority(ctx context.Context, projectUID string) (RootKeyPin, error)
+	RecordRootAttribution(ctx context.Context, enrollmentID int64, event RemoteEvent, signer RootAttributionSigner) (AttributionReceipt, error)
+	ApplyUpstreamAttribution(ctx context.Context, pin RootKeyPin, receipt AttributionReceipt) error
+	EntityAttribution(ctx context.Context, projectUID, kind, entityUID string) (AttributionReceipt, error)
+	AttributionReceiptsAfter(ctx context.Context, projectUID string, epoch, after int64, limit int) ([]AttributionReceipt, error)
+	ExportAttribution(ctx context.Context, filter ExportFilter) iter.Seq2[ImportRecord, error]
+	// teams and project visibility; intersects other native grants
+
+	CreateTeam(ctx context.Context, name, adminActor string) (Team, Event, error)
+	TeamByUID(ctx context.Context, teamUID string) (Team, error)
+	ListTeams(ctx context.Context) ([]Team, error)
+	DeleteTeam(ctx context.Context, teamUID, adminActor string) (Event, error)
+	TeamMembers(ctx context.Context, teamUID string) ([]string, error)
+	SetTeamMembership(ctx context.Context, teamUID, actor string, present bool, adminActor string) (Event, error)
+	MigrateTeamActor(ctx context.Context, fromActor, toActor, adminActor string) (Event, error)
+	ProjectAccessPolicy(ctx context.Context, projectUID string) (ProjectAccessPolicy, error)
+	SetProjectAccessPolicy(ctx context.Context, policy ProjectAccessPolicy, adminActor string) (ProjectAccessPolicy, Event, error)
+	AccessibleProjectUIDs(ctx context.Context, actor string) ([]string, error)
+	AnonymousAccessibleProjectUIDs(ctx context.Context) ([]string, error)
+	ProjectAccessRevision(ctx context.Context) (int64, error)
+	ProjectAccessTransactionFence(actor string, projectUIDs []string) TransactionFence
+	ExportProjectAccess(ctx context.Context) iter.Seq2[ImportRecord, error]
 	// identity / lifecycle
+	// ClaimScreenView records one installation/screen/UTC-day visit; Release clears a rejected enqueue.
+	ClaimScreenView(ctx context.Context, screen, day string) (bool, error)
+	ReleaseScreenView(ctx context.Context, screen, day string) error
 	InstanceUID() string
 	RefreshInstanceUID(ctx context.Context) error
+	// InstanceCreatedAt reports when InstanceUID was generated, or zero when
+	// the instance predates recording it.
+	InstanceCreatedAt(ctx context.Context) (time.Time, error)
 	SchemaVersion(ctx context.Context) (int, error)
 	Path() string
 	Close() error
@@ -61,13 +115,19 @@ type Storage interface {
 	LatestAliasForProject(ctx context.Context, projectID int64) (AliasRow, bool, error)
 
 	// issues
+	IssuePlanningDates(context.Context, IssuePlanningDatesIn) (IssuePlanningDates, error)
 	CreateIssue(ctx context.Context, p CreateIssueParams) (Issue, Event, error)
 	IssueByID(ctx context.Context, id int64) (Issue, error)
 	IssueByShortID(ctx context.Context, projectID int64, shortID string, include IncludeDeleted) (Issue, error)
 	IssueByUID(ctx context.Context, issueUID string, include IncludeDeleted) (Issue, error)
+	// IssuesByUIDs applies IssueByUID's filters to a batch, keyed by UID.
+	// Unknown, deleted (unless included) and out-of-scope UIDs are omitted.
+	IssuesByUIDs(ctx context.Context, issueUIDs []string, include IncludeDeleted) (map[string]Issue, error)
 	IssueUIDPrefixMatch(ctx context.Context, prefix string, limit int, include IncludeDeleted) ([]Issue, error)
 	ListIssues(ctx context.Context, p ListIssuesParams) ([]Issue, error)
 	ListAllIssues(ctx context.Context, p ListAllIssuesParams) ([]Issue, error)
+	CountIssues(ctx context.Context, p ListIssuesParams) (int64, error)
+	CountAllIssues(ctx context.Context, p ListAllIssuesParams) (int64, error)
 	ReadyIssues(ctx context.Context, projectID int64, limit int, filter ReadyIssuesFilter) ([]Issue, error)
 	ReadyIssuesGlobal(ctx context.Context, limit int, filter ReadyIssuesFilter) ([]ReadyGlobalIssue, error)
 	ChildrenOfIssue(ctx context.Context, parentIssueID int64) ([]Issue, error)
@@ -105,7 +165,9 @@ type Storage interface {
 	EditComment(ctx context.Context, p EditCommentParams) (Comment, *Event, bool, error)
 	RewriteAuthorIdentity(ctx context.Context, p RewriteAuthorIdentityParams) (RewriteAuthorIdentityResult, error)
 	CommentBodyByID(ctx context.Context, id int64) (string, error)
+	CommentIssueIDsByUIDs(ctx context.Context, uids []string) (map[string]int64, error)
 	CommentsByIssue(ctx context.Context, issueID int64) ([]Comment, error)
+	ReadCommentGraph(ctx context.Context, query CommentGraphQuery) (CommentGraphData, error)
 
 	// labels
 	AddLabel(ctx context.Context, issueID int64, label, author string) (IssueLabel, error)
@@ -284,6 +346,8 @@ type Storage interface {
 	AdvanceFederationPullCursor(ctx context.Context, projectID, nextCursor int64) error
 	ReconcileLocalFederationEcho(ctx context.Context, projectID int64, ev RemoteEvent) (bool, error)
 	InsertRemoteEvent(ctx context.Context, projectID int64, ev RemoteEvent) (bool, error)
+	InsertRemoteEvents(ctx context.Context, projectID int64, events []RemoteEvent) ([]bool, error)
+	ReadFederation(ctx context.Context, params FederationReadParams) (FederationReadResult, error)
 	EnableProjectFederation(ctx context.Context, projectID int64, actor string) (FederationBinding, error)
 	RefreshProjectFederationBaseline(ctx context.Context, projectID int64, actor string) (FederationBinding, bool, error)
 	MaterializeFederatedProject(ctx context.Context, projectID int64) error
@@ -333,4 +397,10 @@ type Storage interface {
 	EnableFederationPush(ctx context.Context, projectID int64, cursor int64) (FederationBinding, error)
 	ResetFederatedProjectIfNoPendingPush(ctx context.Context, projectID, replayHorizonEventID, pullCursorEventID int64, originInstanceUID string, pushCursorEventID int64) error
 	IngestFederationEvents(ctx context.Context, p FederationIngestParams) (FederationIngestResult, error)
+}
+
+// ParentLinkReplacementStorage is implemented by native stores that can swap
+// a parent link and emit its unlink/link events atomically.
+type ParentLinkReplacementStorage interface {
+	ReplaceParentAndEvents(context.Context, ReplaceParentAndEventsParams) (ReplaceParentAndEventsResult, error)
 }

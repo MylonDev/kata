@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -145,6 +146,11 @@ func readVisibleEvents(
 		if err != nil {
 			return nil, afterID, 0, internalAPIError(err)
 		}
+		for _, event := range rows {
+			if event.Type == db.ProjectScopeResetEventType {
+				return nil, event.ID, event.ID, nil
+			}
+		}
 		next := nextAfterID(rows, afterID)
 		if len(rows) == 0 && throughID > next {
 			next = throughID
@@ -192,10 +198,17 @@ func readVisibleEvents(
 		if err != nil {
 			return nil, cursor, 0, err
 		}
-		for _, event := range rows {
+		projectedRows, visibleRows, err := projectIssueScopedEvents(ctx, store, rows, allowed, scope.ProjectUID)
+		if err != nil {
+			return nil, cursor, 0, internalAPIError(err)
+		}
+		for index, event := range rows {
 			cursor = event.ID
 			scanned++
-			projected, ok := projectIssueScopedEvent(event, allowed, scope.ProjectUID)
+			if event.Type == db.ProjectScopeResetEventType {
+				return nil, event.ID, event.ID, nil
+			}
+			projected, ok := projectedRows[index], visibleRows[index]
 			if ok && event.Type != "issue.links_changed" {
 				visible = append(visible, projected)
 				if len(visible) == limit {
@@ -259,6 +272,10 @@ func hiddenEventRequiresScopedReset(
 		}
 		return false, nil
 	case "issue.linked", "issue.unlinked":
+		return directlyAllowed, nil
+	case "issue.commented":
+		// Projectable source comments are delivered above. An unprojectable
+		// comment or a hidden source can still change an authorized reply target.
 		return directlyAllowed, nil
 	case "issue.links_changed":
 		return directlyAllowed || compoundLinkEventTouchesScope(event.Payload, allowedUIDs), nil
@@ -380,6 +397,11 @@ func movedEventTouchesProject(payload, projectUID string) bool {
 func projectIssueScopedEvent(
 	event db.Event, allowed map[int64]struct{}, projectUID string,
 ) (db.Event, bool) {
+	if event.Type == "issue.commented" {
+		// A reply's target issue can sit outside the subtree. Scoped readers get
+		// the source comment without the target until reply rendering is authorized.
+		event.RelatedIssueID, event.RelatedIssueUID, event.RelatedIssueShortID = nil, nil, nil
+	}
 	if !issueScopedEventInScope(event, allowed, projectUID) {
 		return db.Event{}, false
 	}
@@ -416,6 +438,9 @@ func issueScopedEventInScope(event db.Event, allowed map[int64]struct{}, project
 	if _, ok := allowed[*event.IssueID]; !ok {
 		return false
 	}
+	if event.RelatedIssueUID != nil && *event.RelatedIssueUID != "" && event.RelatedIssueID == nil {
+		return false
+	}
 	if event.RelatedIssueID != nil {
 		if _, ok := allowed[*event.RelatedIssueID]; !ok {
 			return false
@@ -445,7 +470,7 @@ func scopedEventPayload(event db.Event) (string, bool) {
 		"issue.metadata_updated": keySet("diff", "revision_new", "updated_at"),
 		"issue.linked":           keySet("type", "from_short_id", "from_uid", "to_short_id", "to_uid", "incoming"),
 		"issue.unlinked":         keySet("type", "from_short_id", "from_uid", "to_short_id", "to_uid", "incoming"),
-		"issue.closed":           keySet("reason", "closed_at", "message", "evidence"),
+		"issue.closed":           keySet("reason", "closed_at", "message", "evidence", "transcript"),
 		"issue.reopened":         keySet("reopened_at"),
 		// Ladder verbs carry only mutation timestamps.
 		"issue.soft_deleted": keySet("deleted_at"),
@@ -701,6 +726,10 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 	if !ok {
 		return
 	}
+	ctx, err := revalidateEventStreamAuthority(hctx.Context(), cfg.DB)
+	if err != nil {
+		return
+	}
 	hctx.SetHeader("Content-Type", "text/event-stream")
 	hctx.SetHeader("Cache-Control", "private, no-cache")
 	hctx.SetHeader("Connection", "keep-alive")
@@ -709,7 +738,7 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 	}
 
 	subscriptionProjectID := projectID
-	if issueScopeFromContext(hctx.Context()) != nil {
+	if issueScopeFromContext(ctx) != nil {
 		// Hidden blockers can live in another project. Scoped filtering still
 		// happens against the durable log; the global subscription is only the
 		// wakeup needed to notice an identity-free invalidation promptly.
@@ -718,12 +747,14 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 	sub := cfg.Broadcaster.Subscribe(SubFilter{ProjectID: subscriptionProjectID})
 	defer sub.Unsub()
 
-	ctx := hctx.Context()
 	if projectID > 0 {
 		project, projectErr := cfg.DB.ProjectByID(ctx, projectID)
 		if errors.Is(projectErr, db.ErrNotFound) || (projectErr == nil && project.DeletedAt != nil) {
 			resetID, resetErr := cfg.DB.MaxEventID(ctx)
-			if resetErr != nil || revalidateEventStreamAuthority(ctx, cfg.DB) != nil {
+			if resetErr != nil {
+				return
+			}
+			if _, err := revalidateEventStreamAuthority(ctx, cfg.DB); err != nil {
 				return
 			}
 			_ = writeSSEFrame(w, flusher, resetFrameBytes(resetID))
@@ -747,13 +778,20 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 		return
 	}
 	if resetTo > 0 {
-		if revalidateEventStreamAuthority(ctx, cfg.DB) != nil {
+		if _, err := revalidateEventStreamAuthority(ctx, cfg.DB); err != nil {
 			return
 		}
 		_ = writeSSEFrame(w, flusher, resetFrameBytes(resetTo))
 		return
 	}
 
+	// A project created between admission and the subscription has its
+	// lifecycle event inside this first window; re-read the project set so the
+	// drain carries it instead of skipping it for good.
+	ctx, err = revalidateEventStreamAuthority(ctx, cfg.DB)
+	if err != nil {
+		return
+	}
 	rows, scannedTo, scopedResetTo, err := readVisibleEvents(
 		ctx, cfg.DB, cursor, projectID, hwm, sseDrainCap+1,
 	)
@@ -761,7 +799,7 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 		return
 	}
 	if scopedResetTo > 0 {
-		if revalidateEventStreamAuthority(ctx, cfg.DB) != nil {
+		if _, err := revalidateEventStreamAuthority(ctx, cfg.DB); err != nil {
 			return
 		}
 		_ = writeSSEFrame(w, flusher, resetFrameBytes(scopedResetTo))
@@ -769,7 +807,7 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 	}
 
 	if len(rows) == sseDrainCap+1 {
-		if revalidateEventStreamAuthority(ctx, cfg.DB) != nil {
+		if _, err := revalidateEventStreamAuthority(ctx, cfg.DB); err != nil {
 			return
 		}
 		_ = writeSSEFrame(w, flusher, resetFrameBytes(hwm))
@@ -782,6 +820,7 @@ func runSSEStream(hctx huma.Context, cfg ServerConfig, cursor, projectID int64) 
 			return
 		}
 	}
+	advanceProjectAccessStreamCursor(ctx, lastSent)
 
 	runLivePhase(ctx, livePhaseDeps{w: w, flusher: flusher, cfg: cfg, ch: sub.Ch}, projectID, lastSent)
 }
@@ -862,16 +901,37 @@ type livePhaseDeps struct {
 // drain was empty). It tracks server-side state for de-duplication; the
 // client's Last-Event-ID only advances on frames the client actually
 // receives.
-func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent int64) {
+//
+// Every wakeup derives its context from base so the refreshed project set
+// never stacks another layer on the previous one.
+func runLivePhase(base context.Context, deps livePhaseDeps, projectID, lastSent int64) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
+	resetProjectID := projectID
+	if issueScopeFromContext(base) != nil {
+		resetProjectID = 0
+	}
 	for {
 		select {
-		case <-ctx.Done():
+		case <-base.Done():
 			return
 		case <-ticker.C:
-			if revalidateEventStreamAuthority(ctx, deps.cfg.DB) != nil {
+			ctx, err := revalidateEventStreamAuthority(base, deps.cfg.DB)
+			if err != nil {
+				return
+			}
+			// A late receipt can change creation proof without another event
+			// wakeup. The durable reset also covers reconnects and missed notices.
+			resetTo, err := deps.cfg.DB.PurgeResetCheck(ctx, lastSent, resetProjectID)
+			if err != nil {
+				return
+			}
+			if resetTo > 0 {
+				if _, err := revalidateEventStreamAuthority(base, deps.cfg.DB); err != nil {
+					return
+				}
+				_ = writeSSEFrame(deps.w, deps.flusher, resetFrameBytes(resetTo))
 				return
 			}
 			if !writeSSEFrame(deps.w, deps.flusher, []byte(": keepalive\n\n")) {
@@ -883,7 +943,7 @@ func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent i
 			}
 			switch msg.Kind {
 			case StreamKindReset:
-				if revalidateEventStreamAuthority(ctx, deps.cfg.DB) != nil {
+				if _, err := revalidateEventStreamAuthority(base, deps.cfg.DB); err != nil {
 					return
 				}
 				_ = writeSSEFrame(deps.w, deps.flusher, resetFrameBytes(msg.ResetID))
@@ -895,6 +955,12 @@ func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent i
 				if msg.Event == nil {
 					continue
 				}
+				// A catalog or policy mutation can change the admitted project set
+				// even when its event is not visible through that existing set.
+				ctx, err := revalidateEventStreamAuthority(base, deps.cfg.DB)
+				if err != nil {
+					return
+				}
 				// Defensive ordering: a concurrent purge can commit before
 				// this event's broadcast is processed (broadcaster lock race
 				// between two mutation goroutines). PurgeResetCheck makes the
@@ -902,16 +968,12 @@ func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent i
 				// post-purge frame, disconnect, and reconnect with
 				// Last-Event-ID past the reset cursor — which would
 				// permanently silence sync.reset_required.
-				resetProjectID := projectID
-				if issueScopeFromContext(ctx) != nil {
-					resetProjectID = 0
-				}
 				resetTo, err := deps.cfg.DB.PurgeResetCheck(ctx, lastSent, resetProjectID)
 				if err != nil {
 					return
 				}
 				if resetTo > 0 {
-					if revalidateEventStreamAuthority(ctx, deps.cfg.DB) != nil {
+					if _, err := revalidateEventStreamAuthority(base, deps.cfg.DB); err != nil {
 						return
 					}
 					_ = writeSSEFrame(deps.w, deps.flusher, resetFrameBytes(resetTo))
@@ -931,7 +993,7 @@ func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent i
 					}
 					lastSent = scannedTo
 					if scopedResetTo > 0 {
-						if revalidateEventStreamAuthority(ctx, deps.cfg.DB) != nil {
+						if _, err := revalidateEventStreamAuthority(base, deps.cfg.DB); err != nil {
 							return
 						}
 						_ = writeSSEFrame(deps.w, deps.flusher, resetFrameBytes(scopedResetTo))
@@ -942,6 +1004,7 @@ func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent i
 							return
 						}
 					}
+					advanceProjectAccessStreamCursor(base, scannedTo)
 					if scannedTo >= through {
 						break
 					}
@@ -954,12 +1017,19 @@ func runLivePhase(ctx context.Context, deps livePhaseDeps, projectID, lastSent i
 func writeRevalidatedEventFrame(
 	ctx context.Context, store db.Storage, w http.ResponseWriter, flusher http.Flusher, event db.Event,
 ) bool {
-	if revalidateEventStreamAuthority(ctx, store) != nil {
+	ctx, err := revalidateEventStreamFrameAuthority(ctx, store)
+	if err != nil {
 		return false
 	}
 	visible, err := scopedEventStillVisible(ctx, store, event)
 	if err != nil {
 		return false
+	}
+	if visible {
+		visible, err = eventStillInAuthorizedProjects(ctx, store, event)
+		if err != nil {
+			return false
+		}
 	}
 	frame := eventFrameBytes(event)
 	if !visible {
@@ -994,14 +1064,110 @@ func scopedEventStillVisible(ctx context.Context, store db.Storage, event db.Eve
 			return false, err
 		}
 	}
+	if event.Type == "issue.commented" {
+		if targetUID, ok := scopedEventReplyTarget(event.Payload); ok {
+			targetIssueIDs, err := store.CommentIssueIDsByUIDs(ctx, []string{targetUID})
+			if err != nil {
+				return false, internalAPIError(err)
+			}
+			targetIssueID, found := targetIssueIDs[targetUID]
+			if !found {
+				return false, nil
+			}
+			targetIssue, err := store.IssueByID(ctx, targetIssueID)
+			if errors.Is(err, db.ErrNotFound) {
+				return false, nil
+			}
+			if err != nil {
+				return false, internalAPIError(err)
+			}
+			if err := authorizeIssueScopedIssue(ctx, store, targetIssue); err != nil {
+				if apiErr, ok := errors.AsType[*api.APIError](err); ok && apiErr.Status == http.StatusNotFound {
+					return false, nil
+				}
+				return false, err
+			}
+		}
+	}
 	return true, nil
 }
 
-func revalidateEventStreamAuthority(ctx context.Context, store db.Storage) error {
-	if err := revalidateSSEAuthority(ctx); err != nil {
-		return err
+// eventStillInAuthorizedProjects re-reads one event under the caller's current
+// project set. When its issue, or an issue it references, moved into a project
+// the caller does not hold after the batch was read, the store omits the event
+// or replaces it with a reset marker, and the frame must not be sent.
+func eventStillInAuthorizedProjects(ctx context.Context, store db.Storage, event db.Event) (bool, error) {
+	if _, restricted := db.AuthorizedProjects(ctx); !restricted || event.Type == db.ProjectScopeResetEventType {
+		return true, nil
 	}
-	return revalidateIssueScopedPrincipal(ctx, store)
+	rows, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: event.ID - 1, ThroughID: event.ID, Limit: 1})
+	if err != nil {
+		return false, internalAPIError(err)
+	}
+	return len(rows) == 1 && rows[0].Type == event.Type, nil
+}
+
+// revalidateEventStreamAuthority rechecks a long-lived stream's authority and
+// returns the context carrying the caller's current project set. Projects
+// created or restored since the stream connected join it. Losing an admitted
+// project ends the stream, and so does gaining an existing project through a
+// policy change: the client has none of that project's history and must
+// reload.
+func revalidateEventStreamAuthority(ctx context.Context, store db.Storage) (context.Context, error) {
+	return revalidateEventStream(ctx, store, true)
+}
+
+// revalidateEventStreamFrameAuthority rechecks authority between reading a
+// batch and writing its frames. A project gained in that window may have a
+// lifecycle event inside the batch that the narrower read already excluded,
+// so the stream closes and the client reloads instead of adopting it.
+func revalidateEventStreamFrameAuthority(ctx context.Context, store db.Storage) (context.Context, error) {
+	return revalidateEventStream(ctx, store, false)
+}
+
+func revalidateEventStream(ctx context.Context, store db.Storage, adoptGained bool) (context.Context, error) {
+	if decision, _ := ctx.Value(projectAccessContextKey{}).(*ProjectAccessDecision); decision != nil && !decision.owner {
+		gained, kept, _, err := decision.refresh(ctx)
+		if err != nil {
+			return ctx, err
+		}
+		if !kept || (!adoptGained && len(gained) > 0) {
+			return ctx, projectAccessDenied()
+		}
+		ctx = db.WithAuthorizedProjects(ctx, decision.ProjectUIDs)
+		for _, projectUID := range gained {
+			appeared, err := projectAppearedAfter(ctx, store, projectUID, decision.streamCursor)
+			if err != nil {
+				return ctx, err
+			}
+			if !appeared {
+				return ctx, projectAccessDenied()
+			}
+		}
+	}
+	if err := revalidateSSEAuthority(ctx); err != nil {
+		return ctx, err
+	}
+	return ctx, revalidateIssueScopedPrincipal(ctx, store)
+}
+
+// projectAppearedAfter reports whether the project was created or restored
+// after the event cursor.
+func projectAppearedAfter(ctx context.Context, store db.Storage, projectUID string, cursor int64) (bool, error) {
+	project, err := store.ProjectByUID(ctx, projectUID)
+	if errors.Is(err, db.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolving gained project %s: %w", projectUID, err)
+	}
+	rows, err := store.EventsAfter(ctx, db.EventsAfterParams{
+		AfterID: cursor, ProjectID: project.ID, Types: []string{"project.created", "project.restored"}, Limit: 1,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reading lifecycle events of project %s: %w", projectUID, err)
+	}
+	return len(rows) > 0, nil
 }
 
 func acceptableForSSE(accept string) bool {

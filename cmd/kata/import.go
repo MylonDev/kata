@@ -23,6 +23,7 @@ func newImportCmd() *cobra.Command {
 	var target string
 	var force bool
 	var newInstance bool
+	var asStandalone bool
 	var merge bool
 	var sourceFormat string
 	cmd := &cobra.Command{
@@ -35,7 +36,7 @@ func newImportCmd() *cobra.Command {
 			}
 			switch strings.TrimSpace(format) {
 			case "", "kata":
-				return runKataJSONLImport(cmd, input, target, force, newInstance, merge)
+				return runKataJSONLImport(cmd, input, target, force, newInstance, merge, asStandalone)
 			case "beads":
 				if err := validateBeadsImportFlags(cmd); err != nil {
 					return err
@@ -58,6 +59,8 @@ func newImportCmd() *cobra.Command {
 		"keep the target database's new identity instead of reusing the source identity; useful when restoring into a separate copy")
 	cmd.Flags().BoolVar(&merge, "merge", false,
 		"merge one project snapshot into an existing target database")
+	cmd.Flags().BoolVar(&asStandalone, "as-standalone", false,
+		"create an independent copy without source connections, credentials, or claims")
 	return cmd
 }
 
@@ -97,7 +100,7 @@ func legacyImportSourceFormat() string {
 }
 
 func validateBeadsImportFlags(cmd *cobra.Command) error {
-	for _, name := range []string{"input", "target", "force", "new-instance", "merge"} {
+	for _, name := range []string{"input", "target", "force", "new-instance", "merge", "as-standalone"} {
 		if cmd.Flags().Changed(name) {
 			return &cliError{
 				Message:  fmt.Sprintf("--%s is not supported with --source-format beads", name),
@@ -109,7 +112,13 @@ func validateBeadsImportFlags(cmd *cobra.Command) error {
 	return nil
 }
 
-func runKataJSONLImport(cmd *cobra.Command, input, target string, force, newInstance, merge bool) error {
+func runKataJSONLImport(cmd *cobra.Command, input, target string, force, newInstance, merge, asStandalone bool) error {
+	if asStandalone && force {
+		return &cliError{Message: "--as-standalone cannot be combined with --force", Kind: kindValidation, ExitCode: ExitValidation}
+	}
+	if asStandalone && merge {
+		return &cliError{Message: "--as-standalone cannot be combined with --merge", Kind: kindValidation, ExitCode: ExitValidation}
+	}
 	if merge && force {
 		return &cliError{Message: "--force cannot be combined with --merge", Kind: kindValidation, ExitCode: ExitValidation}
 	}
@@ -134,21 +143,34 @@ func runKataJSONLImport(cmd *cobra.Command, input, target string, force, newInst
 		if merge {
 			return runPostgresJSONLMerge(cmd, input, target)
 		}
-		return runPostgresJSONLImport(cmd, input, target, force, newInstance)
+		return runPostgresJSONLImport(cmd, input, target, force, newInstance, asStandalone)
 	}
 	if merge {
 		return runSQLiteJSONLMerge(cmd, input, target)
+	}
+	// Remember whether the main file existed before opening the input. Force
+	// authorizes replacement of that target, not a concurrently created one.
+	_, mainErr := os.Stat(target)
+	mainExists := mainErr == nil
+	if mainErr != nil && !errors.Is(mainErr, os.ErrNotExist) {
+		return fmt.Errorf("stat import target: %w", mainErr)
 	}
 	targetExists, err := sqliteFileSetExists(target)
 	if err != nil {
 		return fmt.Errorf("stat import target: %w", err)
 	}
 	if targetExists && !force {
+		if asStandalone {
+			return &cliError{Message: "standalone copy requires a fresh target; choose another --target", Kind: kindValidation, ExitCode: ExitValidation}
+		}
 		return &cliError{
 			Message:  "target already exists; pass --force to replace it",
 			Kind:     kindValidation,
 			ExitCode: ExitValidation,
 		}
+	}
+	if force && targetExists && !mainExists {
+		return fmt.Errorf("target appeared or has orphan SQLite sidecars; recover that file set or choose a fresh destination")
 	}
 	in, err := os.Open(input) //nolint:gosec // import path is user-provided CLI input
 	if err != nil {
@@ -172,6 +194,7 @@ func runKataJSONLImport(cmd *cobra.Command, input, target string, force, newInst
 	if err := jsonl.ImportWithOptions(cmd.Context(), in, d, jsonl.ImportOptions{
 		RequireFreshTarget: true,
 		NewInstance:        newInstance,
+		AsStandalone:       asStandalone,
 	}); err != nil {
 		_ = d.Close()
 		return err
@@ -179,7 +202,7 @@ func runKataJSONLImport(cmd *cobra.Command, input, target string, force, newInst
 	if err := d.Close(); err != nil {
 		return fmt.Errorf("close import target: %w", err)
 	}
-	if err := installImportedTarget(tmpTarget, target, force); err != nil {
+	if err := installPreparedSQLiteImport(cmd.Context(), tmpTarget, target, force && mainExists); err != nil {
 		return err
 	}
 	installed = true
@@ -254,7 +277,7 @@ func runPostgresJSONLMerge(cmd *cobra.Command, input, target string) error {
 	return writeImportSuccess(cmd, identity)
 }
 
-func runPostgresJSONLImport(cmd *cobra.Command, input, target string, force, newInstance bool) error {
+func runPostgresJSONLImport(cmd *cobra.Command, input, target string, force, newInstance, asStandalone bool) error {
 	identity, err := config.CanonicalDSNIdentity(target)
 	if err != nil {
 		return err
@@ -268,6 +291,9 @@ func runPostgresJSONLImport(cmd *cobra.Command, input, target string, force, new
 		return err
 	}
 	if version != 0 && !force {
+		if asStandalone {
+			return &cliError{Message: "standalone copy requires a fresh target; choose another --target", Kind: kindValidation, ExitCode: ExitValidation}
+		}
 		return &cliError{
 			Message:  "target already exists; pass --force to replace it",
 			Kind:     kindValidation,
@@ -288,6 +314,7 @@ func runPostgresJSONLImport(cmd *cobra.Command, input, target string, force, new
 	if err := jsonl.ImportWithOptions(cmd.Context(), in, store, jsonl.ImportOptions{
 		RequireFreshTarget: version == 0,
 		NewInstance:        newInstance,
+		AsStandalone:       asStandalone,
 	}); err != nil {
 		_ = store.Close()
 		if installedFreshSchema {
@@ -358,73 +385,16 @@ func prepareImportTempTarget(target string) (string, func(), error) {
 	return tmpTarget, func() { _ = removeSQLiteFileSetMain(tmpTarget) }, nil
 }
 
-func installImportedTarget(tmpTarget, target string, force bool) error {
-	if !force {
-		targetExists, err := sqliteFileSetExists(target)
-		if err != nil {
-			return fmt.Errorf("stat import target before install: %w", err)
-		}
-		if targetExists {
-			return fmt.Errorf("target already exists; pass --force to replace it")
-		}
-		if _, err := moveSQLiteFileSet(tmpTarget, target); err != nil {
-			return fmt.Errorf("install import target: %w", err)
-		}
-		return nil
-	}
-
-	backupTarget, err := prepareImportBackupTarget(target)
+func installImportedTarget(tmpTarget, target string) error {
+	targetExists, err := sqliteFileSetExists(target)
 	if err != nil {
-		return err
+		return fmt.Errorf("stat import target before install: %w", err)
 	}
-	backupMade, err := moveSQLiteFileSet(target, backupTarget)
-	if err != nil {
-		return errors.Join(
-			fmt.Errorf("backup import target: %w", err),
-			restoreImportedTargetBackup(backupTarget, target, backupMade),
-		)
+	if targetExists {
+		return fmt.Errorf("target already exists; refusing to overwrite a destination that appeared during import")
 	}
 	if _, err := moveSQLiteFileSet(tmpTarget, target); err != nil {
-		return errors.Join(
-			fmt.Errorf("install import target: %w", err),
-			restoreImportedTargetBackup(backupTarget, target, backupMade),
-		)
-	}
-	if err := removeSQLiteFileSetMain(backupTarget); err != nil {
-		return fmt.Errorf("remove import target backup: %w", err)
-	}
-	return nil
-}
-
-func prepareImportBackupTarget(target string) (string, error) {
-	dir := filepath.Dir(target)
-	base := filepath.Base(target)
-	f, err := os.CreateTemp(dir, "."+base+".replace-*")
-	if err != nil {
-		return "", fmt.Errorf("create import target backup: %w", err)
-	}
-	backupTarget := f.Name()
-	if err := f.Close(); err != nil {
-		_ = os.Remove(backupTarget) //nolint:gosec // backupTarget comes from os.CreateTemp above.
-		return "", fmt.Errorf("close import target backup placeholder: %w", err)
-	}
-	if err := os.Remove(backupTarget); err != nil { //nolint:gosec // backupTarget comes from os.CreateTemp above.
-		return "", fmt.Errorf("remove import target backup placeholder: %w", err)
-	}
-	if exists, err := sqliteFileSetExists(backupTarget); err != nil {
-		return "", fmt.Errorf("stat import target backup: %w", err)
-	} else if exists {
-		return "", fmt.Errorf("import target backup already exists: %s", backupTarget)
-	}
-	return backupTarget, nil
-}
-
-func restoreImportedTargetBackup(backupTarget, target string, backupMade bool) error {
-	if !backupMade {
-		return nil
-	}
-	if _, err := moveSQLiteFileSet(backupTarget, target); err != nil {
-		return fmt.Errorf("restore import target backup: %w", err)
+		return fmt.Errorf("install import target: %w", err)
 	}
 	return nil
 }

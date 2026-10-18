@@ -35,7 +35,7 @@ func newCloseCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "close <issue-ref>",
-		Short: "close an issue (asserts the work is complete)",
+		Short: "close finished work with a reason, message, and evidence",
 		Long: `Closing an issue asserts that the work it describes is complete.
 This is a stronger claim than a comment. Provide evidence and a
 substantive message.
@@ -50,8 +50,15 @@ claim and that the message and evidence should be specific to the issue.
 
 If you have not completed and tested this work, do not close it.
 Instead, label and comment:
-    kata edit <ref> --label needs-review
-    kata comment <ref> --body "what was attempted, what remains"`,
+    kata label add <ref> needs-review --comment "<what remains>"
+
+The close message has a minimum length that depends on the reason:
+    --done, --audit-no-change           at least 40 characters
+    --duplicate-of, --superseded-by     at least 20 characters
+    --wontfix                           at least 60 characters`,
+		Example: `  kata close abc4 --done -m "Fixed Safari double-submit; go test ./auth passes." --commit <sha> --agent
+  kata close abc4 --done -m "Docs updated and link check passes for the guide." --pr <url> --test "make docs-check" --agent
+  kata close abc4 --duplicate-of d4ex -m "Same Safari race as d4ex." --agent`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("idempotency-key") && strings.TrimSpace(idempotencyKey) == "" {
@@ -85,21 +92,23 @@ Instead, label and comment:
 				sugarSet = append(sugarSet, "superseded")
 			}
 			if len(sugarSet) > 1 {
-				return fmt.Errorf("flag conflict: multiple reason sugar flags set: %s",
-					strings.Join(sugarSet, ", "))
+				return &cliError{Kind: kindUsage, ExitCode: ExitUsage,
+					Message: fmt.Sprintf("flag conflict: multiple reason sugar flags set: %s", strings.Join(sugarSet, ", "))}
 			}
 			sugarReason := ""
 			if len(sugarSet) == 1 {
 				sugarReason = sugarSet[0]
 			}
 			if sugarReason != "" && reason != "" {
-				return fmt.Errorf("flag conflict: --reason=%s and corresponding sugar flag both set", reason)
+				return &cliError{Kind: kindUsage, ExitCode: ExitUsage,
+					Message: fmt.Sprintf("flag conflict: --reason=%s and corresponding sugar flag both set", reason)}
 			}
 			if sugarReason != "" {
 				reason = sugarReason
 			}
 			if reason == "" {
-				return fmt.Errorf("--reason is required (one of: done, wontfix, duplicate, superseded, audit-no-change)")
+				return &cliError{Kind: kindUsage, ExitCode: ExitUsage,
+					Message: "close needs a reason: --done (with --commit, --pr, --test, or --reviewed), --wontfix, --duplicate-of <ref>, --superseded-by <ref>, or --audit-no-change"}
 			}
 
 			// Resolve sugar -> evidence (appended to user-supplied --evidence values).
@@ -127,7 +136,8 @@ Instead, label and comment:
 				return err
 			}
 			if dup := findDuplicateEvidence(parsed); dup != "" {
-				return fmt.Errorf("flag conflict: duplicate evidence item %s (provided via both canonical and sugar)", dup)
+				return &cliError{Kind: kindUsage, ExitCode: ExitUsage,
+					Message: fmt.Sprintf("flag conflict: duplicate evidence item %s (provided via both canonical and sugar)", dup)}
 			}
 
 			extra := map[string]any{
@@ -135,6 +145,11 @@ Instead, label and comment:
 				"message":  message,
 				"evidence": parsed,
 				"dry_run":  dryRun,
+			}
+			if len(parsed) > 0 {
+				if ref := closeTranscript(cmd); ref != nil {
+					extra["transcript"] = ref
+				}
 			}
 			// Route the dry-run banner to stderr only in human mode so
 			// machine-parseable output modes stay unprefixed.
@@ -198,7 +213,7 @@ func parseEvidenceFlags(raw []string) ([]api.Evidence, error) {
 	for _, s := range raw {
 		before, after, ok := strings.Cut(s, ":")
 		if !ok {
-			return nil, fmt.Errorf("evidence %q: expected <type>:<value>", s)
+			return nil, evidenceValueError("evidence %q: expected <type>:<value>", s)
 		}
 		kind, value := api.EvidenceType(before), after
 		switch kind {
@@ -210,7 +225,8 @@ func parseEvidenceFlags(raw []string) ([]api.Evidence, error) {
 			out = append(out, api.Evidence{Type: kind, Command: value})
 		case api.EvidenceReviewedPaths:
 			if _, dup := seenReviewedPath[value]; dup {
-				return nil, fmt.Errorf("evidence reviewed-paths:%s: duplicate path (provided more than once via canonical and/or sugar)", value)
+				return nil, &cliError{Kind: kindUsage, ExitCode: ExitUsage,
+					Message: fmt.Sprintf("evidence reviewed-paths:%s: duplicate path (provided more than once via canonical and/or sugar)", value)}
 			}
 			seenReviewedPath[value] = struct{}{}
 			reviewedPaths = append(reviewedPaths, value)
@@ -220,22 +236,30 @@ func parseEvidenceFlags(raw []string) ([]api.Evidence, error) {
 			out = append(out, api.Evidence{Type: kind, Rationale: value})
 		case api.EvidenceDuplicateOf:
 			if value == "" {
-				return nil, fmt.Errorf("evidence duplicate-of: expected issue ref, got empty value")
+				return nil, evidenceValueError("evidence duplicate-of: expected issue ref, got empty value")
 			}
 			out = append(out, api.Evidence{Type: kind, IssueRef: value})
 		case api.EvidenceSupersededBy:
 			if value == "" {
-				return nil, fmt.Errorf("evidence superseded-by: expected issue ref, got empty value")
+				return nil, evidenceValueError("evidence superseded-by: expected issue ref, got empty value")
 			}
 			out = append(out, api.Evidence{Type: kind, IssueRef: value})
 		default:
-			return nil, fmt.Errorf("evidence %q: unknown type %q", s, kind)
+			return nil, evidenceValueError("evidence %q: unknown type %q", s, kind)
 		}
 	}
 	if len(reviewedPaths) > 0 {
 		out = append(out, api.Evidence{Type: api.EvidenceReviewedPaths, Paths: reviewedPaths})
 	}
 	return out, nil
+}
+
+func evidenceValueError(format string, args ...any) *cliError {
+	return &cliError{
+		Message:  fmt.Sprintf(format, args...),
+		Kind:     kindValidation,
+		ExitCode: ExitValidation,
+	}
 }
 
 // runAction is shared by close and reopen. It resolves the issue reference,
@@ -267,6 +291,11 @@ func runActionWithHeaders(
 	if err != nil {
 		return err
 	}
+	if action == "close" && body["transcript"] != nil {
+		if err := dropUnsupportedTranscript(ctx, cmd, client, baseURL, body); err != nil {
+			return err
+		}
+	}
 	apiClient, err := kataclient.NewWithHTTPClient(baseURL, client)
 	if err != nil {
 		return err
@@ -291,6 +320,9 @@ func runActionWithHeaders(
 		}
 		if value, ok := headers["If-Match"]; ok {
 			options.Header.IfMatch = &value
+		}
+		if reportsCLIUse(cmd) {
+			options.Header.XKataSurface = new("cli")
 		}
 		response, callErr := apiClient.CloseIssueWithResponse(ctx, options)
 		if response == nil {

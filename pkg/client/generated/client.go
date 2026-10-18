@@ -141,12 +141,27 @@ type ClientInterface interface {
 	DigestGlobal(ctx context.Context, options *DigestGlobalRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DigestGlobalResponse, error)
 	DigestGlobalWithResponse(ctx context.Context, options *DigestGlobalRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DigestGlobalResp, error)
 
+	Doctor(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*DoctorResponse, error)
+	DoctorWithResponse(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*DoctorResp, error)
+
 	PollEvents(ctx context.Context, options *PollEventsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PollEventsResponse, error)
 	PollEventsWithResponse(ctx context.Context, options *PollEventsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PollEventsResp, error)
 
 	// StreamEvents Stream events
 	StreamEvents(ctx context.Context, options *StreamEventsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*StreamEventsResponse, error)
 	StreamEventsWithResponse(ctx context.Context, options *StreamEventsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*StreamEventsResp, error)
+
+	// ConnectFederationBridge Connect one project to a configured hub
+	ConnectFederationBridge(ctx context.Context, options *ConnectFederationBridgeRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ConnectFederationBridgeResponse, error)
+	ConnectFederationBridgeWithResponse(ctx context.Context, options *ConnectFederationBridgeRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ConnectFederationBridgeResp, error)
+
+	// GetFederationBridgeStatus Read one local bridge's recorded connection state
+	GetFederationBridgeStatus(ctx context.Context, options *GetFederationBridgeStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetFederationBridgeStatusResponse, error)
+	GetFederationBridgeStatusWithResponse(ctx context.Context, options *GetFederationBridgeStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetFederationBridgeStatusResp, error)
+
+	// DisconnectFederationBridge Revoke a selected bridge grant and detach its local replica
+	DisconnectFederationBridge(ctx context.Context, options *DisconnectFederationBridgeRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DisconnectFederationBridgeResponse, error)
+	DisconnectFederationBridgeWithResponse(ctx context.Context, options *DisconnectFederationBridgeRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DisconnectFederationBridgeResp, error)
 
 	ListFederationEnrollments(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListFederationEnrollmentsResponse, error)
 	ListFederationEnrollmentsWithResponse(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListFederationEnrollmentsResp, error)
@@ -170,6 +185,13 @@ type ClientInterface interface {
 
 	RebindFederationReplica(ctx context.Context, options *RebindFederationReplicaRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RebindFederationReplicaResponse, error)
 	RebindFederationReplicaWithResponse(ctx context.Context, options *RebindFederationReplicaRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RebindFederationReplicaResp, error)
+
+	ConfigureFederationSigning(ctx context.Context, options *ConfigureFederationSigningRequestOptions, reqEditors ...runtime.RequestEditorFn) (*struct{}, error)
+	ConfigureFederationSigningWithResponse(ctx context.Context, options *ConfigureFederationSigningRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ConfigureFederationSigningResp, error)
+
+	// RepinFederationRootKey Pin a root project to this daemon's loaded root signing key
+	RepinFederationRootKey(ctx context.Context, options *RepinFederationRootKeyRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RepinFederationRootKeyResponse, error)
+	RepinFederationRootKeyWithResponse(ctx context.Context, options *RepinFederationRootKeyRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RepinFederationRootKeyResp, error)
 
 	GetFederationStatus(ctx context.Context, options *GetFederationStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetFederationStatusResponse, error)
 	GetFederationStatusWithResponse(ctx context.Context, options *GetFederationStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetFederationStatusResp, error)
@@ -207,6 +229,12 @@ type ClientInterface interface {
 	RenameProject(ctx context.Context, options *RenameProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RenameProjectResponse, error)
 	RenameProjectWithResponse(ctx context.Context, options *RenameProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RenameProjectResp, error)
 
+	GetProjectAccess(ctx context.Context, options *GetProjectAccessRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetProjectAccessResponse, error)
+	GetProjectAccessWithResponse(ctx context.Context, options *GetProjectAccessRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetProjectAccessResp, error)
+
+	SetProjectAccess(ctx context.Context, options *SetProjectAccessRequestOptions, reqEditors ...runtime.RequestEditorFn) (*SetProjectAccessResponse, error)
+	SetProjectAccessWithResponse(ctx context.Context, options *SetProjectAccessRequestOptions, reqEditors ...runtime.RequestEditorFn) (*SetProjectAccessResp, error)
+
 	PurgeProject(ctx context.Context, options *PurgeProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PurgeProjectResponse, error)
 	PurgeProjectWithResponse(ctx context.Context, options *PurgeProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PurgeProjectResp, error)
 
@@ -215,6 +243,54 @@ type ClientInterface interface {
 
 	DetachProjectAlias(ctx context.Context, options *DetachProjectAliasRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DetachProjectAliasResponse, error)
 	DetachProjectAliasWithResponse(ctx context.Context, options *DetachProjectAliasRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DetachProjectAliasResp, error)
+
+	GetCronCapabilities(ctx context.Context, options *GetCronCapabilitiesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetCronCapabilitiesResponse, error)
+	GetCronCapabilitiesWithResponse(ctx context.Context, options *GetCronCapabilitiesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetCronCapabilitiesResp, error)
+
+	ListCronJobs(ctx context.Context, options *ListCronJobsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronJobsResponse, error)
+	ListCronJobsWithResponse(ctx context.Context, options *ListCronJobsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronJobsResp, error)
+
+	CreateCronJob(ctx context.Context, options *CreateCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateCronJobResponse, error)
+	CreateCronJobWithResponse(ctx context.Context, options *CreateCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateCronJobResp, error)
+
+	ArchiveCronJob(ctx context.Context, options *ArchiveCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveCronJobResponse, error)
+	ArchiveCronJobWithResponse(ctx context.Context, options *ArchiveCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveCronJobResp, error)
+
+	ShowCronJob(ctx context.Context, options *ShowCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronJobResponse, error)
+	ShowCronJobWithResponse(ctx context.Context, options *ShowCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronJobResp, error)
+
+	ReplaceCronJob(ctx context.Context, options *ReplaceCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReplaceCronJobResponse, error)
+	ReplaceCronJobWithResponse(ctx context.Context, options *ReplaceCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReplaceCronJobResp, error)
+
+	RestoreCronJob(ctx context.Context, options *RestoreCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RestoreCronJobResponse, error)
+	RestoreCronJobWithResponse(ctx context.Context, options *RestoreCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RestoreCronJobResp, error)
+
+	ListCronRuns(ctx context.Context, options *ListCronRunsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronRunsResponse, error)
+	ListCronRunsWithResponse(ctx context.Context, options *ListCronRunsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronRunsResp, error)
+
+	ShowCronRun(ctx context.Context, options *ShowCronRunRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronRunResponse, error)
+	ShowCronRunWithResponse(ctx context.Context, options *ShowCronRunRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronRunResp, error)
+
+	ObserveCronRun(ctx context.Context, options *ObserveCronRunRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ObserveCronRunResponse, error)
+	ObserveCronRunWithResponse(ctx context.Context, options *ObserveCronRunRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ObserveCronRunResp, error)
+
+	ListCronWorkflows(ctx context.Context, options *ListCronWorkflowsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronWorkflowsResponse, error)
+	ListCronWorkflowsWithResponse(ctx context.Context, options *ListCronWorkflowsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronWorkflowsResp, error)
+
+	CreateCronWorkflow(ctx context.Context, options *CreateCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateCronWorkflowResponse, error)
+	CreateCronWorkflowWithResponse(ctx context.Context, options *CreateCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateCronWorkflowResp, error)
+
+	ArchiveCronWorkflow(ctx context.Context, options *ArchiveCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveCronWorkflowResponse, error)
+	ArchiveCronWorkflowWithResponse(ctx context.Context, options *ArchiveCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveCronWorkflowResp, error)
+
+	ShowCronWorkflow(ctx context.Context, options *ShowCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronWorkflowResponse, error)
+	ShowCronWorkflowWithResponse(ctx context.Context, options *ShowCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronWorkflowResp, error)
+
+	ReplaceCronWorkflow(ctx context.Context, options *ReplaceCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReplaceCronWorkflowResponse, error)
+	ReplaceCronWorkflowWithResponse(ctx context.Context, options *ReplaceCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReplaceCronWorkflowResp, error)
+
+	RestoreCronWorkflow(ctx context.Context, options *RestoreCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RestoreCronWorkflowResponse, error)
+	RestoreCronWorkflowWithResponse(ctx context.Context, options *RestoreCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RestoreCronWorkflowResp, error)
 
 	DigestProject(ctx context.Context, options *DigestProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DigestProjectResponse, error)
 	DigestProjectWithResponse(ctx context.Context, options *DigestProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DigestProjectResp, error)
@@ -242,6 +318,22 @@ type ClientInterface interface {
 
 	SkipFederationQuarantine(ctx context.Context, options *SkipFederationQuarantineRequestOptions, reqEditors ...runtime.RequestEditorFn) (*SkipFederationQuarantineResponse, error)
 	SkipFederationQuarantineWithResponse(ctx context.Context, options *SkipFederationQuarantineRequestOptions, reqEditors ...runtime.RequestEditorFn) (*SkipFederationQuarantineResp, error)
+
+	OfferRelayDeliveries(ctx context.Context, options *OfferRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*OfferRelayDeliveriesResponse, error)
+	OfferRelayDeliveriesWithResponse(ctx context.Context, options *OfferRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*OfferRelayDeliveriesResp, error)
+
+	GetRelayReset(ctx context.Context, options *GetRelayResetRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetRelayResetResponse, error)
+	GetRelayResetWithResponse(ctx context.Context, options *GetRelayResetRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetRelayResetResp, error)
+
+	AcceptRelayDeliveries(ctx context.Context, options *AcceptRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AcceptRelayDeliveriesResponse, error)
+	AcceptRelayDeliveriesWithResponse(ctx context.Context, options *AcceptRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AcceptRelayDeliveriesResp, error)
+
+	AckRelayDeliveries(ctx context.Context, options *AckRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AckRelayDeliveriesResponse, error)
+	AckRelayDeliveriesWithResponse(ctx context.Context, options *AckRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AckRelayDeliveriesResp, error)
+
+	// DisconnectRelayEnrollment Revoke only the presented relay transport grant
+	DisconnectRelayEnrollment(ctx context.Context, options *DisconnectRelayEnrollmentRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DisconnectRelayEnrollmentResponse, error)
+	DisconnectRelayEnrollmentWithResponse(ctx context.Context, options *DisconnectRelayEnrollmentRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DisconnectRelayEnrollmentResp, error)
 
 	GetProjectFederationStatus(ctx context.Context, options *GetProjectFederationStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetProjectFederationStatusResponse, error)
 	GetProjectFederationStatusWithResponse(ctx context.Context, options *GetProjectFederationStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetProjectFederationStatusResp, error)
@@ -369,6 +461,9 @@ type ClientInterface interface {
 	PatchIssueMetadata(ctx context.Context, options *PatchIssueMetadataRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PatchIssueMetadataResponse, error)
 	PatchIssueMetadataWithResponse(ctx context.Context, options *PatchIssueMetadataRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PatchIssueMetadataResp, error)
 
+	IssuePlanningDates(ctx context.Context, options *IssuePlanningDatesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*IssuePlanningDatesResponse, error)
+	IssuePlanningDatesWithResponse(ctx context.Context, options *IssuePlanningDatesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*IssuePlanningDatesResp, error)
+
 	ListLabels(ctx context.Context, options *ListLabelsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListLabelsResponse, error)
 	ListLabelsWithResponse(ctx context.Context, options *ListLabelsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListLabelsResp, error)
 
@@ -405,6 +500,24 @@ type ClientInterface interface {
 	ReadyIssuesGlobal(ctx context.Context, options *ReadyIssuesGlobalRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReadyIssuesGlobalResponse, error)
 	ReadyIssuesGlobalWithResponse(ctx context.Context, options *ReadyIssuesGlobalRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReadyIssuesGlobalResp, error)
 
+	ListTeams(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListTeamsResponse, error)
+	ListTeamsWithResponse(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListTeamsResp, error)
+
+	CreateTeam(ctx context.Context, options *CreateTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateTeamResponse, error)
+	CreateTeamWithResponse(ctx context.Context, options *CreateTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateTeamResp, error)
+
+	DeleteTeam(ctx context.Context, options *DeleteTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DeleteTeamResponse, error)
+	DeleteTeamWithResponse(ctx context.Context, options *DeleteTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DeleteTeamResp, error)
+
+	ShowTeam(ctx context.Context, options *ShowTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowTeamResponse, error)
+	ShowTeamWithResponse(ctx context.Context, options *ShowTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowTeamResp, error)
+
+	RemoveTeamMember(ctx context.Context, options *RemoveTeamMemberRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RemoveTeamMemberResponse, error)
+	RemoveTeamMemberWithResponse(ctx context.Context, options *RemoveTeamMemberRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RemoveTeamMemberResp, error)
+
+	AddTeamMember(ctx context.Context, options *AddTeamMemberRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AddTeamMemberResponse, error)
+	AddTeamMemberWithResponse(ctx context.Context, options *AddTeamMemberRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AddTeamMemberResp, error)
+
 	ListTokens(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListTokensResponse, error)
 	ListTokensWithResponse(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListTokensResp, error)
 
@@ -429,6 +542,10 @@ type ClientInterface interface {
 	// ReadUISnapshot Read a coherent browser snapshot
 	ReadUISnapshot(ctx context.Context, options *ReadUISnapshotRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReadUISnapshotResponse, error)
 	ReadUISnapshotWithResponse(ctx context.Context, options *ReadUISnapshotRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReadUISnapshotResp, error)
+
+	// CaptureTelemetryEvent Report a browser telemetry event
+	CaptureTelemetryEvent(ctx context.Context, options *CaptureTelemetryEventRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CaptureTelemetryEventResponse, error)
+	CaptureTelemetryEventWithResponse(ctx context.Context, options *CaptureTelemetryEventRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CaptureTelemetryEventResp, error)
 }
 
 func (c *Client) AuditCloses(ctx context.Context, options *AuditClosesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AuditClosesResponse, error) {
@@ -945,6 +1062,67 @@ func (c *Client) DigestGlobal(ctx context.Context, options *DigestGlobalRequestO
 	return responseParser(ctx, resp)
 }
 
+func (c *Client) Doctor(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*DoctorResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/doctor",
+		Method:     "GET",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*DoctorResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(DoctorErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "DoctorErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(DoctorResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "DoctorResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/doctor")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 func (c *Client) PollEvents(ctx context.Context, options *PollEventsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PollEventsResponse, error) {
 	var err error
 
@@ -1056,6 +1234,197 @@ func (c *Client) StreamEvents(ctx context.Context, options *StreamEventsRequestO
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/events/stream")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// ConnectFederationBridge Connect one project to a configured hub
+func (c *Client) ConnectFederationBridge(ctx context.Context, options *ConnectFederationBridgeRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ConnectFederationBridgeResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/federation/bridges",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ConnectFederationBridgeResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ConnectFederationBridgeErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ConnectFederationBridgeErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ConnectFederationBridgeResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ConnectFederationBridgeResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/federation/bridges")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// GetFederationBridgeStatus Read one local bridge's recorded connection state
+func (c *Client) GetFederationBridgeStatus(ctx context.Context, options *GetFederationBridgeStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetFederationBridgeStatusResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/federation/bridges/{project_name}",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*GetFederationBridgeStatusResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(GetFederationBridgeStatusErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "GetFederationBridgeStatusErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(GetFederationBridgeStatusResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "GetFederationBridgeStatusResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/federation/bridges/{project_name}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// DisconnectFederationBridge Revoke a selected bridge grant and detach its local replica
+func (c *Client) DisconnectFederationBridge(ctx context.Context, options *DisconnectFederationBridgeRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DisconnectFederationBridgeResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/federation/bridges/{project_name}/disconnect",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*DisconnectFederationBridgeResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(DisconnectFederationBridgeErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "DisconnectFederationBridgeErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(DisconnectFederationBridgeResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "DisconnectFederationBridgeResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/federation/bridges/{project_name}/disconnect")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}
@@ -1502,6 +1871,118 @@ func (c *Client) RebindFederationReplica(ctx context.Context, options *RebindFed
 	return responseParser(ctx, resp)
 }
 
+func (c *Client) ConfigureFederationSigning(ctx context.Context, options *ConfigureFederationSigningRequestOptions, reqEditors ...runtime.RequestEditorFn) (*struct{}, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/federation/replicas/{project_uid}/actions/configure-signing",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*struct{}, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 204 {
+			target := new(ConfigureFederationSigningErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ConfigureFederationSigningErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		return nil, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/federation/replicas/{project_uid}/actions/configure-signing")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// RepinFederationRootKey Pin a root project to this daemon's loaded root signing key
+func (c *Client) RepinFederationRootKey(ctx context.Context, options *RepinFederationRootKeyRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RepinFederationRootKeyResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/federation/root-keys/{project_name}/repin",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*RepinFederationRootKeyResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(RepinFederationRootKeyErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "RepinFederationRootKeyErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(RepinFederationRootKeyResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "RepinFederationRootKeyResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/federation/root-keys/{project_name}/repin")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 func (c *Client) GetFederationStatus(ctx context.Context, options *GetFederationStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetFederationStatusResponse, error) {
 	var err error
 
@@ -1695,14 +2176,16 @@ func (c *Client) ListAllIssues(ctx context.Context, options *ListAllIssuesReques
 	var err error
 
 	queryEncoding := map[string]runtime.QueryEncoding{
-		"limit":        {Style: "form", Explode: &[]bool{false}[0]},
-		"max_priority": {Style: "form", Explode: &[]bool{false}[0]},
-		"owner":        {Style: "form", Explode: &[]bool{false}[0]},
-		"priority":     {Style: "form", Explode: &[]bool{false}[0]},
-		"project_id":   {Style: "form", Explode: &[]bool{false}[0]},
-		"sort":         {Style: "form", Explode: &[]bool{false}[0]},
-		"status":       {Style: "form", Explode: &[]bool{false}[0]},
-		"unowned":      {Style: "form", Explode: &[]bool{false}[0]},
+		"cursor":        {Style: "form", Explode: &[]bool{false}[0]},
+		"include_total": {Style: "form", Explode: &[]bool{false}[0]},
+		"limit":         {Style: "form", Explode: &[]bool{false}[0]},
+		"max_priority":  {Style: "form", Explode: &[]bool{false}[0]},
+		"owner":         {Style: "form", Explode: &[]bool{false}[0]},
+		"priority":      {Style: "form", Explode: &[]bool{false}[0]},
+		"project_id":    {Style: "form", Explode: &[]bool{false}[0]},
+		"sort":          {Style: "form", Explode: &[]bool{false}[0]},
+		"status":        {Style: "form", Explode: &[]bool{false}[0]},
+		"unowned":       {Style: "form", Explode: &[]bool{false}[0]},
 	}
 	reqParams := runtime.RequestOptionsParameters{
 		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/issues",
@@ -1769,7 +2252,11 @@ func (c *Client) ShowIssueByUID(ctx context.Context, options *ShowIssueByUIDRequ
 	var err error
 
 	queryEncoding := map[string]runtime.QueryEncoding{
+		"inbound":         {Style: "form", Explode: &[]bool{false}[0]},
 		"include_deleted": {Style: "form", Explode: &[]bool{false}[0]},
+		"kind":            {Style: "form", Explode: &[]bool{false}[0]},
+		"since":           {Style: "form", Explode: &[]bool{false}[0]},
+		"thread":          {Style: "form", Explode: &[]bool{false}[0]},
 	}
 	reqParams := runtime.RequestOptionsParameters{
 		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/issues/{uid}",
@@ -2279,6 +2766,131 @@ func (c *Client) RenameProject(ctx context.Context, options *RenameProjectReques
 	return responseParser(ctx, resp)
 }
 
+func (c *Client) GetProjectAccess(ctx context.Context, options *GetProjectAccessRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetProjectAccessResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/access",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*GetProjectAccessResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(GetProjectAccessErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "GetProjectAccessErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(GetProjectAccessResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "GetProjectAccessResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/access")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) SetProjectAccess(ctx context.Context, options *SetProjectAccessRequestOptions, reqEditors ...runtime.RequestEditorFn) (*SetProjectAccessResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/access",
+		Method:      "PUT",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*SetProjectAccessResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(SetProjectAccessErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "SetProjectAccessErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(SetProjectAccessResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "SetProjectAccessResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/access")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 func (c *Client) PurgeProject(ctx context.Context, options *PurgeProjectRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PurgeProjectResponse, error) {
 	var err error
 	reqParams := runtime.RequestOptionsParameters{
@@ -2467,6 +3079,1024 @@ func (c *Client) DetachProjectAlias(ctx context.Context, options *DetachProjectA
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/aliases/{alias_id}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) GetCronCapabilities(ctx context.Context, options *GetCronCapabilitiesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetCronCapabilitiesResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/capabilities",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*GetCronCapabilitiesResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(GetCronCapabilitiesErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "GetCronCapabilitiesErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(GetCronCapabilitiesResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "GetCronCapabilitiesResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/capabilities")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ListCronJobs(ctx context.Context, options *ListCronJobsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronJobsResponse, error) {
+	var err error
+
+	queryEncoding := map[string]runtime.QueryEncoding{
+		"include_deleted": {Style: "form", Explode: &[]bool{false}[0]},
+	}
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/jobs",
+		Method:        "GET",
+		Options:       options,
+		QueryEncoding: queryEncoding,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ListCronJobsResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ListCronJobsErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ListCronJobsErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ListCronJobsResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ListCronJobsResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/jobs")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) CreateCronJob(ctx context.Context, options *CreateCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateCronJobResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/jobs",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*CreateCronJobResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 201 {
+			target := new(CreateCronJobErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "CreateCronJobErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(CreateCronJobResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "CreateCronJobResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/jobs")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ArchiveCronJob(ctx context.Context, options *ArchiveCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveCronJobResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}",
+		Method:      "DELETE",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ArchiveCronJobResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ArchiveCronJobErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ArchiveCronJobErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ArchiveCronJobResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ArchiveCronJobResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ShowCronJob(ctx context.Context, options *ShowCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronJobResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ShowCronJobResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ShowCronJobErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ShowCronJobErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ShowCronJobResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ShowCronJobResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ReplaceCronJob(ctx context.Context, options *ReplaceCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReplaceCronJobResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}",
+		Method:      "PUT",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ReplaceCronJobResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ReplaceCronJobErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ReplaceCronJobErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ReplaceCronJobResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ReplaceCronJobResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) RestoreCronJob(ctx context.Context, options *RestoreCronJobRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RestoreCronJobResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}/restore",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*RestoreCronJobResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(RestoreCronJobErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "RestoreCronJobErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(RestoreCronJobResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "RestoreCronJobResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/jobs/{cron_uid}/restore")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ListCronRuns(ctx context.Context, options *ListCronRunsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronRunsResponse, error) {
+	var err error
+
+	queryEncoding := map[string]runtime.QueryEncoding{
+		"before_uid": {Style: "form", Explode: &[]bool{false}[0]},
+		"job_uid":    {Style: "form", Explode: &[]bool{false}[0]},
+		"limit":      {Style: "form", Explode: &[]bool{false}[0]},
+	}
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/runs",
+		Method:        "GET",
+		Options:       options,
+		QueryEncoding: queryEncoding,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ListCronRunsResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ListCronRunsErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ListCronRunsErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ListCronRunsResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ListCronRunsResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/runs")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ShowCronRun(ctx context.Context, options *ShowCronRunRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronRunResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/runs/{run_uid}",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ShowCronRunResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ShowCronRunErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ShowCronRunErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ShowCronRunResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ShowCronRunResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/runs/{run_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ObserveCronRun(ctx context.Context, options *ObserveCronRunRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ObserveCronRunResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/runs/{run_uid}",
+		Method:      "PUT",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ObserveCronRunResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ObserveCronRunErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ObserveCronRunErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ObserveCronRunResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ObserveCronRunResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/runs/{run_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ListCronWorkflows(ctx context.Context, options *ListCronWorkflowsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListCronWorkflowsResponse, error) {
+	var err error
+
+	queryEncoding := map[string]runtime.QueryEncoding{
+		"include_deleted": {Style: "form", Explode: &[]bool{false}[0]},
+	}
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/workflows",
+		Method:        "GET",
+		Options:       options,
+		QueryEncoding: queryEncoding,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ListCronWorkflowsResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ListCronWorkflowsErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ListCronWorkflowsErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ListCronWorkflowsResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ListCronWorkflowsResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/workflows")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) CreateCronWorkflow(ctx context.Context, options *CreateCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateCronWorkflowResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/workflows",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*CreateCronWorkflowResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 201 {
+			target := new(CreateCronWorkflowErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "CreateCronWorkflowErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(CreateCronWorkflowResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "CreateCronWorkflowResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/workflows")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ArchiveCronWorkflow(ctx context.Context, options *ArchiveCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveCronWorkflowResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}",
+		Method:      "DELETE",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ArchiveCronWorkflowResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ArchiveCronWorkflowErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ArchiveCronWorkflowErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ArchiveCronWorkflowResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ArchiveCronWorkflowResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ShowCronWorkflow(ctx context.Context, options *ShowCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowCronWorkflowResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ShowCronWorkflowResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ShowCronWorkflowErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ShowCronWorkflowErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ShowCronWorkflowResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ShowCronWorkflowResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ReplaceCronWorkflow(ctx context.Context, options *ReplaceCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ReplaceCronWorkflowResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}",
+		Method:      "PUT",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ReplaceCronWorkflowResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ReplaceCronWorkflowErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ReplaceCronWorkflowErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ReplaceCronWorkflowResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ReplaceCronWorkflowResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) RestoreCronWorkflow(ctx context.Context, options *RestoreCronWorkflowRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RestoreCronWorkflowResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}/restore",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*RestoreCronWorkflowResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(RestoreCronWorkflowErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "RestoreCronWorkflowErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(RestoreCronWorkflowResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "RestoreCronWorkflowResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/cron/workflows/{cron_uid}/restore")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}
@@ -3053,6 +4683,327 @@ func (c *Client) SkipFederationQuarantine(ctx context.Context, options *SkipFede
 	return responseParser(ctx, resp)
 }
 
+func (c *Client) OfferRelayDeliveries(ctx context.Context, options *OfferRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*OfferRelayDeliveriesResponse, error) {
+	var err error
+
+	queryEncoding := map[string]runtime.QueryEncoding{
+		"epoch":  {Style: "form", Explode: &[]bool{false}[0]},
+		"limit":  {Style: "form", Explode: &[]bool{false}[0]},
+		"stream": {Style: "form", Explode: &[]bool{false}[0]},
+	}
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/federation/relay",
+		Method:        "GET",
+		Options:       options,
+		QueryEncoding: queryEncoding,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*OfferRelayDeliveriesResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(OfferRelayDeliveriesErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "OfferRelayDeliveriesErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(OfferRelayDeliveriesResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "OfferRelayDeliveriesResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/federation/relay")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) GetRelayReset(ctx context.Context, options *GetRelayResetRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetRelayResetResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/federation/relay/reset",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*GetRelayResetResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(GetRelayResetErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "GetRelayResetErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(GetRelayResetResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "GetRelayResetResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/federation/relay/reset")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) AcceptRelayDeliveries(ctx context.Context, options *AcceptRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AcceptRelayDeliveriesResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/federation/relay:accept",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*AcceptRelayDeliveriesResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(AcceptRelayDeliveriesErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "AcceptRelayDeliveriesErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(AcceptRelayDeliveriesResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "AcceptRelayDeliveriesResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/federation/relay:accept")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) AckRelayDeliveries(ctx context.Context, options *AckRelayDeliveriesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AckRelayDeliveriesResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/federation/relay:ack",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*AckRelayDeliveriesResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(AckRelayDeliveriesErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "AckRelayDeliveriesErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(AckRelayDeliveriesResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "AckRelayDeliveriesResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/federation/relay:ack")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// DisconnectRelayEnrollment Revoke only the presented relay transport grant
+func (c *Client) DisconnectRelayEnrollment(ctx context.Context, options *DisconnectRelayEnrollmentRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DisconnectRelayEnrollmentResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/federation/relay:disconnect",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*DisconnectRelayEnrollmentResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(DisconnectRelayEnrollmentErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "DisconnectRelayEnrollmentErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(DisconnectRelayEnrollmentResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "DisconnectRelayEnrollmentResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/federation/relay:disconnect")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 func (c *Client) GetProjectFederationStatus(ctx context.Context, options *GetProjectFederationStatusRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetProjectFederationStatusResponse, error) {
 	var err error
 	reqParams := runtime.RequestOptionsParameters{
@@ -3433,13 +5384,15 @@ func (c *Client) ListIssues(ctx context.Context, options *ListIssuesRequestOptio
 	var err error
 
 	queryEncoding := map[string]runtime.QueryEncoding{
-		"limit":        {Style: "form", Explode: &[]bool{false}[0]},
-		"max_priority": {Style: "form", Explode: &[]bool{false}[0]},
-		"owner":        {Style: "form", Explode: &[]bool{false}[0]},
-		"priority":     {Style: "form", Explode: &[]bool{false}[0]},
-		"sort":         {Style: "form", Explode: &[]bool{false}[0]},
-		"status":       {Style: "form", Explode: &[]bool{false}[0]},
-		"unowned":      {Style: "form", Explode: &[]bool{false}[0]},
+		"cursor":        {Style: "form", Explode: &[]bool{false}[0]},
+		"include_total": {Style: "form", Explode: &[]bool{false}[0]},
+		"limit":         {Style: "form", Explode: &[]bool{false}[0]},
+		"max_priority":  {Style: "form", Explode: &[]bool{false}[0]},
+		"owner":         {Style: "form", Explode: &[]bool{false}[0]},
+		"priority":      {Style: "form", Explode: &[]bool{false}[0]},
+		"sort":          {Style: "form", Explode: &[]bool{false}[0]},
+		"status":        {Style: "form", Explode: &[]bool{false}[0]},
+		"unowned":       {Style: "form", Explode: &[]bool{false}[0]},
 	}
 	reqParams := runtime.RequestOptionsParameters{
 		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/issues",
@@ -3569,7 +5522,11 @@ func (c *Client) ShowIssue(ctx context.Context, options *ShowIssueRequestOptions
 	var err error
 
 	queryEncoding := map[string]runtime.QueryEncoding{
+		"inbound":         {Style: "form", Explode: &[]bool{false}[0]},
 		"include_deleted": {Style: "form", Explode: &[]bool{false}[0]},
+		"kind":            {Style: "form", Explode: &[]bool{false}[0]},
+		"since":           {Style: "form", Explode: &[]bool{false}[0]},
+		"thread":          {Style: "form", Explode: &[]bool{false}[0]},
 	}
 	reqParams := runtime.RequestOptionsParameters{
 		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/issues/{ref}",
@@ -5730,6 +7687,77 @@ func (c *Client) PatchIssueMetadata(ctx context.Context, options *PatchIssueMeta
 	return responseParser(ctx, resp)
 }
 
+func (c *Client) IssuePlanningDates(ctx context.Context, options *IssuePlanningDatesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*IssuePlanningDatesResponse, error) {
+	var err error
+
+	queryEncoding := map[string]runtime.QueryEncoding{
+		"inbound":         {Style: "form", Explode: &[]bool{false}[0]},
+		"include_deleted": {Style: "form", Explode: &[]bool{false}[0]},
+		"kind":            {Style: "form", Explode: &[]bool{false}[0]},
+		"since":           {Style: "form", Explode: &[]bool{false}[0]},
+		"thread":          {Style: "form", Explode: &[]bool{false}[0]},
+	}
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:    c.apiClient.GetBaseURL() + "/api/v1/projects/{project_id}/issues/{ref}/planning-dates",
+		Method:        "GET",
+		Options:       options,
+		QueryEncoding: queryEncoding,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*IssuePlanningDatesResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(IssuePlanningDatesErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "IssuePlanningDatesErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(IssuePlanningDatesResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "IssuePlanningDatesResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/projects/{project_id}/issues/{ref}/planning-dates")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 func (c *Client) ListLabels(ctx context.Context, options *ListLabelsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListLabelsResponse, error) {
 	var err error
 	reqParams := runtime.RequestOptionsParameters{
@@ -6360,10 +8388,12 @@ func (c *Client) SearchIssues(ctx context.Context, options *SearchIssuesRequestO
 	var err error
 
 	queryEncoding := map[string]runtime.QueryEncoding{
+		"cursor":          {Style: "form", Explode: &[]bool{false}[0]},
 		"include_deleted": {Style: "form", Explode: &[]bool{false}[0]},
 		"limit":           {Style: "form", Explode: &[]bool{false}[0]},
 		"mode":            {Style: "form", Explode: &[]bool{false}[0]},
 		"q":               {Style: "form", Explode: &[]bool{false}[0]},
+		"sort":            {Style: "form", Explode: &[]bool{false}[0]},
 		"status":          {Style: "form", Explode: &[]bool{false}[0]},
 	}
 	reqParams := runtime.RequestOptionsParameters{
@@ -6490,6 +8520,378 @@ func (c *Client) ReadyIssuesGlobal(ctx context.Context, options *ReadyIssuesGlob
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/ready")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ListTeams(ctx context.Context, reqEditors ...runtime.RequestEditorFn) (*ListTeamsResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/teams",
+		Method:     "GET",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ListTeamsResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ListTeamsErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ListTeamsErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ListTeamsResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ListTeamsResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/teams")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) CreateTeam(ctx context.Context, options *CreateTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CreateTeamResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/teams",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*CreateTeamResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(CreateTeamErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "CreateTeamErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(CreateTeamResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "CreateTeamResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/teams")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) DeleteTeam(ctx context.Context, options *DeleteTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*DeleteTeamResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/teams/{team_uid}",
+		Method:     "DELETE",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*DeleteTeamResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(DeleteTeamErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "DeleteTeamErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(DeleteTeamResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "DeleteTeamResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/teams/{team_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) ShowTeam(ctx context.Context, options *ShowTeamRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ShowTeamResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/teams/{team_uid}",
+		Method:     "GET",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ShowTeamResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ShowTeamErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ShowTeamErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ShowTeamResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ShowTeamResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/teams/{team_uid}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) RemoveTeamMember(ctx context.Context, options *RemoveTeamMemberRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RemoveTeamMemberResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/teams/{team_uid}/members/{actor}",
+		Method:     "DELETE",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*RemoveTeamMemberResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(RemoveTeamMemberErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "RemoveTeamMemberErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(RemoveTeamMemberResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "RemoveTeamMemberResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/teams/{team_uid}/members/{actor}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+func (c *Client) AddTeamMember(ctx context.Context, options *AddTeamMemberRequestOptions, reqEditors ...runtime.RequestEditorFn) (*AddTeamMemberResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL: c.apiClient.GetBaseURL() + "/api/v1/teams/{team_uid}/members/{actor}",
+		Method:     "PUT",
+		Options:    options,
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*AddTeamMemberResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(AddTeamMemberErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "AddTeamMemberErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(AddTeamMemberResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "AddTeamMemberResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/teams/{team_uid}/members/{actor}")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}
@@ -6923,6 +9325,70 @@ func (c *Client) ReadUISnapshot(ctx context.Context, options *ReadUISnapshotRequ
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/ui/snapshot")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// CaptureTelemetryEvent Report a browser telemetry event
+func (c *Client) CaptureTelemetryEvent(ctx context.Context, options *CaptureTelemetryEventRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CaptureTelemetryEventResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/ui/telemetry",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*CaptureTelemetryEventResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 202 {
+			target := new(CaptureTelemetryEventErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "CaptureTelemetryEventErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(CaptureTelemetryEventResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "CaptureTelemetryEventResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/ui/telemetry")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}

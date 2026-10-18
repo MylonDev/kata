@@ -54,6 +54,7 @@ func TestWebDaemonRosterIsSanitizedAndReportsHealth(t *testing.T) {
 	var roster struct {
 		Daemons []struct {
 			ID      string `json:"id"`
+			Local   bool   `json:"local"`
 			Default bool   `json:"default"`
 			Auth    string `json:"auth"`
 			Health  string `json:"health"`
@@ -61,6 +62,9 @@ func TestWebDaemonRosterIsSanitizedAndReportsHealth(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(body, &roster))
 	require.Len(t, roster.Daemons, 3)
+	assert.True(t, roster.Daemons[0].Local, "roster must identify the native local mux rather than infer authority from a URL or name")
+	assert.False(t, roster.Daemons[1].Local)
+	assert.False(t, roster.Daemons[2].Local)
 	assert.Equal(t, "connected", roster.Daemons[0].Health)
 	assert.Equal(t, "connected", roster.Daemons[1].Health)
 	assert.True(t, roster.Daemons[1].Default)
@@ -175,6 +179,7 @@ func TestAnonymousReadonlyRosterHidesConfiguredCredentialTargetsBeforeProbing(t 
 
 func TestWebDaemonProxyPinsTargetAndStripsBrowserCredentials(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "web", r.Header.Get("X-Kata-Surface"))
 		assert.Equal(t, "/api/v1/ui/snapshot", r.URL.Path)
 		assert.Equal(t, "view=all-open", r.URL.RawQuery)
 		assert.Equal(t, "Bearer target-token", r.Header.Get("Authorization"))
@@ -211,6 +216,7 @@ func TestWebDaemonProxyPinsTargetAndStripsBrowserCredentials(t *testing.T) {
 	request.Header.Set("X-Kata-Actor", "user-a")
 	request.Header.Set("X-Example-Proxy", "user-a")
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Kata-Surface", "web")
 	response, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	defer func() { _ = response.Body.Close() }()

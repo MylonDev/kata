@@ -5,8 +5,9 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,282 +39,51 @@ type Storage interface { Only(context.Context) error }
 func TestStorageMethodInventoryClassifiesEveryMethod(t *testing.T) {
 	methods, err := CollectStorageMethodInventory("../../storage.go")
 	require.NoError(t, err)
-	require.Len(t, methods, 257)
-
-	var implemented []string
-	var stubbed []string
+	require.NotEmpty(t, methods)
 	for _, method := range methods {
-		switch method.Status {
-		case MethodImplemented:
-			implemented = append(implemented, method.Name)
-		case MethodStubbed:
-			stubbed = append(stubbed, method.Name)
-		default:
-			assert.Fail(t, "unknown method status", "%s has status %q", method.Name, method.Status)
-		}
+		assert.Equal(t, MethodImplemented, method.Status,
+			"pgstore must implement Storage method %s instead of serving a generated stub", method.Name)
 	}
+}
 
-	sort.Strings(implemented)
-	assert.Equal(t, []string{
-		"APITokenByID",
-		"AcquireClaim",
-		"AcquireIdempotencyLock",
-		"ActiveFederationQuarantine",
-		"ActiveFederationQuarantinesByProject",
-		"AddLabel",
-		"AddLabelAndEvent",
-		"AdoptProjectIntoFederation",
-		"AdvanceFederationPullCursor",
-		"AdvanceFederationPushCursor",
-		"AliasByID",
-		"AliasByIdentity",
-		"ApplyClaimStatus",
-		"ApplyExternalFieldProjection",
-		"ApplyExternalRootProjection",
-		"AttachAlias",
-		"AuthorizeFederationToken",
-		"BatchProjectStats",
-		"CheckClaimGate",
-		"ChildrenOfIssue",
-		"ClaimExternalRootBinding",
-		"ClaimExternalRootBindingForManualAction",
-		"ClaimExternalRootBindingForManualReconcile",
-		"ClaimIssueSyncBinding",
-		"ClaimOwner",
-		"ClaimStatus",
-		"ClaimStatusReadOnly",
-		"ClaimStatusRefreshError",
-		"ClearClaimStatusRefreshError",
-		"ClearFederationSyncError",
-		"ClearPendingExternalComment",
-		"Close",
-		"CloseIssue",
-		"CloseIssueGuarded",
-		"CloseIssueWithEvents",
-		"CommentBodyByID",
-		"CommentsByIssue",
-		"CountActiveFederationEnrollments",
-		"CountLiveClaims",
-		"CountOpenIssues",
-		"CountPendingClaims",
-		"CreateAPIToken",
-		"CreateComment",
-		"CreateExternalRootBinding",
-		"CreateFederationEnrollment",
-		"CreateIssue",
-		"CreateLink",
-		"CreateLinkAndEvent",
-		"CreateProject",
-		"CreateProjectAndEvent",
-		"CreateProjectFederationEnrollment",
-		"CreateProjectWithUID",
-		"CreateProjectWithUIDAndEvent",
-		"CreateRecurrence",
-		"CreateRecurrenceForIssue",
-		"DeleteLinkAndEvent",
-		"DeleteLinkByID",
-		"DesignateInboxProject",
-		"DetachProjectAlias",
-		"DisableIssueSyncBinding",
-		"EditComment",
-		"EditIssue",
-		"EditIssueAtomic",
-		"EnableFederationPush",
-		"EnableProjectFederation",
-		"EnqueuePendingClaim",
-		"EnsureExternalRootLifecycleRequest",
-		"EnsureSystemProject",
-		"EventsAfter",
-		"EventsByUIDs",
-		"EventsInWindow",
-		"ExpireAssignments",
-		"ExpireTimedClaims",
-		"ExpireTimedClaimsForProject",
-		"ExportComments",
-		"ExportEvents",
-		"ExportExternalFieldMappings",
-		"ExportExternalFieldStates",
-		"ExportExternalRootBindings",
-		"ExportFederationBindings",
-		"ExportFederationEnrollments",
-		"ExportFederationQuarantine",
-		"ExportFederationSyncStatus",
-		"ExportImportMappings",
-		"ExportIssueClaims",
-		"ExportIssueLabels",
-		"ExportIssueSyncBindings",
-		"ExportIssueSyncStatus",
-		"ExportIssues",
-		"ExportLinks",
-		"ExportMeta",
-		"ExportPendingClaimRequests",
-		"ExportProjectAliases",
-		"ExportProjectPurgeLog",
-		"ExportProjects",
-		"ExportPurgeLog",
-		"ExportRecurrences",
-		"ExportSequences",
-		"ExternalFieldStates",
-		"ExternalRootBindingByExternalKey",
-		"ExternalRootBindingByID",
-		"ExternalRootBindingByIssue",
-		"FederationBindingByProject",
-		"FederationEnrollmentTransactionFence",
-		"FederationSyncStatusByProject",
-		"FindActiveFederationEnrollment",
-		"ForceReleaseClaim",
-		"GetRecurrenceByID",
-		"GetRecurrenceByUID",
-		"HardDeleteProject",
-		"HasLabel",
-		"ImportBatch",
-		"ImportCommentMappingsByIssue",
-		"ImportMappingBySource",
-		"ImportMappingsByProjectSource",
-		"ImportReplay",
-		"IngestFederationEvents",
-		"InsertCloseThrottledEvent",
-		"InsertRemoteEvent",
-		"InstanceUID",
-		"IssueByID",
-		"IssueByShortID",
-		"IssueByUID",
-		"IssueInScope",
-		"IssueQualifiersByUIDs",
-		"IssueScopedMembers",
-		"IssueScopedTokenTransactionFence",
-		"IssueSyncBindingByID",
-		"IssueSyncBindingByProject",
-		"IssueSyncStatusByProject",
-		"IssueUIDPrefixMatch",
-		"LabelByEndpoints",
-		"LabelCounts",
-		"LabelsByIssue",
-		"LabelsByIssues",
-		"LabelsForIssue",
-		"LatestAliasForProject",
-		"LeaveFederationReplica",
-		"LinkByEndpoints",
-		"LinkByID",
-		"LinksByIssue",
-		"ListAPITokens",
-		"ListAllIssues",
-		"ListDueExternalRootBindings",
-		"ListDueIssueSyncBindings",
-		"ListDueNotificationIssueIDs",
-		"ListExternalFieldMappings",
-		"ListFederationBindings",
-		"ListFederationEnrollments",
-		"ListIssueContent",
-		"ListIssues",
-		"ListPendingClaimRequests",
-		"ListPendingClaimRequestsForIssue",
-		"ListProjectFederationEnrollments",
-		"ListProjects",
-		"ListProjectsIncludingArchived",
-		"ListRecurrencesByProject",
-		"LookupCommentIdempotency",
-		"LookupIdempotency",
-		"LookupIssueMutationIdempotency",
-		"MarkClaimStatusRefreshError",
-		"MarkPendingClaimAttempt",
-		"MaterializeFederatedProject",
-		"MaterializeNext",
-		"MaxEventID",
-		"MaxFederationBaselineEventID",
-		"MaxLocalOriginEventID",
-		"MergeProjects",
-		"MoveIssueProject",
-		"OpenChildrenOf",
-		"ParentOf",
-		"ParentShortIDsByIssues",
-		"PatchIssueMetadata",
-		"PatchProjectMetadata",
-		"PatchRecurrence",
-		"Path",
-		"PauseExternalRootBinding",
-		"PendingFederationPushEvents",
-		"PendingFederationPushStats",
-		"ProjectAliases",
-		"ProjectByID",
-		"ProjectByName",
-		"ProjectByNameIncludingArchived",
-		"ProjectByUID",
-		"PurgeIssue",
-		"PurgeProject",
-		"PurgeResetCheck",
-		"ReadyIssues",
-		"ReadyIssuesGlobal",
-		"ReassignAlias",
-		"RebindFederationBinding",
-		"RecentSameMessageClose",
-		"RecentSiblingCloses",
-		"ReconcileDueNotification",
-		"ReconcileLocalFederationEcho",
-		"RecordExternalRootError",
-		"RecordExternalRootSuccess",
-		"RecordFederationQuarantine",
-		"RecordFederationSyncError",
-		"RecordFederationSyncPullStarted",
-		"RecordFederationSyncPullSuccess",
-		"RecordFederationSyncPushStarted",
-		"RecordFederationSyncPushSuccess",
-		"RecordFederationSyncReset",
-		"RecordIssueSyncError",
-		"RecordIssueSyncSuccess",
-		"RefreshInstanceUID",
-		"RefreshIssueSyncBinding",
-		"RefreshProjectFederationBaseline",
-		"RejectPendingClaim",
-		"RelationshipsByIssues",
-		"ReleaseClaim",
-		"ReleaseExternalRootClaim",
-		"RemoveLabel",
-		"RemoveLabelAndEvent",
-		"RemoveProject",
-		"RenameProject",
-		"RenameProjectAndEvent",
-		"RenewClaim",
-		"RenewExternalRootClaim",
-		"ReopenIssue",
-		"ResetFederatedProject",
-		"ResetFederatedProjectIfNoPendingPush",
-		"ResolveAPIToken",
-		"ResolveExternalFieldConflict",
-		"ResolvePendingClaim",
-		"RestoreIssue",
-		"RestoreProject",
-		"ResumeExternalRootBinding",
-		"RetryFederationQuarantine",
-		"RetryTransient",
-		"RevokeAPIToken",
-		"RevokeFederationEnrollment",
-		"RewriteAuthorIdentity",
-		"RotateFederationEnrollment",
-		"SchemaVersion",
-		"SearchFTS",
-		"SearchFTSAny",
-		"SetPendingExternalComment",
-		"SkipFederationQuarantine",
-		"SoftDeleteIssue",
-		"SoftDeleteRecurrence",
-		"SystemProject",
-		"UnassignOwner",
-		"UnbindExternalRootBinding",
-		"UnmapExternalField",
-		"UnresolvedClaimViolationsForIssue",
-		"UnresolvedClaimViolationsForProject",
-		"UpdateOwner",
-		"UpdatePriority",
-		"UpsertClaimCache",
-		"UpsertExternalCommentProjection",
-		"UpsertExternalFieldMapping",
-		"UpsertExternalFieldState",
-		"UpsertFederationBinding",
-		"UpsertImportMapping",
-		"UpsertIssueSyncBinding",
-	}, implemented)
-	assert.Empty(t, stubbed)
+func TestStorageMethodInventoryMarksUnportedMethodsStubbed(t *testing.T) {
+	names := append(implementedMethodNames(), "UnportedMethod")
+	inventory, err := CollectStorageMethodInventory(writeStorageFixture(t, names))
+	require.NoError(t, err)
+	statuses := make(map[string]MethodStatus, len(inventory))
+	for _, method := range inventory {
+		statuses[method.Name] = method.Status
+	}
+	assert.Equal(t, MethodStubbed, statuses["UnportedMethod"])
+	assert.Equal(t, MethodImplemented, statuses["APITokenByID"])
+}
+
+func TestStorageMethodInventoryRejectsStaleImplementedEntry(t *testing.T) {
+	names := slices.DeleteFunc(implementedMethodNames(), func(name string) bool { return name == "APITokenByID" })
+	_, err := CollectStorageMethodInventory(writeStorageFixture(t, names))
+	require.EqualError(t, err, `implemented method "APITokenByID" is not declared by Storage`)
+}
+
+func implementedMethodNames() []string {
+	names := make([]string, 0, len(alreadyImplemented))
+	for name := range alreadyImplemented {
+		names = append(names, name)
+	}
+	return names
+}
+
+// writeStorageFixture writes a Storage interface that declares names.
+func writeStorageFixture(t *testing.T, names []string) string {
+	t.Helper()
+	var source strings.Builder
+	source.WriteString("package db\ntype Storage interface {\n")
+	for _, name := range names {
+		source.WriteString("\t" + name + "()\n")
+	}
+	source.WriteString("}\n")
+	storagePath := filepath.Join(t.TempDir(), "storage.go")
+	require.NoError(t, os.WriteFile(storagePath, []byte(source.String()), 0o600))
+	return storagePath
 }
 
 func TestImplementedStorageMethodsHaveConformanceCoverage(t *testing.T) {

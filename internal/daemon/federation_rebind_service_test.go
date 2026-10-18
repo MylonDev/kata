@@ -54,9 +54,7 @@ func (s rebindBlockingClaimCommitStore) ApplyClaimStatus(
 	return s.Storage.ApplyClaimStatus(ctx, projectID, issueUID, status)
 }
 
-func (s rebindFailingStore) RebindFederationBinding(
-	context.Context, db.RebindFederationBindingParams,
-) (db.FederationBinding, error) {
+func (s rebindFailingStore) RebindFederationBinding(context.Context, db.RebindFederationBindingParams) (db.FederationBinding, error) {
 	return db.FederationBinding{}, s.err
 }
 
@@ -140,7 +138,7 @@ func TestRebindFederationReplicaWaitsForOldEndpointSync(t *testing.T) {
 	select {
 	case err := <-rebindDone:
 		t.Fatalf("rebind completed before the old endpoint sync drained: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence window; the held old endpoint sync keeps the rebind in its drain wait
 	}
 	currentBinding, err := store.FederationBindingByProject(context.Background(), project.ID)
 	require.NoError(t, err)
@@ -325,7 +323,7 @@ func TestRebindFederationReplicaWaitsForImmediateClaimForwardCommit(t *testing.T
 			case rebindErr := <-rebindDone:
 				releaseCommit()
 				t.Fatalf("rebind completed before the forwarded claim committed: %v", rebindErr)
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence window; releaseCommit holds the forwarded claim, so the rebind must not complete
 			}
 
 			releaseCommit()

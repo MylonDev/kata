@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.kenn.io/kata/internal/api"
+	"go.kenn.io/kata/internal/commentref"
+	"go.kenn.io/kata/internal/db"
 )
 
 // Issue is a strict subset of the daemon's wire shape. Labels rides on
@@ -20,6 +22,7 @@ import (
 // the human-facing "<project>#<short_id>" form populated on list rows
 // (api.IssueOut.QualifiedID).
 type Issue struct {
+	db.AttributionView
 	ID                  int64        `json:"id"`
 	UID                 string       `json:"uid,omitempty"`
 	ProjectID           int64        `json:"project_id"`
@@ -277,11 +280,18 @@ type ProjectSummaryWithStats struct {
 
 // CommentEntry is the per-comment projection rendered in the comments tab.
 type CommentEntry struct {
-	ID        int64     `json:"id"`
-	Author    string    `json:"author"`
-	Teammate  string    `json:"teammate,omitempty"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
+	db.AttributionView
+	UID                string            `json:"uid"`
+	Handle             string            `json:"handle"`
+	EditedAt           *time.Time        `json:"edited_at,omitempty"`
+	Reply              *commentref.Link  `json:"reply,omitempty"`
+	Backlinks          []commentref.Link `json:"backlinks,omitempty"`
+	BacklinksTruncated bool              `json:"backlinks_truncated,omitempty"`
+	ID                 int64             `json:"id"`
+	Author             string            `json:"author"`
+	Teammate           string            `json:"teammate,omitempty"`
+	Body               string            `json:"body"`
+	CreatedAt          time.Time         `json:"created_at"`
 }
 
 // EventLogEntry is the per-event projection used by the events tab.

@@ -13,6 +13,8 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/time/rate"
 
+	"go.kenn.io/kata/internal/commentref"
+	"go.kenn.io/kata/internal/notification"
 	"go.kenn.io/kata/internal/storageadmin"
 	"go.kenn.io/kata/internal/teammate"
 	kataclient "go.kenn.io/kata/pkg/client"
@@ -38,6 +40,8 @@ type Options struct {
 	Version           string
 	StorageAdmin      *storageadmin.Admin
 	EnableTokenAdmin  bool
+	// ObserveToolCall must return immediately; nil disables activity reporting.
+	ObserveToolCall func()
 }
 
 // New creates a tools-only MCP server for one startup project scope.
@@ -91,13 +95,14 @@ func New(options Options) (*sdkmcp.Server, error) {
 	server.AddReceivingMiddleware(toolAdmissionMiddleware(
 		rate.NewLimiter(toolCallsPerSecond, toolCallBurst),
 		make(chan struct{}, toolCallConcurrency),
+		options.ObserveToolCall,
 	))
 	server.AddReceivingMiddleware(cacheHintsMiddleware)
 	registerSectionLoaders(server, options)
 	return server, nil
 }
 
-func toolAdmissionMiddleware(limiter *rate.Limiter, concurrent chan struct{}) sdkmcp.Middleware {
+func toolAdmissionMiddleware(limiter *rate.Limiter, concurrent chan struct{}, observe func()) sdkmcp.Middleware {
 	return func(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
 		return func(ctx context.Context, method string, request sdkmcp.Request) (sdkmcp.Result, error) {
 			if method != "tools/call" {
@@ -111,6 +116,9 @@ func toolAdmissionMiddleware(limiter *rate.Limiter, concurrent chan struct{}) sd
 			}
 			if err := limiter.Wait(ctx); err != nil {
 				return nil, err
+			}
+			if observe != nil {
+				observe()
 			}
 			return next(ctx, method, request)
 		}
@@ -294,6 +302,9 @@ func inputSchemaFor[T any](toolName string) *jsonschema.Schema {
 		setNumberBounds("limit", 1, maximumResultLimit)
 		setEnum("mode", "auto", "lexical", "hybrid", "semantic")
 	case "kata.list":
+		setEnum("sort", "created", "oldest")
+		forbidTrueWith("priority_unset", "priority")
+		forbidTrueWith("priority_unset", "max_priority")
 		setNumberBounds("limit", 1, maximumResultLimit)
 		setNumberBounds("priority", 0, 4)
 		setNumberBounds("max_priority", 0, 4)
@@ -303,6 +314,7 @@ func inputSchemaFor[T any](toolName string) *jsonschema.Schema {
 		setNumberBounds("limit", 1, maximumResultLimit)
 		forbidTrueWith("unowned", "owner")
 	case "kata.show":
+		setEnum("kind", "reply", "confirm", "refute", "supersede")
 		setStringBounds("ref", 1, 256)
 		setNumberBounds("comment_limit", 1, maximumResultLimit)
 	case "kata.create":
@@ -318,6 +330,7 @@ func inputSchemaFor[T any](toolName string) *jsonschema.Schema {
 		forbidTrueWith("clear_timezone", "timezone")
 		forbidTogether("parent", "remove_parent")
 	case "kata.comment":
+		setEnum("kind", "reply", "confirm", "refute", "supersede")
 		setStringBounds("ref", 1, 256)
 		setStringBounds("body", 1, 1<<20)
 		setStringBounds("idempotency_key", 1, 256)
@@ -394,6 +407,22 @@ func inputSchemaFor[T any](toolName string) *jsonschema.Schema {
 	case "kata.audit_closes":
 		setNumberBounds("limit", 1, maximumResultLimit)
 		setStringBounds("cursor", 1, 64)
+	case "kata.assign":
+		setStringBounds("ref", 1, 256)
+		setStringBounds("owner", 1, 0)
+	case "kata.unassign":
+		setStringBounds("ref", 1, 256)
+		setStringBounds("expected_owner", 1, 0)
+	case "kata.status":
+		setStringBounds("ref", 1, 256)
+	case "kata.inbox":
+		setStringBounds("for", 1, notification.RecipientMaxBytes)
+		setNumberBounds("limit", 1, maximumResultLimit)
+	case "kata.search_docs":
+		setStringBounds("query", 1, maximumQueryBytes)
+		setNumberBounds("limit", 1, maximumResultLimit)
+	case "kata.read_doc":
+		setStringBounds("id", 1, 512)
 	}
 	switch len(forbidden) {
 	case 0:
@@ -554,6 +583,8 @@ func nonIdempotent(hints *sdkmcp.ToolAnnotations) *sdkmcp.ToolAnnotations {
 
 // SearchInput selects matching issues without returning large issue bodies.
 type SearchInput struct {
+	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque next_cursor from the preceding page; keep filters and scope unchanged"`
+
 	Status        *string  `json:"status,omitempty" jsonschema:"Issue status: open or closed; omit for both"`
 	Project       string   `json:"project,omitempty" jsonschema:"Project name; omit to search every project in scope"`
 	Query         string   `json:"query" jsonschema:"Non-empty text to search for"`
@@ -565,11 +596,17 @@ type SearchInput struct {
 
 // ListInput filters project issues. Empty status means open and closed.
 type ListInput struct {
+	IncludeTotal  bool   `json:"include_total,omitempty" jsonschema:"Count all matching issues; optional extra SQL count"`
+	PriorityUnset bool   `json:"priority_unset,omitempty" jsonschema:"Only unset priority; mutually exclusive with priority and max_priority"`
+	Sort          string `json:"sort,omitempty" jsonschema:"Stable creation order: created (newest first, default) or oldest"`
+
+	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque next_cursor from the preceding page; keep filters and scope unchanged"`
+
 	Project       string   `json:"project,omitempty" jsonschema:"Project name; omit to list every project in scope"`
 	Status        string   `json:"status,omitempty" jsonschema:"Issue status: open, closed, or empty for both"`
 	Limit         int      `json:"limit,omitempty" jsonschema:"Maximum results from 1 through 100; default 20"`
 	Priority      *int64   `json:"priority,omitempty" jsonschema:"Exact priority from 0 through 4"`
-	MaxPriority   *int64   `json:"max_priority,omitempty" jsonschema:"Highest numeric priority from 0 through 4"`
+	MaxPriority   *int64   `json:"max_priority,omitempty" jsonschema:"Highest numeric priority from 0 through 4; excludes unset priority"`
 	Owner         string   `json:"owner,omitempty" jsonschema:"Only issues owned by this actor"`
 	Unowned       bool     `json:"unowned,omitempty" jsonschema:"Only issues with no owner"`
 	Labels        []string `json:"labels,omitempty" jsonschema:"Labels that every issue must have"`
@@ -594,6 +631,10 @@ type LabelsInput struct {
 
 // ShowInput selects one bound-project issue.
 type ShowInput struct {
+	Thread       string `json:"thread,omitempty" jsonschema:"Comment reference whose transitive replies to show; maximum 50 including root"`
+	Inbound      string `json:"inbound,omitempty" jsonschema:"Author or author/teammate whose comments receive replies on this issue"`
+	Kind         string `json:"kind,omitempty" jsonschema:"Reply kind filter; requires thread or inbound"`
+	Since        string `json:"since,omitempty" jsonschema:"Comments strictly after this comment reference"`
 	Ref          string `json:"ref" jsonschema:"Bare short ID, qualified reference, or full issue UID"`
 	CommentLimit int    `json:"comment_limit,omitempty" jsonschema:"Maximum newest comments from 1 through 100; omit for 20"`
 }
@@ -644,6 +685,9 @@ type EditInput struct {
 
 // CommentInput appends an idempotent comment.
 type CommentInput struct {
+	ReplyTo        string  `json:"reply_to,omitempty" jsonschema:"Comment reference to reply to, confirm, refute, or supersede"`
+	Kind           string  `json:"kind,omitempty" jsonschema:"reply, confirm, refute, or supersede; confirm asserts verification/reproduction; confirm/refute need 40 evidence characters"`
+	Force          bool    `json:"force,omitempty" jsonschema:"Allow another same-kind reply by this actor and teammate"`
 	Teammate       *string `json:"teammate,omitempty" jsonschema:"Teammate handle; empty suppresses the startup default"`
 	Ref            string  `json:"ref" jsonschema:"Issue reference; use project#ref in multi-project mode"`
 	Body           string  `json:"body" jsonschema:"Comment body"`
@@ -725,6 +769,12 @@ type ProjectIdentity struct {
 
 // IssueSummary is the compact issue form used by list-like tools.
 type IssueSummary struct {
+	Author              string    `json:"author,omitempty"`
+	AccountableActor    *string   `json:"accountable_actor,omitempty"`
+	SourceActor         *string   `json:"source_actor,omitempty"`
+	AuthorityUID        *string   `json:"authority_uid,omitempty"`
+	Teammate            *string   `json:"teammate,omitempty"`
+	Verification        *string   `json:"verification,omitempty"`
 	WebURL              *string   `json:"web_url,omitempty" jsonschema:"Browser URL for this issue; use this URL when linking to it."`
 	UID                 string    `json:"uid"`
 	Ref                 string    `json:"ref"`
@@ -741,10 +791,16 @@ type IssueSummary struct {
 	ScheduledOn         *string   `json:"scheduled_on,omitempty"`
 	Timezone            *string   `json:"timezone,omitempty"`
 	updatedAt           time.Time
+	metadata            map[string]any
 }
 
 // IssueListOutput is a bounded collection without issue bodies or comments.
 type IssueListOutput struct {
+	Total *int64 `json:"total,omitempty"`
+
+	Complete   bool    `json:"complete"`
+	NextCursor *string `json:"next_cursor,omitempty"`
+
 	Project   *ProjectIdentity  `json:"project,omitempty"`
 	Projects  []ProjectIdentity `json:"projects,omitempty"`
 	Issues    []IssueSummary    `json:"issues"`
@@ -760,6 +816,9 @@ type SearchHit struct {
 
 // SearchOutput reports the effective mode and any semantic fallback.
 type SearchOutput struct {
+	Complete   bool    `json:"complete"`
+	NextCursor *string `json:"next_cursor,omitempty"`
+
 	Project        *ProjectIdentity  `json:"project,omitempty"`
 	Projects       []ProjectIdentity `json:"projects,omitempty"`
 	Query          string            `json:"query"`
@@ -785,11 +844,22 @@ type LabelsOutput struct {
 
 // CommentSummary is a bounded comment representation.
 type CommentSummary struct {
-	Teammate  string `json:"teammate,omitempty"`
-	UID       string `json:"uid"`
-	Author    string `json:"author"`
-	Body      string `json:"body"`
-	CreatedAt string `json:"created_at"`
+	AccountableActor   *string           `json:"accountable_actor,omitempty"`
+	SourceActor        *string           `json:"source_actor,omitempty"`
+	AuthorityUID       *string           `json:"authority_uid,omitempty"`
+	Verification       *string           `json:"verification,omitempty"`
+	Handle             string            `json:"handle,omitempty"`
+	Reply              *commentref.Link  `json:"reply,omitempty"`
+	Backlinks          []commentref.Link `json:"backlinks,omitempty"`
+	BacklinksTruncated bool              `json:"backlinks_truncated,omitempty"`
+	EditedAt           string            `json:"edited_at,omitempty"`
+	IssueUID           string            `json:"issue_uid,omitempty"`
+	IssueShortID       string            `json:"issue_short_id,omitempty"`
+	Teammate           string            `json:"teammate,omitempty"`
+	UID                string            `json:"uid"`
+	Author             string            `json:"author"`
+	Body               string            `json:"body"`
+	CreatedAt          string            `json:"created_at"`
 }
 
 // LinkSummary identifies a relationship endpoint.

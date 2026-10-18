@@ -63,6 +63,9 @@ func (d *Store) rebindFederationBinding(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := db.LockCronProject(ctx, tx, p.ProjectID); err != nil {
+		return db.FederationBinding{}, err
+	}
 	current, err := federationBindingByProject(ctx, tx, p.ProjectID)
 	if err != nil {
 		return db.FederationBinding{}, err
@@ -73,13 +76,16 @@ func (d *Store) rebindFederationBinding(
 	if current.HubProjectID != p.HubProjectID || current.HubProjectUID != p.HubProjectUID {
 		return db.FederationBinding{}, db.ErrFederationRebindConflict
 	}
-	if current.HubURL == p.TargetHubURL && !current.AllowInsecure {
-		return current, nil
-	}
-	if current.HubURL != p.ExpectedHubURL || current.AllowInsecure != p.ExpectedAllowInsecure {
+	converged := current.HubURL == p.TargetHubURL && !current.AllowInsecure
+	if !converged && (current.HubURL != p.ExpectedHubURL || current.AllowInsecure != p.ExpectedAllowInsecure) {
 		return db.FederationBinding{}, db.ErrFederationRebindConflict
 	}
-
+	if converged {
+		if err := tx.Commit(); err != nil {
+			return db.FederationBinding{}, err
+		}
+		return current, nil
+	}
 	allowInsecure := 0
 	if p.ExpectedAllowInsecure {
 		allowInsecure = 1
@@ -225,6 +231,18 @@ func (d *Store) recordFederationQuarantine(
 		return db.FederationQuarantine{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if p.RelayBindingUID != "" {
+		if err := lockProjectAccess(ctx, tx); err != nil {
+			return db.FederationQuarantine{}, err
+		}
+		grant, err := d.upstreamRelayGrantTx(ctx, tx, p.RelayBindingUID)
+		if err != nil {
+			return db.FederationQuarantine{}, err
+		}
+		if grant.ProjectID == nil || *grant.ProjectID != p.ProjectID || grant.RelayResetEpoch != p.RelayResetEpoch {
+			return db.FederationQuarantine{}, db.ErrNotFound
+		}
+	}
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO federation_quarantine(
@@ -331,11 +349,18 @@ func (d *Store) skipFederationQuarantine(ctx context.Context, p db.SkipFederatio
 		return db.FederationQuarantine{}, fmt.Errorf("begin skip federation quarantine: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	relay, err := d.quarantineRelayBindingTx(ctx, tx, p.ProjectID)
+	if err != nil {
+		return db.FederationQuarantine{}, err
+	}
 	q, err := scanFederationQuarantine(tx.QueryRowContext(ctx,
 		federationQuarantineSelect+` WHERE id = ? AND project_id = ? AND skipped_at IS NULL`,
 		p.ID, p.ProjectID))
 	if err != nil {
 		return db.FederationQuarantine{}, err
+	}
+	if relay {
+		return db.FederationQuarantine{}, db.ErrRelayQuarantineSkipUnsupported
 	}
 	switch q.Direction {
 	case db.FederationQuarantineDirectionPush:
@@ -375,8 +400,8 @@ func (d *Store) skipFederationQuarantine(ctx context.Context, p db.SkipFederatio
 	return updated, nil
 }
 
-// RetryFederationQuarantine marks a push quarantine resolved without advancing
-// the outbound cursor. The same local events remain pending and will be sent
+// RetryFederationQuarantine marks a legacy push or negotiated relay quarantine
+// resolved without advancing cursors. The same retained events will be sent
 // again on the next sync. The existing skipped_* columns are the physical
 // resolved marker until a future schema adds explicit resolution columns.
 func (d *Store) RetryFederationQuarantine(ctx context.Context, p db.RetryFederationQuarantineParams) (db.FederationQuarantine, error) {
@@ -399,13 +424,17 @@ func (d *Store) retryFederationQuarantine(ctx context.Context, p db.RetryFederat
 		return db.FederationQuarantine{}, fmt.Errorf("begin retry federation quarantine: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	relay, err := d.quarantineRelayBindingTx(ctx, tx, p.ProjectID)
+	if err != nil {
+		return db.FederationQuarantine{}, err
+	}
 	q, err := scanFederationQuarantine(tx.QueryRowContext(ctx,
 		federationQuarantineSelect+` WHERE id = ? AND project_id = ? AND skipped_at IS NULL`,
 		p.ID, p.ProjectID))
 	if err != nil {
 		return db.FederationQuarantine{}, err
 	}
-	if q.Direction != db.FederationQuarantineDirectionPush {
+	if q.Direction != db.FederationQuarantineDirectionPush && !relay {
 		return db.FederationQuarantine{}, fmt.Errorf("%w: %s", db.ErrFederationQuarantineRetryUnsupportedDirection, q.Direction)
 	}
 	reason := strings.TrimSpace(p.Reason)
@@ -495,6 +524,9 @@ func (d *Store) upsertFederationBinding(ctx context.Context, b db.FederationBind
 	if err != nil {
 		return db.FederationBinding{}, err
 	}
+	if err := db.CheckRelayBindingUpdate(previous, b); err != nil {
+		return db.FederationBinding{}, err
+	}
 	allowInsecure := 0
 	if b.AllowInsecure {
 		allowInsecure = 1
@@ -558,17 +590,29 @@ WHERE project_id=? AND active=1 LIMIT 1`, projectID).Scan(&bindingID)
 // error. A hub binding returns db.ErrFederationNotSpoke.
 func (d *Store) LeaveFederationReplica(ctx context.Context, projectID int64) (db.LeaveFederationResult, error) {
 	return retryWrite1(ctx, d, func() (db.LeaveFederationResult, error) {
-		return d.leaveFederationReplica(ctx, projectID)
+		return d.leaveFederationReplica(ctx, projectID, false)
 	})
 }
 
-func (d *Store) leaveFederationReplica(ctx context.Context, projectID int64) (db.LeaveFederationResult, error) {
+// DetachRelayReplicaLocally is LeaveFederationReplica for a relay whose hub
+// is gone: it discards the binding's undeliverable hop state instead of
+// waiting for delivery. See db.RelayLocalDetacher.
+func (d *Store) DetachRelayReplicaLocally(ctx context.Context, projectID int64) (db.LeaveFederationResult, error) {
+	return retryWrite1(ctx, d, func() (db.LeaveFederationResult, error) {
+		return d.leaveFederationReplica(ctx, projectID, true)
+	})
+}
+
+func (d *Store) leaveFederationReplica(ctx context.Context, projectID int64, discardRelay bool) (db.LeaveFederationResult, error) {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return db.LeaveFederationResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := db.LockCronProject(ctx, tx, projectID); err != nil {
+		return db.LeaveFederationResult{}, err
+	}
 	uid, err := projectUIDTx(ctx, tx, projectID)
 	if err != nil {
 		return db.LeaveFederationResult{}, err
@@ -586,6 +630,17 @@ func (d *Store) leaveFederationReplica(ctx context.Context, projectID int64) (db
 	}
 	if binding.Role != db.FederationRoleSpoke {
 		return db.LeaveFederationResult{}, db.ErrFederationNotSpoke
+	}
+	if discardRelay {
+		err = d.discardRelayHopStateTx(ctx, tx, projectID, binding.RelayConfig)
+	} else {
+		err = d.validateRelayLifecycleTx(ctx, tx, projectID)
+		if err == nil && binding.RelayConfig != nil {
+			err = deleteRelayBindingStateTx(ctx, tx, binding.RelayConfig.BindingUID)
+		}
+	}
+	if err != nil {
+		return db.LeaveFederationResult{}, err
 	}
 	for _, stmt := range []string{
 		`DELETE FROM federation_quarantine WHERE project_id = ?`,
@@ -616,7 +671,8 @@ func (d *Store) boundFederationActorTx(ctx context.Context, tx *sql.Tx, projectI
 		 WHERE project_id = ?
 		   AND role = ?
 		   AND enabled = 1
-		   AND push_enabled = 1`,
+		   AND push_enabled = 1
+           AND relay_config IS NULL`,
 		projectID, string(db.FederationRoleSpoke)).Scan(&actor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -680,11 +736,26 @@ func (d *Store) AdvanceFederationPullCursor(ctx context.Context, projectID, next
 	})
 }
 
-// InsertRemoteEvent appends a hub event to the local log while preserving every
-// portable field. Only the local events.id is assigned by the spoke database.
+// InsertRemoteEvent appends one hub event to the local log. See InsertRemoteEvents.
 func (d *Store) InsertRemoteEvent(ctx context.Context, projectID int64, ev db.RemoteEvent) (bool, error) {
-	return retryWrite1(ctx, d, func() (bool, error) {
-		return d.insertRemoteEvent(ctx, projectID, ev)
+	inserted, err := d.InsertRemoteEvents(ctx, projectID, []db.RemoteEvent{ev})
+	if err != nil {
+		return false, err
+	}
+	return inserted[0], nil
+}
+
+// InsertRemoteEvents appends a page of hub events to the local log in one
+// transaction while preserving every portable field. Only the local events.id
+// is assigned by the spoke database. One cron validator serves the whole page,
+// so run identity history is read once per page rather than once per event.
+// It reports, per event, whether the event was new.
+func (d *Store) InsertRemoteEvents(ctx context.Context, projectID int64, events []db.RemoteEvent) ([]bool, error) {
+	// Serialize source/proof arrival before event-sequence locks. Serializable
+	// retries resolve overlapping snapshots without leaving creation unattached.
+	ctx = db.WithAdditionalTransactionFence(ctx, lockProjectAccess)
+	return retryWrite1(ctx, d, func() ([]bool, error) {
+		return d.insertRemoteEvents(ctx, projectID, events)
 	})
 }
 
@@ -703,29 +774,69 @@ func (d *Store) ReconcileLocalFederationEcho(
 	})
 }
 
-func (d *Store) insertRemoteEvent(ctx context.Context, projectID int64, ev db.RemoteEvent) (bool, error) {
-	payload, createdAt, err := validateRemoteEventContentHash(ev)
-	if err != nil {
-		return false, err
-	}
-	if err := db.ValidateFederationEntries(ev.Type, ev.EventUID, payload); err != nil {
-		return false, err
+func (d *Store) insertRemoteEvents(ctx context.Context, projectID int64, events []db.RemoteEvent) ([]bool, error) {
+	payloads := make([]jsontext.Value, len(events))
+	createdAts := make([]string, len(events))
+	for i, ev := range events {
+		payload, createdAt, err := validateRemoteEventContentHash(ev)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.ValidateFederationEntries(ev.Type, ev.EventUID, payload); err != nil {
+			return nil, err
+		}
+		payloads[i], createdAts[i] = payload, createdAt
 	}
 
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("begin remote event insert: %w", err)
+		return nil, fmt.Errorf("begin remote event insert: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	validator := db.NewCronReplayValidator(tx, false)
+	inserted := make([]bool, len(events))
+	for i, ev := range events {
+		inserted[i], err = d.insertRemoteEventTx(ctx, tx, projectID, ev, payloads[i], createdAts[i], validator)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit remote event insert: %w", err)
+	}
+	return inserted, nil
+}
+
+func (d *Store) insertRemoteEventTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectID int64,
+	ev db.RemoteEvent,
+	payload jsontext.Value,
+	createdAt string,
+	validator *db.CronReplayValidator,
+) (bool, error) {
+	if db.EventRequiredFeatures(ev.Type) != "" {
+		if err := db.ValidateAcceptedCronEvent(ev); err != nil {
+			return false, err
+		}
+		var targetUID string
+		if err := tx.QueryRowContext(ctx, `SELECT uid FROM projects WHERE id=$1`, projectID).Scan(&targetUID); err != nil {
+			return false, err
+		}
+		if targetUID != ev.ProjectUID {
+			return false, db.ErrFederationIngestValidation
+		}
+		if err := validator.Validate(ctx, projectID, ev); err != nil {
+			return false, err
+		}
+	}
 	var existingHash string
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`SELECT content_hash FROM events WHERE uid = ?`, ev.EventUID).Scan(&existingHash)
 	if err == nil {
 		if existingHash == ev.ContentHash {
-			if err := tx.Commit(); err != nil {
-				return false, fmt.Errorf("commit duplicate remote event no-op: %w", err)
-			}
 			return false, nil
 		}
 		return false, fmt.Errorf("%w: event %s", db.ErrRemoteEventConflict, ev.EventUID)
@@ -751,9 +862,6 @@ func (d *Store) insertRemoteEvent(ctx context.Context, projectID int64, ev db.Re
 		ContentHash:       ev.ContentHash,
 	}); err != nil {
 		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit remote event insert: %w", err)
 	}
 	return true, nil
 }
@@ -850,6 +958,9 @@ func (d *Store) enableProjectFederationTx(
 	projectID int64,
 	actor string,
 ) (db.FederationBinding, error) {
+	if err := db.LockCronProject(ctx, tx, projectID); err != nil {
+		return db.FederationBinding{}, err
+	}
 	project, err := scanProject(tx.QueryRowContext(ctx,
 		projectSelect+` WHERE id = ? AND deleted_at IS NULL`, projectID))
 	if err != nil {
@@ -1034,6 +1145,15 @@ func (d *Store) insertFederationBaselineEventsTx(
 			return db.Event{}, err
 		}
 	}
+	cron, err := db.CronDefinitionSnapshots(ctx, tx, project)
+	if err != nil {
+		return db.Event{}, err
+	}
+	for _, event := range cron {
+		if _, err := d.insertEventTx(ctx, tx, eventInsert{ProjectID: project.ID, ProjectUID: project.UID, ProjectName: project.Name, Type: event.Type, Actor: actor, Payload: event.Payload, HLC: &boundary, CreatedAt: baselineCreatedAt}); err != nil {
+			return db.Event{}, err
+		}
+	}
 	return enableEvent, nil
 }
 
@@ -1051,8 +1171,7 @@ func (d *Store) materializeFederatedProject(ctx context.Context, projectID int64
 		return fmt.Errorf("begin federated materialization: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	if err := d.materializeFederatedProjectTx(ctx, tx, projectID, true, nil); err != nil {
+	if err := d.materializeFederatedProjectTx(ctx, tx, projectID, true, nil, nil); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1071,7 +1190,42 @@ func (d *Store) materializeFederatedProjectTx(
 	projectID int64,
 	reconcileLinks bool,
 	acceptedEventUIDs []string,
+	validator *db.CronReplayValidator,
 ) error {
+	return d.materializeFederatedProjectTxScoped(ctx, tx, projectID, reconcileLinks, acceptedEventUIDs, validator, false)
+}
+
+func (d *Store) materializeFederatedProjectRelayTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectID int64,
+	reconcileLinks bool,
+	acceptedEventUIDs []string,
+	validator *db.CronReplayValidator,
+) error {
+	return d.materializeFederatedProjectTxScoped(ctx, tx, projectID, reconcileLinks, acceptedEventUIDs, validator, true)
+}
+
+func (d *Store) materializeFederatedProjectTxScoped(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectID int64,
+	reconcileLinks bool,
+	acceptedEventUIDs []string,
+	validator *db.CronReplayValidator,
+	projectOnlyLinks bool,
+) error {
+	// Take this lock before reading anything. Besides serializing cron
+	// state, it makes a fresh deferred transaction, such as the one
+	// materializeFederatedProject begins, a writer before it reads the event
+	// log: a write after those reads fails with SQLITE_BUSY_SNAPSHOT whenever
+	// another connection commits in between, which starves spoke pulls under
+	// steady local writes. The write queue covers this within one store
+	// handle; the lock covers other handles and processes on the same file.
+	// Callers whose transaction has already written are writers already.
+	if err := db.LockCronProject(ctx, tx, projectID); err != nil {
+		return err
+	}
 	binding, err := scanFederationBinding(tx.QueryRowContext(ctx,
 		federationBindingSelect+` WHERE project_id = ?`, projectID))
 	if err != nil {
@@ -1088,6 +1242,14 @@ func (d *Store) materializeFederatedProjectTx(
 		}
 	}
 	projection := db.FoldEvents(events)
+	if db.CronMaterializationNeeded(events, acceptedEventUIDs) {
+		if validator == nil {
+			validator = db.NewCronReplayValidator(tx, false)
+		}
+		if err := db.MaterializeCronDefinitions(ctx, tx, projectID, binding.HubProjectUID, projection, validator); err != nil {
+			return err
+		}
+	}
 	issueIDs, err := reconcileFederatedIssues(ctx, tx, projectID, projection)
 	if err != nil {
 		return err
@@ -1102,21 +1264,31 @@ func (d *Store) materializeFederatedProjectTx(
 		return err
 	}
 	if reconcileLinks {
-		if err := reconcileFederatedLinks(ctx, tx, binding, projectID, issueIDs); err != nil {
+		if projectOnlyLinks {
+			err = reconcileFederatedLinkGroup(ctx, tx, []int64{projectID}, []int64{projectID}, projectID, issueIDs)
+		} else {
+			err = reconcileFederatedLinks(ctx, tx, binding, projectID, issueIDs)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	if err := pruneFederatedIssues(ctx, tx, projectID, issueIDs); err != nil {
 		return err
 	}
-	if raw := projection.ProjectMetadata[binding.HubProjectUID]; len(raw) > 0 {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE projects
-			    SET metadata = ?, revision = revision + 1
-			  WHERE id = ? AND metadata IS NOT ?`,
-			string(raw), projectID, string(raw)); err != nil {
-			return fmt.Errorf("update federated project metadata: %w", err)
-		}
+	return updateFederatedProjectMetadataTx(ctx, tx, projectID, projection.ProjectMetadata[binding.HubProjectUID])
+}
+
+func updateFederatedProjectMetadataTx(ctx context.Context, tx *sql.Tx, projectID int64, raw jsontext.Value) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects
+		    SET metadata = ?, revision = revision + 1
+		  WHERE id = ? AND metadata IS NOT ?`,
+		string(raw), projectID, string(raw)); err != nil {
+		return fmt.Errorf("update federated project metadata: %w", err)
 	}
 	return nil
 }
@@ -1135,7 +1307,7 @@ func (d *Store) resetFederatedProject(ctx context.Context, projectID, replayHori
 		return fmt.Errorf("begin federated reset: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := rejectFederationResetExternalRootHistory(ctx, tx, projectID); err != nil {
+	if err := rejectLegacyFederationResetTx(ctx, tx, projectID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE project_id = ?`, projectID); err != nil {
@@ -1167,7 +1339,17 @@ func (d *Store) resetFederatedProject(ctx context.Context, projectID, replayHori
 	return nil
 }
 
-func rejectFederationResetExternalRootHistory(ctx context.Context, tx *sql.Tx, projectID int64) error {
+func rejectLegacyFederationResetTx(ctx context.Context, tx *sql.Tx, projectID int64) error {
+	var relayConfig *string
+	if err := tx.QueryRowContext(ctx, `SELECT relay_config FROM federation_bindings WHERE project_id=?`, projectID).Scan(&relayConfig); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return db.ErrNotFound
+		}
+		return err
+	}
+	if relayConfig != nil {
+		return db.ErrRelayResetRequiresRootProof
+	}
 	var bindingID int64
 	err := tx.QueryRowContext(ctx,
 		`SELECT id FROM external_root_bindings WHERE project_id = ? LIMIT 1`, projectID).Scan(&bindingID)
@@ -1237,7 +1419,7 @@ func ensureFederatedMoveAllowedTx(ctx context.Context, q sqlReader, projectIDs .
 
 const federationBindingSelect = `SELECT project_id, role, hub_url, hub_project_id, hub_project_uid,
        replay_horizon_event_id, pull_cursor_event_id, push_enabled, push_cursor_event_id,
-       bound_actor, allow_insecure, enabled, created_at, updated_at, last_sync_at
+       bound_actor, allow_insecure, enabled, created_at, updated_at, last_sync_at, relay_config
   FROM federation_bindings`
 
 func federationBindingByProject(ctx context.Context, q sqlReader, projectID int64) (db.FederationBinding, error) {
@@ -1253,11 +1435,16 @@ func scanFederationBinding(r rowScanner) (db.FederationBinding, error) {
 		pushEnabled   int
 		allowInsecure int
 		lastSyncAt    sql.NullTime
+		relayConfig   *string
 	)
 	err := r.Scan(&b.ProjectID, &role, &b.HubURL, &b.HubProjectID, &b.HubProjectUID,
 		&b.ReplayHorizonEventID, &b.PullCursorEventID, &pushEnabled,
-		&b.PushCursorEventID, &b.Actor, &allowInsecure, &enabled, &b.CreatedAt, &b.UpdatedAt, &lastSyncAt)
+		&b.PushCursorEventID, &b.Actor, &allowInsecure, &enabled, &b.CreatedAt, &b.UpdatedAt, &lastSyncAt, &relayConfig)
 	if err == nil {
+		b.RelayConfig, err = db.DecodeRelayBindingConfig(relayConfig)
+		if err != nil {
+			return db.FederationBinding{}, err
+		}
 		b.Role = db.FederationRole(role)
 		b.PushEnabled = pushEnabled == 1
 		b.AllowInsecure = allowInsecure == 1
@@ -1384,7 +1571,7 @@ func federationIssuesForSnapshot(ctx context.Context, tx *sql.Tx, projectID int6
 	defer func() { _ = rows.Close() }()
 	var out []db.Issue
 	for rows.Next() {
-		issue, err := scanIssue(rows)
+		issue, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1494,7 +1681,7 @@ func federationIssueLinks(ctx context.Context, tx *sql.Tx, issueID int64) ([]cre
 
 func federationIssueComments(ctx context.Context, tx *sql.Tx, issueID int64) ([]issueSnapshotComment, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT uid, author, body, created_at, teammate
+		SELECT uid, author, body, created_at, teammate, reply_to_uid, reply_kind, edited_at
 		  FROM comments
 		 WHERE issue_id = ?
 		 ORDER BY id ASC`, issueID)
@@ -1505,17 +1692,23 @@ func federationIssueComments(ctx context.Context, tx *sql.Tx, issueID int64) ([]
 	var out []issueSnapshotComment
 	for rows.Next() {
 		var (
-			comment   issueSnapshotComment
-			createdAt sql.NullTime
-			teammate  sql.NullString
+			comment            issueSnapshotComment
+			createdAt          sql.NullTime
+			teammate           sql.NullString
+			replyTo, replyKind sql.NullString
+			editedAt           sql.NullTime
 		)
-		if err := rows.Scan(&comment.CommentUID, &comment.Author, &comment.Body, &createdAt, &teammate); err != nil {
+		if err := rows.Scan(&comment.CommentUID, &comment.Author, &comment.Body, &createdAt, &teammate, &replyTo, &replyKind, &editedAt); err != nil {
 			return nil, fmt.Errorf("scan federation snapshot comment: %w", err)
 		}
 		if createdAt.Valid {
 			comment.CreatedAt = createdAt.Time.UTC().Format(sqliteCommentTimeFormat)
 		}
 		comment.Teammate = teammate.String
+		comment.ReplyToUID, comment.ReplyKind = replyTo.String, replyKind.String
+		if editedAt.Valid {
+			comment.EditedAt = editedAt.Time.UTC().Format(sqliteCommentTimeFormat)
+		}
 		out = append(out, comment)
 	}
 	return out, rows.Err()
@@ -1616,7 +1809,19 @@ func projectUIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (string, err
 	return uid, nil
 }
 
+// Reset removes replica evidence with its event provenance after ordinary
+// pending-publication and integration guards succeed.
 func clearFederatedProjection(ctx context.Context, tx *sql.Tx, projectID int64) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cron_runs WHERE project_id=$1`, projectID); err != nil {
+		return err
+	}
+	for _, table := range []string{"cron_jobs", "cron_workflows"} {
+		//nolint:gosec // Table comes from the fixed cron table list; project ID is bound.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE project_id=$1", projectID); err != nil {
+			return err
+		}
+	}
+
 	// Links are project-independent edges (storage v16), so the project scope
 	// comes from the endpoints: drop every link touching one of this
 	// project's issues before the issues themselves go.
@@ -1648,6 +1853,10 @@ func reconcileFederatedIssues(
 	if err != nil {
 		return nil, err
 	}
+	return reconcileFederatedIssuesFromRows(ctx, tx, projectID, projection, existing)
+}
+
+func reconcileFederatedIssuesFromRows(ctx context.Context, tx *sql.Tx, projectID int64, projection db.FoldProjection, existing map[string]federatedIssueRow) (map[string]int64, error) {
 	out := map[string]int64{}
 	for _, issue := range projection.SortedIssues() {
 		uid := issue.UID
@@ -1794,6 +2003,7 @@ func resolveFederatedIssueShortID(
 }
 
 type federatedIssueRow struct {
+	values  []any
 	id      int64
 	shortID string
 	title   string
@@ -1803,7 +2013,10 @@ type federatedIssueRow struct {
 
 func federatedIssueRowsByUID(ctx context.Context, tx *sql.Tx, projectID int64) (map[string]federatedIssueRow, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT uid, id, short_id, title, body, deleted_at IS NOT NULL FROM issues WHERE project_id = ?`, projectID)
+		`SELECT uid, id, short_id, title, body, status, closed_reason, owner,
+ CAST(assignment_expires_on AS TEXT), priority, author, CAST(created_at AS TEXT),
+ CAST(updated_at AS TEXT), CAST(closed_at AS TEXT), CAST(deleted_at AS TEXT), metadata
+ FROM issues WHERE project_id = ?`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list federated issue rows: %w", err)
 	}
@@ -1812,9 +2025,15 @@ func federatedIssueRowsByUID(ctx context.Context, tx *sql.Tx, projectID int64) (
 	for rows.Next() {
 		var uid string
 		var row federatedIssueRow
-		if err := rows.Scan(&uid, &row.id, &row.shortID, &row.title, &row.body, &row.deleted); err != nil {
+		var status, closedReason, owner, assignmentExpiresOn, priority, author any
+		var createdAt, updatedAt, closedAt, deletedAt, metadata any
+		if err := rows.Scan(&uid, &row.id, &row.shortID, &row.title, &row.body, &status, &closedReason, &owner,
+			&assignmentExpiresOn, &priority, &author, &createdAt, &updatedAt, &closedAt, &deletedAt, &metadata); err != nil {
 			return nil, fmt.Errorf("scan federated issue row: %w", err)
 		}
+		row.deleted = deletedAt != nil
+		row.values = []any{row.shortID, row.title, row.body, status, closedReason, owner, assignmentExpiresOn,
+			priority, author, createdAt, updatedAt, closedAt, deletedAt, metadata}
 		out[uid] = row
 	}
 	return out, rows.Err()
@@ -1827,6 +2046,10 @@ func reconcileFederatedComments(
 	if err != nil {
 		return err
 	}
+	return reconcileFederatedCommentsFromRows(ctx, tx, issueIDs, projection, existing)
+}
+
+func reconcileFederatedCommentsFromRows(ctx context.Context, tx *sql.Tx, issueIDs map[string]int64, projection db.FoldProjection, existing map[string]federatedCommentRow) error {
 	sorted := projection.SortedComments()
 	desired := make(map[string]struct{}, len(sorted))
 	for _, comment := range sorted {
@@ -1864,16 +2087,21 @@ func reconcileFederatedComments(
 				}
 				continue
 			}
+			if row.issueID == issueID && row.author == nonEmptyAuthor(comment.Author) &&
+				row.body == comment.Body && row.teammate == comment.Teammate &&
+				row.createdAt == nonEmptyTime(comment.CreatedAt) {
+				continue
+			}
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE comments SET issue_id = ?, author = ?, body = ?, created_at = ?, teammate = NULLIF(?, '') WHERE id = ?`,
-				issueID, nonEmptyAuthor(comment.Author), comment.Body, nonEmptyTime(comment.CreatedAt), comment.Teammate, row.id); err != nil {
+				`UPDATE comments SET issue_id = ?, author = ?, body = ?, created_at = ?, teammate = NULLIF(?, ''), reply_to_uid=NULLIF(?, ''), reply_kind=NULLIF(?, ''), edited_at=NULLIF(?, '') WHERE id = ?`,
+				issueID, nonEmptyAuthor(comment.Author), comment.Body, nonEmptyTime(comment.CreatedAt), comment.Teammate, comment.ReplyToUID, comment.ReplyKind, comment.EditedAt, row.id); err != nil {
 				return fmt.Errorf("update federated comment %s: %w", uid, err)
 			}
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO comments(uid, issue_id, author, body, created_at, teammate) VALUES(?, ?, ?, ?, ?, NULLIF(?, ''))`,
-			comment.UID, issueID, nonEmptyAuthor(comment.Author), comment.Body, nonEmptyTime(comment.CreatedAt), comment.Teammate); err != nil {
+			`INSERT INTO comments(uid, issue_id, author, body, created_at, teammate, reply_to_uid, reply_kind, edited_at) VALUES(?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))`,
+			comment.UID, issueID, nonEmptyAuthor(comment.Author), comment.Body, nonEmptyTime(comment.CreatedAt), comment.Teammate, comment.ReplyToUID, comment.ReplyKind, comment.EditedAt); err != nil {
 			return fmt.Errorf("insert federated comment %s: %w", uid, err)
 		}
 	}
@@ -1881,9 +2109,12 @@ func reconcileFederatedComments(
 }
 
 type federatedCommentRow struct {
-	id       int64
-	body     string
-	teammate string
+	id        int64
+	issueID   int64
+	author    string
+	createdAt string
+	body      string
+	teammate  string
 }
 
 func federatedExternalCommentOwnedTx(ctx context.Context, tx *sql.Tx, commentID int64) (bool, error) {
@@ -1905,7 +2136,7 @@ func federatedExternalCommentOwnedTx(ctx context.Context, tx *sql.Tx, commentID 
 
 func federatedCommentRowsByUID(ctx context.Context, tx *sql.Tx, projectID int64) (map[string]federatedCommentRow, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT c.uid, c.id, c.body, c.teammate
+		SELECT c.uid, c.id, c.issue_id, c.author, CAST(c.created_at AS TEXT), c.body, c.teammate
 		  FROM comments c
 		  JOIN issues i ON i.id = c.issue_id
 		 WHERE i.project_id = ?`, projectID)
@@ -1918,7 +2149,7 @@ func federatedCommentRowsByUID(ctx context.Context, tx *sql.Tx, projectID int64)
 		var uid string
 		var row federatedCommentRow
 		var teammate sql.NullString
-		if err := rows.Scan(&uid, &row.id, &row.body, &teammate); err != nil {
+		if err := rows.Scan(&uid, &row.id, &row.issueID, &row.author, &row.createdAt, &row.body, &teammate); err != nil {
 			return nil, fmt.Errorf("scan federated comment: %w", err)
 		}
 		row.teammate = teammate.String
@@ -1939,6 +2170,10 @@ func reconcileFederatedLabels(
 	if err != nil {
 		return err
 	}
+	return reconcileFederatedLabelsFromRows(ctx, tx, issueIDs, projection, existing)
+}
+
+func reconcileFederatedLabelsFromRows(ctx context.Context, tx *sql.Tx, issueIDs map[string]int64, projection db.FoldProjection, existing map[federatedLabelKey]struct{}) error {
 	desired := map[federatedLabelKey]struct{}{}
 	for _, key := range projection.PresentLabels() {
 		issueID, ok := issueIDs[key.IssueUID]
@@ -2031,6 +2266,13 @@ func reconcileFederatedLinkGroup(
 	if err != nil {
 		return err
 	}
+	return reconcileFederatedLinkProjection(ctx, tx, projection, desiredProjectIDs, ownedProjectIDs, currentProjectID, currentIssueIDs)
+}
+
+func reconcileFederatedLinkProjection(
+	ctx context.Context, tx *sql.Tx, projection db.FoldProjection,
+	desiredProjectIDs, ownedProjectIDs []int64, currentProjectID int64, currentIssueIDs map[string]int64,
+) error {
 	issueIDs, err := federationGroupIssueIDs(ctx, tx, desiredProjectIDs, currentProjectID, currentIssueIDs)
 	if err != nil {
 		return err
@@ -2039,6 +2281,10 @@ func reconcileFederatedLinkGroup(
 	if err != nil {
 		return err
 	}
+	return reconcileFederatedLinkRows(ctx, tx, projection, issueIDs, existing)
+}
+
+func reconcileFederatedLinkRows(ctx context.Context, tx *sql.Tx, projection db.FoldProjection, issueIDs map[string]int64, existing map[db.FoldLinkKey]federatedLinkRow) error {
 	desired := map[db.FoldLinkKey]federatedLinkRow{}
 	for _, edge := range projection.PresentLinks() {
 		key, state := edge.Key, edge.State
@@ -2368,6 +2614,10 @@ func federationGroupFoldProjection(
 		}
 		events = append(events, projectEvents...)
 	}
+	events, err := filterRelayCrossProjectLinkEvents(ctx, tx, projectIDs, events)
+	if err != nil {
+		return db.FoldProjection{}, err
+	}
 	return db.FoldEvents(events), nil
 }
 
@@ -2458,21 +2708,16 @@ func pruneFederatedIssues(ctx context.Context, tx *sql.Tx, projectID int64, issu
 	if err != nil {
 		return fmt.Errorf("list stale federated issues: %w", err)
 	}
-	var candidates []struct {
-		id  int64
-		uid string
-	}
+	candidates := map[string]int64{}
 	for rows.Next() {
-		var c struct {
-			id  int64
-			uid string
-		}
-		if err := rows.Scan(&c.id, &c.uid); err != nil {
+		var id int64
+		var uid string
+		if err := rows.Scan(&id, &uid); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan stale federated issue: %w", err)
 		}
-		if _, ok := issueIDs[c.uid]; !ok {
-			candidates = append(candidates, c)
+		if _, ok := issueIDs[uid]; !ok {
+			candidates[uid] = id
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -2481,19 +2726,25 @@ func pruneFederatedIssues(ctx context.Context, tx *sql.Tx, projectID int64, issu
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate stale federated issues: %w", err)
 	}
-	for _, c := range candidates {
+	return deleteUnreferencedFederatedIssues(ctx, tx, candidates)
+}
+
+// deleteUnreferencedFederatedIssues removes stale projection rows, keyed by
+// issue UID, that no stored event still references.
+func deleteUnreferencedFederatedIssues(ctx context.Context, tx *sql.Tx, candidates map[string]int64) error {
+	for uid, id := range candidates {
 		var refs int
 		if err := tx.QueryRowContext(ctx, `
 			SELECT count(*)
 			  FROM events
-			 WHERE issue_id = ? OR related_issue_id = ?`, c.id, c.id).Scan(&refs); err != nil {
-			return fmt.Errorf("count federated issue event refs %s: %w", c.uid, err)
+			 WHERE issue_id = ? OR related_issue_id = ?`, id, id).Scan(&refs); err != nil {
+			return fmt.Errorf("count federated issue event refs %s: %w", uid, err)
 		}
 		if refs > 0 {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, c.id); err != nil {
-			return fmt.Errorf("delete stale federated issue %s: %w", c.uid, err)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("delete stale federated issue %s: %w", uid, err)
 		}
 	}
 	return nil
@@ -2554,6 +2805,9 @@ func (d *Store) adoptProjectIntoFederation(
 		return db.AdoptProjectIntoFederationResult{}, fmt.Errorf("begin federation adoption: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockProjectAccess(ctx, tx); err != nil {
+		return db.AdoptProjectIntoFederationResult{}, fmt.Errorf("lock project access for federation adoption: %w", err)
+	}
 
 	project, err := scanProject(tx.QueryRowContext(ctx,
 		projectSelect+` WHERE id = ?`, p.ProjectID))
@@ -2562,6 +2816,18 @@ func (d *Store) adoptProjectIntoFederation(
 	}
 	if project.DeletedAt != nil {
 		return db.AdoptProjectIntoFederationResult{}, fmt.Errorf("adopt project into federation: project %d is archived", p.ProjectID)
+	}
+
+	if p.RelayProtocolVersion != 0 {
+		if p.RelayProtocolVersion != db.RelayProtocolVersion {
+			return db.AdoptProjectIntoFederationResult{}, db.ErrFederationIngestValidation
+		}
+		if !db.ProjectAttributionVisible(ctx, project.UID) {
+			return db.AdoptProjectIntoFederationResult{}, db.ErrNotFound
+		}
+		if err := rejectRelayProjectLinksTx(ctx, tx, project.ID); err != nil {
+			return db.AdoptProjectIntoFederationResult{}, err
+		}
 	}
 
 	existing, err := scanFederationBinding(tx.QueryRowContext(ctx,
@@ -2605,6 +2871,10 @@ func (d *Store) adoptProjectIntoFederation(
 		}
 	}
 
+	cron, err := db.PrepareCronAdoption(ctx, tx, project, p.HubProjectUID, p.EmptyOnly)
+	if err != nil {
+		return db.AdoptProjectIntoFederationResult{}, err
+	}
 	issues, err := federationIssuesForSnapshot(ctx, tx, project.ID)
 	if err != nil {
 		return db.AdoptProjectIntoFederationResult{}, err
@@ -2618,6 +2888,9 @@ func (d *Store) adoptProjectIntoFederation(
 	if project.UID != p.HubProjectUID {
 		if err := replaceProjectUIDTx(ctx, tx, project.ID, p.HubProjectUID); err != nil {
 			return db.AdoptProjectIntoFederationResult{}, err
+		}
+		if err := bumpProjectAccess(ctx, tx); err != nil {
+			return db.AdoptProjectIntoFederationResult{}, fmt.Errorf("advance project access revision after federation adoption: %w", err)
 		}
 		project.UID = p.HubProjectUID
 	}
@@ -2714,6 +2987,12 @@ func (d *Store) adoptProjectIntoFederation(
 		snapshotCount++
 	}
 
+	for _, event := range cron {
+		if _, err := d.insertEventTx(ctx, tx, eventInsert{ProjectID: project.ID, ProjectUID: project.UID, ProjectName: project.Name, Type: event.Type, Actor: actor, Payload: event.Payload, HLC: &boundary, CreatedAt: baselineCreatedAt}); err != nil {
+			return db.AdoptProjectIntoFederationResult{}, err
+		}
+		snapshotCount++
+	}
 	binding, err := scanFederationBinding(tx.QueryRowContext(ctx,
 		federationBindingSelect+` WHERE project_id = ?`, project.ID))
 	if err != nil {
@@ -2755,7 +3034,95 @@ func federationAdoptionPushFloor(ctx context.Context, tx *sql.Tx, projectID int6
 	return 0, nil
 }
 
+type projectAccessPolicyForAdoption struct {
+	projectUID string
+	visibility string
+	revision   int64
+	teamUIDs   []string
+}
+
+func takeProjectAccessPolicyForUIDRewriteTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectID int64,
+) (*projectAccessPolicyForAdoption, error) {
+	var policy projectAccessPolicyForAdoption
+	err := tx.QueryRowContext(ctx, `
+		SELECT p.uid,a.visibility,a.revision
+		  FROM projects p
+		  JOIN project_access_policies a ON a.project_uid=p.uid
+		 WHERE p.id=?`, projectID).Scan(&policy.projectUID, &policy.visibility, &policy.revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read adoption project access policy: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT team_uid FROM project_access_teams WHERE project_uid=? ORDER BY team_uid`, policy.projectUID)
+	if err != nil {
+		return nil, fmt.Errorf("read adoption project access teams: %w", err)
+	}
+	for rows.Next() {
+		var teamUID string
+		if err := rows.Scan(&teamUID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan adoption project access team: %w", err)
+		}
+		policy.teamUIDs = append(policy.teamUIDs, teamUID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate adoption project access teams: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close adoption project access teams: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM project_access_policies WHERE project_uid=?`, policy.projectUID); err != nil {
+		return nil, fmt.Errorf("detach adoption project access policy: %w", err)
+	}
+	return &policy, nil
+}
+
+func restoreProjectAccessPolicyAfterUIDRewriteTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	policy *projectAccessPolicyForAdoption,
+	projectUID string,
+) error {
+	if policy == nil {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO project_access_policies(project_uid,visibility,revision) VALUES(?,?,?)`,
+		projectUID, policy.visibility, policy.revision); err != nil {
+		return fmt.Errorf("restore adopted project access policy: %w", err)
+	}
+	for _, teamUID := range policy.teamUIDs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO project_access_teams(project_uid,team_uid) VALUES(?,?)`, projectUID, teamUID); err != nil {
+			return fmt.Errorf("restore adopted project access team: %w", err)
+		}
+	}
+	return nil
+}
+
 func replaceProjectUIDTx(ctx context.Context, tx *sql.Tx, projectID int64, uid string) error {
+	var oldUID string
+	if err := tx.QueryRowContext(ctx, `SELECT uid FROM projects WHERE id = ?`, projectID).Scan(&oldUID); err != nil {
+		return fmt.Errorf("read project uid before adoption: %w", err)
+	}
+	if err := stageArtifactAdoptionTx(ctx, tx, projectID); err != nil {
+		return err
+	}
+	accessPolicy, err := takeProjectAccessPolicyForUIDRewriteTx(ctx, tx, projectID)
+	if err != nil {
+		return err
+	}
+	if err := retireProjectFederationUIDStateTx(ctx, tx, oldUID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS trg_projects_uid_immutable`); err != nil {
 		return fmt.Errorf("drop project uid immutability trigger for adoption: %w", err)
 	}
@@ -2771,7 +3138,10 @@ func replaceProjectUIDTx(ctx context.Context, tx *sql.Tx, projectID int64, uid s
 		END`); err != nil {
 		return fmt.Errorf("restore project uid immutability trigger after adoption: %w", err)
 	}
-	return nil
+	if err := restoreProjectAccessPolicyAfterUIDRewriteTx(ctx, tx, accessPolicy, uid); err != nil {
+		return err
+	}
+	return restoreArtifactAdoptionTx(ctx, tx, uid)
 }
 
 func clearProjectClaimStateTx(ctx context.Context, tx *sql.Tx, projectID int64) error {
@@ -2784,4 +3154,16 @@ func clearProjectClaimStateTx(ctx context.Context, tx *sql.Tx, projectID int64) 
 		}
 	}
 	return nil
+}
+
+// Disposition cannot reinterpret a relay hop sequence as a legacy event cursor.
+func (d *Store) quarantineRelayBindingTx(ctx context.Context, tx *sql.Tx, projectID int64) (bool, error) {
+	if err := lockProjectAccess(ctx, tx); err != nil {
+		return false, err
+	}
+	binding, err := scanFederationBinding(tx.QueryRowContext(ctx, federationBindingSelect+` WHERE project_id=?`, projectID))
+	if errors.Is(err, db.ErrNotFound) {
+		return false, nil
+	}
+	return binding.RelayConfig != nil, err
 }

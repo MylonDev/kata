@@ -166,11 +166,16 @@ CREATE TABLE comments (
   body       TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   teammate TEXT,
+  reply_to_uid TEXT,
+  reply_kind TEXT,
+  edited_at TEXT,
   CHECK (length(uid) = 26),
   CHECK (length(trim(author)) > 0),
   CHECK (length(trim(body))   > 0)
 );
 CREATE INDEX idx_comments_issue ON comments(issue_id, created_at);
+
+CREATE INDEX idx_comments_reply_to ON comments(reply_to_uid) WHERE reply_to_uid IS NOT NULL;
 
 CREATE TABLE links (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -352,7 +357,7 @@ CREATE TABLE api_tokens (
   CHECK (actor <> 'bootstrap'),
   CHECK (name IS NULL OR length(trim(name)) > 0),
   CONSTRAINT api_tokens_scope_shape CHECK (
-    (scope_kind IS NULL AND scope_project_uid IS NULL AND scope_root_issue_uid IS NULL AND expires_at IS NULL)
+    (scope_kind IS NULL AND scope_project_uid IS NULL AND scope_root_issue_uid IS NULL)
     OR
     (scope_kind = 'issue_subtree' AND length(scope_project_uid) = 26
       AND length(scope_root_issue_uid) = 26 AND expires_at IS NOT NULL)
@@ -452,6 +457,7 @@ CREATE TABLE federation_bindings (
   created_at              TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   updated_at              TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   last_sync_at            TEXT,
+  relay_config TEXT,
   CHECK (length(hub_project_uid) = 26),
   CHECK (role = 'hub' OR length(trim(hub_url)) > 0),
   CHECK (role = 'hub' OR hub_project_id > 0),
@@ -567,6 +573,11 @@ CREATE TABLE federation_enrollments (
   created_at          TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   updated_at          TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
   revoked_at          TEXT,
+  relay_binding_uid TEXT UNIQUE,
+  relay_protocol_version INTEGER NOT NULL DEFAULT 0,
+  parent_token_id BIGINT REFERENCES api_tokens(id) DEFERRABLE INITIALLY DEFERRED,
+  relay_reset_epoch BIGINT NOT NULL DEFAULT 1,
+  relay_serve_downstream INTEGER NOT NULL DEFAULT 0,
   CHECK (length(token_hash) = 64),
   CHECK (length(spoke_instance_uid) = 26),
   CHECK (length(trim(capabilities)) > 0),
@@ -817,3 +828,182 @@ CREATE TABLE external_field_states (
   updated_at        TEXT NOT NULL,
   PRIMARY KEY(binding_id, mapping_id)
 );
+
+-- Dormant native cron definitions and attributed run history.
+CREATE TABLE cron_jobs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE CHECK (uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 256),
+  definition_json TEXT NOT NULL CHECK (COALESCE((octet_length(definition_json) <= 262144 AND jsonb_typeof(definition_json::jsonb) = 'object' AND (definition_json::jsonb -> 'version')::text = '1'), FALSE)),
+  definition_event_uid TEXT NOT NULL CHECK (definition_event_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
+  definition_hlc_json TEXT NOT NULL CHECK (COALESCE((octet_length(definition_hlc_json) <= 16384 AND jsonb_typeof(definition_hlc_json::jsonb) = 'object' AND (definition_hlc_json::jsonb -> 'version')::text = '1' AND ((definition_hlc_json::jsonb->'physical_ms')::text ~ '^[0-9]+$') AND ((definition_hlc_json::jsonb->'counter')::text ~ '^[0-9]+$') AND (definition_hlc_json::jsonb->>'physical_ms')::bigint >= 0 AND (definition_hlc_json::jsonb->>'counter')::bigint >= 0), FALSE)),
+  author TEXT NOT NULL CHECK (length(trim(author)) > 0),
+  revision BIGINT NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+  updated_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+  deleted_at TEXT
+);
+CREATE INDEX idx_cron_jobs_project_name ON cron_jobs(project_id,name) WHERE deleted_at IS NULL;
+
+CREATE TABLE cron_workflows (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE CHECK (uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 256),
+  definition_json TEXT NOT NULL CHECK (COALESCE((octet_length(definition_json) <= 262144 AND jsonb_typeof(definition_json::jsonb) = 'object' AND (definition_json::jsonb -> 'version')::text = '1'), FALSE)),
+  definition_event_uid TEXT NOT NULL CHECK (definition_event_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
+  definition_hlc_json TEXT NOT NULL CHECK (COALESCE((octet_length(definition_hlc_json) <= 16384 AND jsonb_typeof(definition_hlc_json::jsonb) = 'object' AND (definition_hlc_json::jsonb -> 'version')::text = '1' AND ((definition_hlc_json::jsonb->'physical_ms')::text ~ '^[0-9]+$') AND ((definition_hlc_json::jsonb->'counter')::text ~ '^[0-9]+$') AND (definition_hlc_json::jsonb->>'physical_ms')::bigint >= 0 AND (definition_hlc_json::jsonb->>'counter')::bigint >= 0), FALSE)),
+  author TEXT NOT NULL CHECK (length(trim(author)) > 0),
+  revision BIGINT NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+  updated_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+  deleted_at TEXT
+);
+CREATE INDEX idx_cron_workflows_project_name ON cron_workflows(project_id,name) WHERE deleted_at IS NULL;
+
+CREATE TABLE cron_runs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE CHECK (uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  job_uid TEXT CHECK (job_uid IS NULL OR (job_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$')),
+  definition_event_uid TEXT CHECK (definition_event_uid IS NULL OR (definition_event_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$')),
+  workflow_uid TEXT CHECK (workflow_uid IS NULL OR (workflow_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$')),
+  workflow_definition_event_uid TEXT CHECK (workflow_definition_event_uid IS NULL OR (workflow_definition_event_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$')),
+  occurrence_key TEXT CHECK (occurrence_key IS NULL OR length(occurrence_key) BETWEEN 1 AND 1024),
+  issue_uid TEXT CHECK (issue_uid IS NULL OR (issue_uid ~ '^[0-7][0-9A-HJKMNP-TV-Z]{25}$')),
+  actor TEXT NOT NULL CHECK (length(trim(actor)) > 0 AND octet_length(actor) <= 256),
+  teammate TEXT CHECK (teammate IS NULL OR (length(trim(teammate)) > 0 AND octet_length(teammate) <= 256)),
+  executor_label TEXT CHECK (executor_label IS NULL OR (length(trim(executor_label)) > 0 AND octet_length(executor_label) <= 256)),
+  status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed','cancelled','unknown')),
+  summary_json TEXT NOT NULL DEFAULT '{"version":1}' CHECK (COALESCE((octet_length(summary_json) <= 65536 AND jsonb_typeof(summary_json::jsonb) = 'object' AND (summary_json::jsonb -> 'version')::text = '1' AND (summary_json::jsonb->'input_tokens' IS NULL OR ((summary_json::jsonb->'input_tokens')::text ~ '^[0-9]+$')) AND (summary_json::jsonb->'output_tokens' IS NULL OR ((summary_json::jsonb->'output_tokens')::text ~ '^[0-9]+$'))), FALSE)),
+  revision BIGINT NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"000Z"') CHECK (created_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{9}Z$'),
+  started_at TEXT,
+  ended_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+  CHECK ((job_uid IS NULL) = (definition_event_uid IS NULL)),
+  CHECK ((workflow_uid IS NULL) = (workflow_definition_event_uid IS NULL)),
+  CHECK (job_uid IS NOT NULL OR workflow_uid IS NOT NULL)
+);
+CREATE INDEX idx_cron_runs_project_time ON cron_runs(project_id,created_at,uid);
+CREATE INDEX idx_cron_runs_job_time ON cron_runs(project_id,job_uid,created_at,uid);
+CREATE INDEX idx_events_project_cron ON events(project_id) WHERE type LIKE 'cron.%';
+
+-- Teams are daemon-local actor groups; restricted empty policies stay restricted.
+CREATE TABLE teams (
+ uid TEXT PRIMARY KEY,
+ name TEXT NOT NULL UNIQUE,
+ revision BIGINT NOT NULL DEFAULT 1
+);
+CREATE TABLE team_memberships (
+ team_uid TEXT NOT NULL REFERENCES teams(uid) ON DELETE CASCADE,
+ actor TEXT NOT NULL,
+ PRIMARY KEY(team_uid,actor)
+);
+CREATE INDEX idx_team_memberships_actor ON team_memberships(actor,team_uid);
+CREATE TABLE project_access_policies (
+ project_uid TEXT PRIMARY KEY REFERENCES projects(uid) ON DELETE CASCADE,
+ visibility TEXT NOT NULL,
+ revision BIGINT NOT NULL DEFAULT 1
+);
+CREATE TABLE project_access_teams (
+ project_uid TEXT NOT NULL REFERENCES project_access_policies(project_uid) ON DELETE CASCADE,
+ team_uid TEXT NOT NULL REFERENCES teams(uid) ON DELETE CASCADE,
+ PRIMARY KEY(project_uid,team_uid)
+);
+CREATE INDEX idx_project_access_teams_team ON project_access_teams(team_uid,project_uid);
+INSERT INTO meta(key,value) VALUES('project_access_revision','1');
+
+-- Root public-key pins and proofs are portable. Private signing material is not.
+CREATE TABLE federation_root_keys (
+ project_uid TEXT NOT NULL REFERENCES projects(uid) ON DELETE CASCADE,
+ authority_uid TEXT NOT NULL,
+ key_id TEXT NOT NULL,
+ public_key TEXT NOT NULL,
+ active SMALLINT NOT NULL DEFAULT 1,
+ PRIMARY KEY(project_uid,key_id)
+);
+CREATE UNIQUE INDEX uniq_federation_root_active ON federation_root_keys(project_uid) WHERE active=1;
+CREATE TABLE federation_event_provenance (
+ project_uid TEXT NOT NULL,
+ event_uid TEXT NOT NULL,
+ content_hash TEXT NOT NULL,
+ reset_epoch BIGINT NOT NULL,
+ sequence BIGINT NOT NULL,
+ key_id TEXT NOT NULL,
+ receipt TEXT NOT NULL,
+ PRIMARY KEY(project_uid,event_uid),
+ UNIQUE(project_uid,reset_epoch,sequence),
+ FOREIGN KEY(project_uid,key_id) REFERENCES federation_root_keys(project_uid,key_id) ON DELETE CASCADE
+);
+CREATE TABLE federation_entity_provenance (
+ project_uid TEXT NOT NULL,
+ kind TEXT NOT NULL,
+ entity_uid TEXT NOT NULL,
+ event_uid TEXT NOT NULL,
+ PRIMARY KEY(project_uid,kind,entity_uid),
+ FOREIGN KEY(project_uid,event_uid) REFERENCES federation_event_provenance(project_uid,event_uid) ON DELETE CASCADE
+);
+
+-- Per-hop source mappings retain retry identities independently of source history.
+CREATE TABLE federation_relay_outbox (
+ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ project_uid TEXT NOT NULL REFERENCES projects(uid) ON DELETE CASCADE,
+ binding_uid TEXT NOT NULL,
+ stream TEXT NOT NULL,
+ reset_epoch BIGINT NOT NULL,
+ source_uid TEXT NOT NULL,
+ source_hash TEXT NOT NULL,
+ envelope TEXT NOT NULL,
+ emitted INTEGER NOT NULL DEFAULT 0,
+ acknowledged INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(binding_uid,stream,reset_epoch,source_uid)
+);
+CREATE INDEX idx_relay_outbox_pending ON federation_relay_outbox(binding_uid,stream,reset_epoch,id) WHERE acknowledged=0;
+
+-- Offers remain unresolved until complete data is durably committed. Numeric
+-- sequence gaps are valid; the recorded offer order defines the accepted prefix.
+CREATE TABLE federation_relay_inbox (
+ project_uid TEXT NOT NULL REFERENCES projects(uid) ON DELETE CASCADE,
+ binding_uid TEXT NOT NULL,
+ stream TEXT NOT NULL,
+ reset_epoch BIGINT NOT NULL,
+ sequence BIGINT NOT NULL,
+ source_uid TEXT NOT NULL,
+ source_hash TEXT NOT NULL,
+ envelope_digest TEXT NOT NULL,
+ envelope TEXT NOT NULL,
+ accepted INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(binding_uid,stream,reset_epoch,sequence),
+ UNIQUE(binding_uid,stream,reset_epoch,source_uid)
+);
+CREATE INDEX idx_relay_inbox_prefix ON federation_relay_inbox(binding_uid,stream,reset_epoch,sequence) WHERE accepted=0;
+CREATE TABLE federation_relay_cursors (
+ project_uid TEXT NOT NULL REFERENCES projects(uid) ON DELETE CASCADE,
+ binding_uid TEXT NOT NULL,
+ stream TEXT NOT NULL,
+ reset_epoch BIGINT NOT NULL,
+ offered_through BIGINT NOT NULL DEFAULT 0,
+ accepted_through BIGINT NOT NULL DEFAULT 0,
+ emitted_through BIGINT NOT NULL DEFAULT 0,
+ acknowledged_through BIGINT NOT NULL DEFAULT 0,
+ PRIMARY KEY(binding_uid,stream,reset_epoch)
+);
+
+-- Portable original float32 artifacts are separate from the local vector index.
+-- Non-null staging_expires_at never establishes durable relay acceptance.
+CREATE TABLE federation_embedding_artifacts (
+  project_uid TEXT NOT NULL REFERENCES projects(uid) ON DELETE CASCADE,
+  digest TEXT NOT NULL,
+  issue_uid TEXT NOT NULL,
+  input_hash TEXT NOT NULL,
+  recipe_fingerprint TEXT NOT NULL,
+  vector_byte_size BIGINT NOT NULL,
+  manifest TEXT NOT NULL,
+  artifact TEXT NOT NULL,
+  staging_expires_at TEXT,
+  PRIMARY KEY(project_uid,digest)
+);
+CREATE INDEX idx_embedding_artifacts_input ON federation_embedding_artifacts(project_uid,issue_uid,input_hash,recipe_fingerprint);
+CREATE INDEX idx_embedding_artifacts_staging ON federation_embedding_artifacts(project_uid,staging_expires_at) WHERE staging_expires_at IS NOT NULL;

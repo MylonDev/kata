@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +20,26 @@ func newNotionSyncEnableCmd() *cobra.Command {
 	var source, database, status, assignee, interval, since, statusSync, completeGroup, todoGroup, closedStatus, openStatus string
 	var done []string
 	var titlePrefix bool
-	cmd := &cobra.Command{Use: "enable", Short: "enable daemon-side Notion sync for this project", Args: cobra.NoArgs}
+	cmd := &cobra.Command{
+		Use:   "enable",
+		Short: "enable daemon-side Notion sync for this project",
+		Long: `Bind the Kata project (bound or --project) to one Notion task data source
+and start daemon-side polling. The first enable needs one locator:
+--data-source (UUID), or --database (UUID or URL of a database with exactly
+one data source). The source needs a People property; --assignee-property may
+be omitted only when exactly one exists. --status-property defaults to the
+sole status property. Selectors take exact IDs or case-sensitive names.
+The daemon reads its token from KATA_NOTION_TOKEN, or the variable named by
+[notion_sync] token_env. Re-enable keeps every option you omit; the data
+source and selected properties cannot change. Pass --since= to clear the
+cutoff. --status-sync two-way also sends Kata close and reopen back to the
+status property. It needs a To-do group, rejects --done-status, and drops
+saved done statuses.`,
+		Example: `  kata sync notion enable --data-source <data-source-uuid> --agent
+  kata sync notion enable --database <database-uuid> --assignee-property Responsible --agent
+  kata sync notion enable --status-sync two-way --agent`,
+		Args: cobra.NoArgs,
+	}
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		config := map[string]any{}
 		invalid := func(message string) error {
@@ -93,15 +111,9 @@ func newNotionSyncEnableCmd() *cobra.Command {
 			config[selector.key] = selector.value
 		}
 		if cmd.Flags().Changed("interval") {
-			value := strings.TrimSpace(interval)
-			seconds, err := strconv.Atoi(value)
+			value, err := issueSyncIntervalFlag("notion", interval)
 			if err != nil {
-				duration, parseErr := time.ParseDuration(value)
-				if parseErr != nil || duration < time.Second {
-					return invalid("Notion sync interval must be at least one second")
-				}
-			} else if seconds < 1 {
-				return invalid("Notion sync interval must be at least one second")
+				return err
 			}
 			body.Interval = &value
 		}

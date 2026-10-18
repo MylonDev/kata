@@ -130,6 +130,28 @@ func localProfileStorageIdentity(dsn string) (string, error) {
 	return CanonicalDSNIdentity(dsn)
 }
 
+// localProfileSigningReferences names the federation signing secrets that the
+// profile's daemon loads: hub verification keys from its configuration and
+// spoke signing sources saved in its home's credentials file.
+func localProfileSigningReferences(profile LocalProfileConfig) ([]string, error) {
+	var references []string
+	if profile.Config != nil {
+		for _, key := range profile.Config.Federation.Signing.Keys {
+			references = append(references, key.KeyEnv)
+		}
+	}
+	credentials, err := readFederationCredentialsFile(filepath.Join(profile.Home, "credentials.toml"))
+	if err != nil {
+		return nil, fmt.Errorf("read local profile federation credentials: %w", err)
+	}
+	for _, credential := range credentials.Projects {
+		if credential.Signing != nil {
+			references = append(references, credential.Signing.KeyEnv)
+		}
+	}
+	return references, nil
+}
+
 // LocalProfileEnvironment constructs child state from an OS/toolchain allowlist
 // and credential references in the selected configuration, never parent daemon
 // overrides. The returned slice does not mutate the process environment.
@@ -143,10 +165,15 @@ func LocalProfileEnvironment(profile LocalProfileConfig, autostart bool) ([]stri
 	references := []string{profile.Catalog.TokenEnv}
 	if profile.Config != nil {
 		references = append(references,
+			profile.Config.Auth.TokenEnv,
 			profile.Config.Search.Embeddings.APIKeyEnv,
 			profile.Config.GitHubSync.TokenEnvName(),
 			profile.Config.NotionSync.TokenEnv,
 			profile.Config.PlaneSync.TokenEnv,
+			profile.Config.LinearSync.TokenEnv,
+			profile.Config.TwentySync.TokenEnv,
+			profile.Config.TodoistSync.TokenEnv,
+			profile.Config.TickTickSync.TokenEnv,
 		)
 		for _, entry := range profile.Config.Daemons {
 			references = append(references, entry.TokenEnv)
@@ -157,7 +184,18 @@ func LocalProfileEnvironment(profile LocalProfileConfig, autostart bool) ([]stri
 			}
 		}
 	}
+	signingReferences, err := localProfileSigningReferences(profile)
+	if err != nil {
+		return nil, err
+	}
+	references = append(references, signingReferences...)
 	reserved := []string{
+		"KATA_LISTEN", "KATA_WEB_LISTEN", "KATA_WEB_PUBLIC_ORIGIN", "KATA_AUTH_TOKEN_FILE",
+		"KATA_SEARCH_EMBEDDINGS_BASE_URL", "KATA_SEARCH_EMBEDDINGS_MODEL", "KATA_SEARCH_EMBEDDINGS_DIMS", "KATA_SEARCH_EMBEDDINGS_API_KEY_FILE",
+		"KATA_SEARCH_EMBEDDINGS_DOCUMENT_PREFIX", "KATA_SEARCH_EMBEDDINGS_DOCUMENT_SUFFIX",
+		"KATA_SEARCH_EMBEDDINGS_QUERY_PREFIX", "KATA_SEARCH_EMBEDDINGS_QUERY_SUFFIX",
+		"KATA_SEARCH_EMBEDDINGS_REQUEST_DIMENSIONS",
+		"KATA_BACKUP_DIR", "KATA_BACKUP_INTERVAL", "KATA_BACKUP_RETAIN",
 		"KATA_HOME", "KATA_DB", "KATA_DSN", "KATA_SERVER", "KATA_AUTH_TOKEN", "KATA_ALLOW_INSECURE",
 		"KATA_AUTOSTART", "KATA_AUTOSTART_IDLE_TIMEOUT", "KATA_SKIP_DAEMON_VERSION_CHECK", "KATA_HTTP_TIMEOUT",
 		"KATA_POSTGRES_SCHEMA", "KATA_POSTGRES_SCHEMA_MODE", "KATA_POSTGRES_SCHEMA_OWNER", "KATA_POSTGRES_ALLOW_INSECURE",
@@ -167,10 +205,12 @@ func LocalProfileEnvironment(profile LocalProfileConfig, autostart bool) ([]stri
 		"KATA_AUTHOR", "KATA_TEAMMATE", "KATA_INBOX_USER", "KATA_REF", "KATA_COLOR_MODE", "KATA_TELEMETRY_ENABLED",
 		"KATA_TEST_FEDERATION_FAILPOINTS", "KATA_GITHUB_SYNC_ALLOWED_HOSTS",
 	}
+	copied := map[string]bool{}
 	for _, key := range references {
-		if key == "" {
+		if key == "" || copied[key] {
 			continue
 		}
+		copied[key] = true
 		upper := strings.ToUpper(key)
 		_, osKey := values[key]
 		if !environmentNamePattern.MatchString(key) || osKey || strings.HasPrefix(upper, "PG") || slices.Contains(reserved, upper) || upper == "PORT" || strings.HasSuffix(upper, "_PROXY") || upper == "ALL_PROXY" || upper == "NO_PROXY" {

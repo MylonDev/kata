@@ -48,6 +48,22 @@ func (m MapConnectorFieldPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(m))
 }
 
+type GetFederationBridgeStatusPath struct {
+	ProjectName string `json:"project_name" validate:"required"`
+}
+
+func (g GetFederationBridgeStatusPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(g))
+}
+
+type DisconnectFederationBridgePath struct {
+	ProjectName string `json:"project_name" validate:"required"`
+}
+
+func (d DisconnectFederationBridgePath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(d))
+}
+
 type RevokeFederationEnrollmentPath struct {
 	EnrollmentID int64 `json:"enrollment_id"`
 }
@@ -58,6 +74,22 @@ type LeaveFederationReplicaPath struct {
 
 type RebindFederationReplicaPath struct {
 	ProjectID int64 `json:"project_id"`
+}
+
+type ConfigureFederationSigningPath struct {
+	ProjectUID string `json:"project_uid" validate:"required"`
+}
+
+func (c ConfigureFederationSigningPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
+type RepinFederationRootKeyPath struct {
+	ProjectName string `json:"project_name" validate:"required"`
+}
+
+func (r RepinFederationRootKeyPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
 }
 
 type ShowIssueByUIDPath struct {
@@ -80,6 +112,14 @@ type RenameProjectPath struct {
 	ProjectID int64 `json:"project_id"`
 }
 
+type GetProjectAccessPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type SetProjectAccessPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
 type PurgeProjectPath struct {
 	ProjectID int64 `json:"project_id"`
 }
@@ -91,6 +131,120 @@ type RewriteAuthorIdentityPath struct {
 type DetachProjectAliasPath struct {
 	ProjectID int64 `json:"project_id"`
 	AliasID   int64 `json:"alias_id"`
+}
+
+type GetCronCapabilitiesPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type ListCronJobsPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type CreateCronJobPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type ArchiveCronJobPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (a ArchiveCronJobPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(a))
+}
+
+type ShowCronJobPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (s ShowCronJobPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
+type ReplaceCronJobPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (r ReplaceCronJobPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
+}
+
+type RestoreCronJobPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (r RestoreCronJobPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
+}
+
+type ListCronRunsPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type ShowCronRunPath struct {
+	ProjectID int64  `json:"project_id"`
+	RunUID    string `json:"run_uid" validate:"required"`
+}
+
+func (s ShowCronRunPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
+type ObserveCronRunPath struct {
+	ProjectID int64  `json:"project_id"`
+	RunUID    string `json:"run_uid" validate:"required"`
+}
+
+func (o ObserveCronRunPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(o))
+}
+
+type ListCronWorkflowsPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type CreateCronWorkflowPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type ArchiveCronWorkflowPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (a ArchiveCronWorkflowPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(a))
+}
+
+type ShowCronWorkflowPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (s ShowCronWorkflowPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
+type ReplaceCronWorkflowPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (r ReplaceCronWorkflowPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
+}
+
+type RestoreCronWorkflowPath struct {
+	ProjectID int64  `json:"project_id"`
+	CronUID   string `json:"cron_uid" validate:"required"`
+}
+
+func (r RestoreCronWorkflowPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
 }
 
 type DigestProjectPath struct {
@@ -129,6 +283,26 @@ type RetryFederationQuarantinePath struct {
 type SkipFederationQuarantinePath struct {
 	ProjectID    int64 `json:"project_id"`
 	QuarantineID int64 `json:"quarantine_id"`
+}
+
+type OfferRelayDeliveriesPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type GetRelayResetPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type AcceptRelayDeliveriesPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type AckRelayDeliveriesPath struct {
+	ProjectID int64 `json:"project_id"`
+}
+
+type DisconnectRelayEnrollmentPath struct {
+	ProjectID int64 `json:"project_id"`
 }
 
 type GetProjectFederationStatusPath struct {
@@ -500,6 +674,15 @@ func (p PatchIssueMetadataPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(p))
 }
 
+type IssuePlanningDatesPath struct {
+	ProjectID int64  `json:"project_id"`
+	Ref       string `json:"ref" validate:"required"`
+}
+
+func (i IssuePlanningDatesPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(i))
+}
+
 type ListLabelsPath struct {
 	ProjectID int64 `json:"project_id"`
 }
@@ -557,6 +740,40 @@ type RestoreProjectPath struct {
 
 type SearchIssuesPath struct {
 	ProjectID int64 `json:"project_id"`
+}
+
+type DeleteTeamPath struct {
+	TeamUID string `json:"team_uid" validate:"required"`
+}
+
+func (d DeleteTeamPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(d))
+}
+
+type ShowTeamPath struct {
+	TeamUID string `json:"team_uid" validate:"required"`
+}
+
+func (s ShowTeamPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
+type RemoveTeamMemberPath struct {
+	TeamUID string `json:"team_uid" validate:"required"`
+	Actor   string `json:"actor" validate:"required"`
+}
+
+func (r RemoveTeamMemberPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
+}
+
+type AddTeamMemberPath struct {
+	TeamUID string `json:"team_uid" validate:"required"`
+	Actor   string `json:"actor" validate:"required"`
+}
+
+func (a AddTeamMemberPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(a))
 }
 
 type RevokeTokenPath struct {

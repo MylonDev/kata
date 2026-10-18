@@ -4,7 +4,9 @@ import (
 	"encoding/json/jsontext"
 	"time"
 
+	"go.kenn.io/kata/internal/pagination"
 	"go.kenn.io/kata/internal/tokenactor"
+	"go.kenn.io/kata/internal/transcript"
 )
 
 // IncludeDeleted controls whether a lookup is allowed to return soft-deleted
@@ -95,6 +97,7 @@ type CloseIssueParams struct {
 	Actor                  string
 	Message                string
 	Evidence               []Evidence
+	Transcript             *transcript.Transcript
 	IfMatchRev             *int64
 	IdempotencyKey         string
 	IdempotencyFingerprint string
@@ -105,6 +108,10 @@ type CloseIssueParams struct {
 
 // ListIssuesParams filters single-project list output.
 type ListIssuesParams struct {
+	PriorityUnset bool                 // only issues with no priority
+	CreatedFirst  bool                 // created_at DESC; OldestFirst selects ASC
+	After         *pagination.Position // stable keyset boundary
+
 	ProjectID     int64
 	Status        string       // "open" | "closed" | "" (any)
 	Priority      *int64       // nil = no filter; non-nil = exactly this value
@@ -138,6 +145,12 @@ type MetaFilter struct {
 // "every project"; >0 narrows to a single project. Status="" → all statuses.
 // All other filters use the same semantics as ListIssuesParams.
 type ListAllIssuesParams struct {
+	AllowedProjectIDs []int64 // nil unrestricted; empty matches nothing
+
+	PriorityUnset bool                 // only issues with no priority
+	CreatedFirst  bool                 // created_at DESC; OldestFirst selects ASC
+	After         *pagination.Position // stable keyset boundary
+
 	ProjectID       int64
 	Status          string
 	Priority        *int64
@@ -155,6 +168,12 @@ type ListAllIssuesParams struct {
 
 // CreateCommentParams carries inputs for CreateComment.
 type CreateCommentParams struct {
+	// ValidateReply enables local request validation. Replay/import writes may
+	// retain links whose targets have not arrived yet.
+	ValidateReply          bool
+	Force                  bool
+	ReplyToUID             string
+	ReplyKind              string
 	IssueID                int64
 	Author                 string
 	Teammate               string
@@ -281,6 +300,9 @@ type ReadyIssuesFilter struct {
 // status and label filters run inside the backend's SQL, before LIMIT, so a narrow
 // filter still fills the requested number of rows.
 type SearchFTSParams struct {
+	StableOrder bool // creation ascending, before candidate LIMIT
+	After       *pagination.Position
+
 	Status          string // "open" | "closed" | "" (any)
 	ProjectID       int64
 	Query           string
@@ -397,6 +419,16 @@ type LinkEventParams struct {
 	Actor        string
 }
 
+// ReplaceParentAndEventsParams atomically swaps one existing parent link for
+// a new parent and records both link events in the same transaction.
+type ReplaceParentAndEventsParams struct {
+	ExpectedParentLinkID  int64
+	ExpectedParentIssueID int64
+	Link                  CreateLinkParams
+	UnlinkEvent           LinkEventParams
+	LinkEvent             LinkEventParams
+}
+
 // LabelEventParams describes the event-emission side of a label mutation. The
 // DB-layer methods AddLabelAndEvent and RemoveLabelAndEvent split the mutation
 // (label insert/delete) from the event metadata so the handler can emit the
@@ -453,6 +485,9 @@ type RemoveProjectParams struct {
 	ProjectID int64
 	Actor     string
 	Force     bool
+	// SkipFederationRelay preserves the archive audit event but omits its
+	// relay delivery when the caller will immediately detach the replica.
+	SkipFederationRelay bool
 }
 
 // PurgeProjectParams are the inputs to Storage.PurgeProject.
@@ -519,6 +554,7 @@ type MoveIssueProjectIn struct {
 // MoveIssueProjectOut carries results from a successful MoveIssueProject call.
 type MoveIssueProjectOut struct {
 	Issue       Issue
+	Event       *Event `json:"-"`
 	EventID     int64
 	NewShortID  string
 	NewRevision int64
@@ -719,6 +755,10 @@ type RecordFederationQuarantineParams struct {
 	EventUIDs    []string
 	Error        string
 	CreatedAt    time.Time
+	// Negotiated relay failures use hop sequences and must still belong to the
+	// live upstream binding/epoch when the rejection is recorded.
+	RelayBindingUID string
+	RelayResetEpoch int64
 }
 
 // SkipFederationQuarantineParams resolves an active quarantine by advancing the
@@ -731,7 +771,7 @@ type SkipFederationQuarantineParams struct {
 	Now       time.Time
 }
 
-// RetryFederationQuarantineParams resolves an active push quarantine without
+// RetryFederationQuarantineParams resolves an active supported quarantine without
 // advancing the cursor, so the quarantined batch is retried on the next sync.
 type RetryFederationQuarantineParams struct {
 	ID        int64
@@ -751,6 +791,8 @@ type AdoptProjectIntoFederationParams struct {
 	ReplayHorizonEventID int64
 	Actor                string
 	AllowInsecure        bool
+	// RelayProtocolVersion records the authenticated negotiated adoption mode.
+	RelayProtocolVersion int
 	// EmptyOnly attaches an empty project without importing its local history.
 	EmptyOnly bool
 }
@@ -782,6 +824,7 @@ type FederationIngestEvent struct {
 // FederationIngestParams is the all-or-nothing DB ingest boundary used by the
 // hub transport handler.
 type FederationIngestParams struct {
+	EventFeatures                    string
 	ProjectID                        int64
 	FederationEnrollmentID           int64
 	SpokeInstanceUID                 string
@@ -805,10 +848,13 @@ const (
 // only fresh events, including generated claim audit events in insertion order,
 // so callers can avoid rebroadcasting response-lost retries.
 type FederationIngestResult struct {
-	Accepted          int
-	Duplicates        int
-	PushCursorEventID int64
-	InsertedEventUIDs []string
+	// Events retains every committed event in transaction insertion order.
+	Events                []Event
+	RequiredEventFeatures string
+	Accepted              int
+	Duplicates            int
+	PushCursorEventID     int64
+	InsertedEventUIDs     []string
 }
 
 // CreateFederationEnrollmentParams carries the plaintext token at creation
@@ -866,6 +912,8 @@ type APIToken struct {
 
 // CreateAPITokenParams carries the inputs for minting an API token.
 type CreateAPITokenParams struct {
+	// TeamUIDs enroll the canonical actor atomically with token creation.
+	TeamUIDs       []string
 	PlaintextToken string
 	Actor          string
 	Name           *string

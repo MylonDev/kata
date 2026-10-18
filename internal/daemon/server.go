@@ -23,13 +23,19 @@ import (
 	"go.kenn.io/kata/internal/config"
 	"go.kenn.io/kata/internal/db"
 	"go.kenn.io/kata/internal/embedding"
+	"go.kenn.io/kata/internal/federationsigning"
 	"go.kenn.io/kata/internal/githubsync"
 	"go.kenn.io/kata/internal/hooks"
 	"go.kenn.io/kata/internal/issuesync"
+	"go.kenn.io/kata/internal/linearsync"
 	"go.kenn.io/kata/internal/notionsync"
 	"go.kenn.io/kata/internal/planesync"
 	"go.kenn.io/kata/internal/rootbridge"
+	"go.kenn.io/kata/internal/tickticksync"
+	"go.kenn.io/kata/internal/todoistsync"
+	"go.kenn.io/kata/internal/twentysync"
 	"go.kenn.io/kata/internal/vector"
+	"golang.org/x/net/netutil"
 )
 
 // ServerConfig wires the daemon's runtime dependencies. DB and StartedAt are
@@ -38,7 +44,13 @@ import (
 // through). Hooks is optional and defaults to hooks.NewNoop() when nil so
 // mutation handlers can fan out events unconditionally.
 type ServerConfig struct {
-	DB db.Storage
+	FederationSigning         *federationsigning.Verifier
+	FederationSigningRequired bool
+	DB                        db.Storage
+	// RootSigning holds private local signing material. Nil leaves an embedded
+	// server without a signing authority; daemon startup loads its owner-only
+	// key. The key is never exposed through API configuration or status.
+	RootSigning *RootSigning
 	// UIStore supplies coherent browser projections. Nil defaults to DB when
 	// the configured storage backend implements db.UIStore.
 	UIStore db.UIStore
@@ -47,11 +59,13 @@ type ServerConfig struct {
 	UIClock func() time.Time
 	// DefaultTimezone applies to civil schedules without an issue-level
 	// timezone. Empty preserves the UTC default.
-	DefaultTimezone               string
-	StartedAt                     time.Time
-	Endpoint                      *kitdaemon.Endpoint
-	Broadcaster                   *EventBroadcaster
-	FederationWake                func()
+	DefaultTimezone string
+	StartedAt       time.Time
+	Endpoint        *kitdaemon.Endpoint
+	Broadcaster     *EventBroadcaster
+	FederationWake  func()
+	// EmbeddingWake notifies the existing local worker after artifact commit.
+	EmbeddingWake                 func()
 	FederationCredentials         config.FederationCredentialStore
 	FederationCatalog             []config.CatalogDaemonConfig
 	FederationRebindFetchMetadata FederationRebindMetadataFetcher
@@ -68,10 +82,26 @@ type ServerConfig struct {
 	NotionSyncFetcher        notionsync.Fetcher
 	NotionSyncProgress       *issuesync.ProgressTracker
 	NotionSyncWake           func()
+	TickTickSyncConfig       config.TickTickSyncConfig
+	TickTickSyncFetcher      tickticksync.Fetcher
+	TickTickSyncProgress     *issuesync.ProgressTracker
+	TickTickSyncWake         func()
 	PlaneSyncConfig          config.PlaneSyncConfig
 	PlaneSyncFetcher         planesync.Fetcher
 	PlaneSyncProgress        *issuesync.ProgressTracker
 	PlaneSyncWake            func()
+	LinearSyncConfig         config.LinearSyncConfig
+	LinearSyncFetcher        linearsync.Fetcher
+	LinearSyncProgress       *issuesync.ProgressTracker
+	LinearSyncWake           func()
+	TwentySyncConfig         config.TwentySyncConfig
+	TwentySyncFetcher        twentysync.Fetcher
+	TwentySyncProgress       *issuesync.ProgressTracker
+	TwentySyncWake           func()
+	TodoistSyncConfig        config.TodoistSyncConfig
+	TodoistSyncFetcher       todoistsync.Fetcher
+	TodoistSyncProgress      *issuesync.ProgressTracker
+	TodoistSyncWake          func()
 	Hooks                    hooks.Sink
 	ExternalRootRegistry     *rootbridge.Registry
 	ExternalRootService      *rootbridge.Service
@@ -93,6 +123,10 @@ type ServerConfig struct {
 	// WebSessions owns browser cookie+header session state. Nil keeps
 	// the browser-only routes and middleware disabled for embedded/API-only use.
 	WebSessions *WebSessionManager
+
+	// Telemetry receives UI telemetry events. Nil makes the capture
+	// operation answer 503, as in embedded Service construction.
+	Telemetry TelemetryReporter
 
 	// WebDaemons is the client daemon catalog exposed to the first-class web
 	// UI. Credentials remain server-side and are used only by the selected-
@@ -130,6 +164,11 @@ type ServerConfig struct {
 	// HostAccess enables in-process authentication and authorization supplied
 	// by a mounting application. It is nil for the standalone daemon.
 	HostAccess HostAccessController
+
+	// TrustCallerAuthentication is the embedding Service's explicit promise
+	// that its mounting application already authenticates this handler. It is
+	// not inferred from HTTP headers and never overrides HostAccess.
+	TrustCallerAuthentication bool
 
 	// HostFederationAccess optionally adds host-owned authorization after Kata
 	// authenticates a project-scoped federation enrollment.
@@ -213,11 +252,14 @@ func NewDefaultGitHubSyncRunner(cfg GitHubSyncRunnerConfig) GitHubSyncRunner {
 
 // Server bundles the http handler and lifecycle.
 type Server struct {
-	cfg         ServerConfig
-	baseHandler http.Handler
-	handler     http.Handler
-	api         huma.API
-	authPolicy  authPolicy
+	federationIngestAdmission  chan struct{}
+	federationControlAdmission chan struct{}
+	cfg                        ServerConfig
+	baseHandler                http.Handler
+	handler                    http.Handler
+	api                        huma.API
+	authPolicy                 authPolicy
+	noProjectDataRoutes        noProjectDataRouteMatcher
 
 	shutdownTimeout time.Duration
 }
@@ -235,11 +277,35 @@ type ListenerBinding struct {
 // NewServer wires routes onto a fresh http.ServeMux. The returned handler is
 // safe to mount in tests via httptest.NewServer.
 func NewServer(cfg ServerConfig) *Server {
+	if cfg.TwentySyncProgress == nil {
+		cfg.TwentySyncProgress = issuesync.NewProgressTracker()
+	}
+	if cfg.TwentySyncFetcher == nil {
+		cfg.TwentySyncFetcher = twentySyncFetcher(cfg)
+	}
+	if cfg.TodoistSyncProgress == nil {
+		cfg.TodoistSyncProgress = issuesync.NewProgressTracker()
+	}
+	if cfg.TodoistSyncFetcher == nil {
+		cfg.TodoistSyncFetcher = todoistSyncFetcher(cfg)
+	}
+	if cfg.TickTickSyncProgress == nil {
+		cfg.TickTickSyncProgress = issuesync.NewProgressTracker()
+	}
+	if cfg.TickTickSyncFetcher == nil {
+		cfg.TickTickSyncFetcher = tickTickSyncFetcher(cfg)
+	}
 	if cfg.PlaneSyncProgress == nil {
 		cfg.PlaneSyncProgress = issuesync.NewProgressTracker()
 	}
 	if cfg.PlaneSyncFetcher == nil {
 		cfg.PlaneSyncFetcher = planeSyncFetcher(cfg)
+	}
+	if cfg.LinearSyncProgress == nil {
+		cfg.LinearSyncProgress = issuesync.NewProgressTracker()
+	}
+	if cfg.LinearSyncFetcher == nil {
+		cfg.LinearSyncFetcher = linearSyncFetcher(cfg)
 	}
 	if cfg.NotionSyncProgress == nil {
 		cfg.NotionSyncProgress = issuesync.NewProgressTracker()
@@ -291,9 +357,15 @@ func NewServer(cfg ServerConfig) *Server {
 	humaAPI := huma.NewAPI(humaConfig, api.WrapErrorAdapter(humago.NewAdapter(mux, "")))
 	withEmbeddingProfile(humaAPI, cfg.EmbeddingProfile)
 	withHostAccess(humaAPI, cfg.HostAccess)
+	withProjectOperationAuthorization(humaAPI, cfg.DB)
+	withRootAttribution(humaAPI, cfg.RootSigning)
 	withExternalRootAdministration(humaAPI, cfg.Auth.AllowIdentityConnectorAdministration)
 
-	s := &Server{cfg: cfg, api: humaAPI}
+	s := &Server{
+		cfg: cfg, api: humaAPI,
+		federationIngestAdmission:  make(chan struct{}, 2),
+		federationControlAdmission: make(chan struct{}, 16),
+	}
 	registerRoutes(humaAPI, mux, cfg)
 	if cfg.WebSessions != nil {
 		registerUISessionHandlers(mux, cfg.WebSessions)
@@ -308,6 +380,8 @@ func NewServer(cfg ServerConfig) *Server {
 	policy := cfg.authPolicy()
 	policy.SelfAuthenticatedRoutes = newSelfAuthenticatedRouteMatcher(
 		selfAuthenticatedRoutes(humaAPI.OpenAPI()))
+	s.noProjectDataRoutes = newNoProjectDataRouteMatcher(
+		noProjectDataRoutes(humaAPI.OpenAPI()))
 	s.authPolicy = policy
 
 	s.baseHandler = mux
@@ -340,12 +414,22 @@ func (s *Server) Handler() http.Handler { return s.handler }
 
 // HandlerFor returns the shared route stack wrapped for one listener.
 func (s *Server) HandlerFor(policy ListenerPolicy) (http.Handler, error) {
+	if policy.Kind == ListenerFederation {
+		base := s.withFederationSigning(s.baseHandler, true)
+		base = withProjectAuthorization(s.cfg.DB, s.cfg.HostAccess != nil, s.cfg.TrustCallerAuthentication,
+			s.authPolicy.SelfAuthenticatedRoutes, s.noProjectDataRoutes, base)
+		return base, nil
+	}
 	base := s.baseHandler
 	if base == nil {
 		base = s.handler
 	} else {
-		base = withIdleAdmission(s.cfg.IdleAdmission, base)
 		base = withFederationIngestPreauthorization(s.cfg, base)
+		base = s.withFederationSigning(base, false)
+		// Signed uploads read their body during verification, so the
+		// foreground lease must already cover that work.
+		base = withIdleAdmission(s.cfg.IdleAdmission, base)
+		base = withProjectAuthorization(s.cfg.DB, s.cfg.HostAccess != nil, s.cfg.TrustCallerAuthentication, s.authPolicy.SelfAuthenticatedRoutes, s.noProjectDataRoutes, base)
 		base = withTrustedProxyActor(s.cfg)(base)
 		base = withScopedPrincipalRevalidation(s.cfg.DB, base)
 		base = requireBearer(s.authPolicy, s.cfg.DB)(base)
@@ -368,9 +452,14 @@ func (s *Server) HandlerFor(policy ListenerPolicy) (http.Handler, error) {
 // API returns the underlying huma.API for handler registration in tests.
 func (s *Server) API() huma.API { return s.api }
 
-// Close releases server-owned resources. Currently a no-op since the DB is
-// owned by the caller.
-func (s *Server) Close() error { return nil }
+// Close releases signing replay ownership. Call it after HTTP handlers drain;
+// the database remains owned by the caller.
+func (s *Server) Close() error {
+	if s.cfg.FederationSigning != nil {
+		return s.cfg.FederationSigning.Close()
+	}
+	return nil
+}
 
 func registerOpenAPIYAML(mux *http.ServeMux, hostAccess HostAccessController) {
 	mux.HandleFunc(http.MethodGet+" /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +504,7 @@ func (s *Server) Run(ctx context.Context) error {
 // Useful for tests that bind their own loopback listener (avoiding the
 // listener-close-then-reopen TOCTOU window).
 func (s *Server) Serve(ctx context.Context, l net.Listener) error {
-	return s.serve(ctx, l, s.handler, nil)
+	return s.serve(ctx, l, s.handler, nil, false)
 }
 
 func (s *Server) serve(
@@ -423,6 +512,7 @@ func (s *Server) serve(
 	l net.Listener,
 	handler http.Handler,
 	onExit func(error),
+	restricted bool,
 ) error {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -432,6 +522,13 @@ func (s *Server) serve(
 		// BaseContext roots every request in the daemon ctx so long-lived
 		// SSE handlers exit on Shutdown via r.Context().Done().
 		BaseContext: func(net.Listener) context.Context { return serveCtx },
+	}
+	if restricted {
+		httpSrv.MaxHeaderBytes = federationsigning.MaxHeaderBytes
+		httpSrv.ReadTimeout = 60 * time.Second
+		httpSrv.WriteTimeout = 60 * time.Second
+		httpSrv.IdleTimeout = 10 * time.Second
+		l = netutil.LimitListener(l, 16)
 	}
 	shutdownDone := make(chan error, 1)
 	go func() {
@@ -540,7 +637,7 @@ func (s *Server) ServeListenersWithLifecycle(
 	for i, binding := range bindings {
 		handler := handlers[i]
 		go func(binding ListenerBinding, handler http.Handler) {
-			results <- s.serve(runCtx, binding.Listener, handler, stopAll)
+			results <- s.serve(runCtx, binding.Listener, handler, stopAll, binding.Policy.Kind == ListenerFederation)
 		}(binding, handler)
 	}
 
@@ -607,8 +704,10 @@ func isMutation(method string) bool {
 // contract around the Huma streaming route.
 func registerRoutes(humaAPI huma.API, mux *http.ServeMux, cfg ServerConfig) {
 	registerHealth(humaAPI, cfg)
+	registerDoctorHandlers(humaAPI, cfg)
 	registerInstanceHandlers(humaAPI, cfg)
 	registerTokenHandlers(humaAPI, cfg)
+	registerProjectAccessHandlers(humaAPI, cfg)
 	registerProjects(humaAPI, cfg)
 	registerIssues(humaAPI, cfg)
 	registerImportsHandlers(humaAPI, cfg)
@@ -633,6 +732,7 @@ func registerRoutes(humaAPI huma.API, mux *http.ServeMux, cfg ServerConfig) {
 	registerAuditHandlers(humaAPI, cfg)
 	registerUIHandlers(humaAPI, cfg)
 	registerUILaunchHandler(humaAPI, cfg)
+	registerTelemetryHandlers(humaAPI, cfg)
 }
 
 // registerHealth registers /api/v1/ping and /api/v1/health.
@@ -699,6 +799,8 @@ func registerDestructive(humaAPI huma.API, cfg ServerConfig) {
 // registerRecurrences registers the recurrence CRUD routes.
 func registerRecurrences(humaAPI huma.API, cfg ServerConfig) {
 	registerRecurrencesHandlers(humaAPI, cfg)
+	registerCronDefinitionHandlers(humaAPI, cfg)
+	registerCronRunHandlers(humaAPI, cfg)
 }
 
 // registerMetadata registers metadata patch routes.

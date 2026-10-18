@@ -15,8 +15,8 @@ Go applications can instead mount kata's listener-free HTTP service in-process;
 see [Embedding kata in Go](docs/development/embedding.md).
 MCP clients can start Kata's native server over stdio or Streamable HTTP with
 `kata mcp serve`. It binds the current workspace's project by default, and can
-serve a fixed allowlist or the complete daemon catalog on request. Fourteen
-section loaders progressively expose Kata's typed issue, administration,
+serve a fixed allowlist or the complete daemon catalog on request. Section
+loaders progressively expose Kata's typed issue, administration,
 automation, and event workflows. See the [MCP reference](docs/reference/mcp.md).
 
 The documentation in [`docs/`](docs/) is the definitive guide, published with
@@ -25,10 +25,12 @@ Zensical at <https://katatracker.com/>.
 > **Stable:** Since v0.14.0, kata releases preserve backward compatibility
 > across upgrades.
 
-The latest release is [0.18.0](docs/changelog.md#0180). It adds teammate
-attention requests, issue-scoped worker credentials, and more ways to find
-work. See the [upgrade guidance](docs/get-started/install.md#upgrading-to-0180)
-when updating remote or federated daemons.
+The latest release is [0.19.0](docs/changelog.md#0190). It adds
+[project relays between hubs](docs/guide/project-relays.md), task sync with
+Notion, Plane, Linear, Twenty, Todoist, and TickTick, shared cron jobs, comment
+replies, and `kata doctor`. Some commands and flags were renamed; read the
+[upgrade guidance](docs/get-started/install.md#upgrading-to-0190) before
+updating.
 
 ## Install
 
@@ -82,14 +84,14 @@ downloads, and build-from-source steps.
 
 ```mermaid
 flowchart TB
-  arrive{"Work arrives"} --> search["Search first:<br/>kata search #34;#60;terms#62;#34; --agent<br/>Reuse an open issue or create one."]
+  arrive{"Work arrives"} --> search["Search first:<br/>kata search #34;#60;terms#62;#34; --agent<br/>Reuse an open issue, else create one.<br/>If create refuses a look-alike, reuse it;<br/>--force-new only if the work truly differs.<br/>No bound workspace: refs are #60;project#62;##60;id#62;,<br/>or pass --project #60;project#62;."]
   search --> route{"Work it, or delegate it?"}
 
   subgraph workside[" "]
     direction TB
-    claim["On claim or start, mark it tracked:<br/>kata meta set #60;ref#62; work.attention ok"]
+    claim["Claim and mark it tracked:<br/>kata claim #60;ref#62;<br/>kata meta set #60;ref#62; work.attention ok"]
     branch["If the work happens on a dedicated branch, stamp it once:<br/>kata meta set #60;ref#62; work.branch #60;branch#62;<br/>or bind at creation:<br/>kata create ... --meta work.branch=#60;branch#62; --idempotency-key #60;key#62;"]
-    live["Keep state current:<br/>kata meta set #60;ref#62; work.attention stuck#124;needs-human#124;ok<br/>kata meta set #60;ref#62; work.attention_msg #34;#60;why#62;#34;<br/>stuck = blocked; needs-human = input/review; ok = unblocked.<br/>Request attention:<br/>kata notify #60;ref#62; --to #60;actor#62;[/#60;teammate#62;] --message #60;reason#62;"]
+    live["Keep state current:<br/>kata meta set #60;ref#62; work.attention stuck#124;needs-human#124;ok<br/>kata meta set #60;ref#62; work.attention_msg #34;#60;why#62;#34;<br/>stuck = blocked; needs-human = input/review; ok = unblocked.<br/>Record progress:<br/>kata comment #60;ref#62; -m #34;#60;what changed#62;#34;<br/>Request attention:<br/>kata notify #60;ref#62; --to #60;actor#62;[/#60;teammate#62;] --message #60;reason#62;"]
     claim --> branch --> live
   end
 
@@ -108,11 +110,12 @@ flowchart TB
   coord --> done
 
   done{"Verified complete?"}
-  done -->|yes| close["kata close #60;ref#62; --done<br/>with a message and evidence"]
+  done -->|yes| close["kata close #60;ref#62; --done --message #34;#60;scope and verification, 40+ chars#62;#34;<br/>--evidence commit:#60;sha#62; #124; pr:#60;url#62; #124; test:#60;cmd#62; #124; reviewed-paths:#60;path#62;<br/>(or --commit, --pr, --test, --reviewed)"]
+  done -->|duplicate, superseded or dropped| retire["kata close #60;ref#62; --message #34;#60;why#62;#34;<br/>--duplicate-of #60;ref#62; #124; --superseded-by #60;ref#62; (20+ chars)<br/>#124; --wontfix (60+ chars)"]
   done -->|no| park{"Park it?"}
   park -->|start date known| schedule["kata schedule #60;ref#62; #60;date-or-time#62;<br/>sets scheduled_on; clear with -"]
   park -->|start date unknown| someday["kata meta set #60;ref#62; someday true --json-value<br/>clear with kata meta unset #60;ref#62; someday"]
-  park -->|needs review| review["kata label add #60;ref#62; needs-review<br/>plus a comment on what remains"]
+  park -->|needs review| review["kata label add #60;ref#62; needs-review --comment #34;#60;what remains#62;#34;"]
 ```
 
 ## Quickstart
@@ -136,6 +139,27 @@ kata close abc4 --done \
   --message "Fixed the login race and verified the relevant tests pass." \
   --commit <sha>
 ```
+
+Reply to a specific comment, then read the thread it belongs to:
+
+```sh
+kata comment abc4 --reply c:xbzxrq -m "This builds on the finding."
+kata show abc4 --thread c:xbzxrq
+```
+
+The TUI and Web UI show nonzero counts for authorized direct relations on
+original comments. Open a count to inspect chronological evidence with its
+author, time, handle, and body, then jump to it and return focus. The TUI uses a
+keyboard picker; Web controls are accessible. Replies show their outgoing
+relation. Partial counts stay explicit. Conflicting assertions stay visible
+together without scores, automatic resolution, or hiding. Pending, removed,
+moved, and edited targets remain visible.
+
+Use `--confirm`, `--refute`, or `--supersede` when the response has that meaning.
+See [Reply to a finding](docs/workflows/agents.md#reply-to-a-finding)
+for handles and retries. Reply notifications and coordinator broadcasts are
+planned. For work that needs
+ownership or tracked completion, a comment-sized task becomes a child issue.
 
 For agent-heavy workspaces, `kata init --with-agents` also writes a managed kata
 briefing into agent guidance files. It refreshes existing real `AGENTS.md` and
@@ -207,9 +231,15 @@ The [docs site](docs/) is the definitive reference:
 - Operations: [GitHub sync](docs/operations/github-sync.md) ·
   [Notion sync](docs/operations/notion-sync.md) ·
   [Plane sync](docs/operations/plane-sync.md) ·
+  [Linear sync](docs/operations/linear-sync.md) ·
+  [Twenty sync](docs/operations/twenty-sync.md) ·
+  [Todoist sync](docs/operations/todoist-sync.md) ·
+  [TickTick sync](docs/operations/ticktick-sync.md) ·
+  [Forgejo connector](docs/operations/forgejo-connector.md) ·
   [Remote daemon](docs/operations/remote-daemon.md) ·
   [Federation](docs/operations/federation.md) ·
   [Hosted mode](docs/operations/hosted-mode.md) ·
+  [Containers](docs/operations/containers.md) ·
   [PostgreSQL](docs/operations/postgres.md) ·
   [Backup and restore](docs/operations/backup-restore.md)
 - Development: [Embedding kata in Go](docs/development/embedding.md) ·
@@ -227,13 +257,16 @@ contract in long form.
 On `main`, install the contract in every coding-agent session on this machine:
 
 ```sh
-kata agent-hooks install --all
+kata agent-hook install
 ```
 
 For Codex, open Codex and run `/hooks` to trust the new hook. See
 [Contract in every session](docs/workflows/agents.md#contract-in-every-session)
-for supported harnesses, Hermes's first-turn behavior, and additional Codex
-homes. These commands are not included in 0.18.0.
+for all 18 targets, runtime requirements, attention capabilities and additional
+Codex homes. Contract and available attention hooks are enabled by default;
+use `--contract-only` to opt out of attention, or
+`kata init --agent-hooks=codex,pi` for project setup. These commands require
+Kata 0.19.0 or later.
 
 Print the shorter managed briefing without changing the repository:
 
@@ -257,6 +290,11 @@ if test -f "$CLAUDE_PROJECT_DIR/.kata.toml"; then
   kata quickstart --format contract --workspace "$CLAUDE_PROJECT_DIR"
 fi
 ```
+
+For a Codex SessionStart response without a stdin payload, run
+`kata agent-contract-hook`. To replace the prompt, use
+`kata agent-contract-hook --source ./agent-prompt.txt`; a missing file uses the
+built-in contract and an empty file supplies an empty prompt.
 
 Codex SessionStart hooks require structured JSON rather than plain contract
 stdout. For workspace hooks, use `kata init --with-codex-hooks`; see the

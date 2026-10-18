@@ -23,13 +23,14 @@ documented.
 ## Building
 
 Release binaries are pure Go (`CGO_ENABLED=0`): `modernc.org/sqlite` provides
-both the database driver and the sqlite-vec extension. Development builds on
-machines with a C toolchain default to `CGO_ENABLED=1`, where kit's sqlitevec
-selects its cgo sqlite-vec bindings by build constraint; those need C sqlite
-symbols at link time, so `internal/vector/driver_cgo.go` links
-`mattn/go-sqlite3` purely to keep ambient `go build`/`go test` working. Both
-driver shims live in `internal/vector/driver_*.go`; nothing to configure,
-but don't remove the mattn dependency because release builds don't use it.
+the database driver and `modernc.org/sqlite/vec` provides the sqlite-vec
+extension. Development builds on machines with a C toolchain default to
+`CGO_ENABLED=1`. On Unix those builds open the vector sidecar with
+`mattn/go-sqlite3` and load the cgo sqlite-vec binding before the first
+connection. kit's sqlitevec does not pick a driver or register the extension;
+Kata does both in `internal/vector/driver_*.go`, and there is nothing to
+configure. Keep the mattn dependency: the cgo sqlite-vec binding links against
+its C SQLite, even though release builds don't use it.
 
 ## Local checks
 
@@ -42,6 +43,25 @@ make vet
 make lint
 make nilaway
 ```
+
+### Native agent plugins
+
+The `native-agent-plugins` job in
+[test.yml](https://github.com/kenn-io/kata/blob/main/.github/workflows/test.yml)
+installs pinned published packages into a temporary directory and runs the
+native loader and SDK checks. Use the same install and test commands locally.
+The tests use temporary application state and do not need provider credentials.
+
+| Variable | Package location |
+| --- | --- |
+| `KATA_NATIVE_PLUGIN_SDK_ROOT` | Install prefix containing the Amp and OpenCode SDKs in `node_modules`. |
+| `KATA_PI_TEST_RUNTIME` | Absolute `dist` directory of the published Pi package. |
+| `KATA_OPENCLAW_TEST_RUNTIME` | Published OpenClaw package directory. |
+
+Pi and OpenClaw tests exercise their native loaders and runners. Amp and
+OpenCode checks compile against published declarations and exercise callbacks;
+the OpenCode v2 checks also load the published `Plugin.define` implementation.
+These checks do not replace a session in each agent's full application.
 
 ### Browser UI development
 
@@ -185,6 +205,8 @@ Keep `docs/llms.txt` links aligned with those public routes.
 When changing behavior:
 
 - update CLI help when flags or contracts change;
+  `go test ./cmd/kata -run 'TestHelp'` parses every
+  advertised command without running it;
 - update `README.md` if the project overview or quickstart changes;
 - update `docs/` for public user/operator behavior;
 - record durable design rationale in `docs/design/` when the "why" is not

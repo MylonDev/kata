@@ -156,6 +156,16 @@
       "permanent": true
     },
     {
+      "source": "/reference/cron/",
+      "destination": "/docs/reference/cron/",
+      "permanent": true
+    },
+    {
+      "source": "/reference/cron.md",
+      "destination": "/docs/reference/cron.md",
+      "permanent": true
+    },
+    {
       "source": "/reference/connector-protocol/",
       "destination": "/docs/reference/connector-protocol/",
       "permanent": true
@@ -226,6 +236,16 @@
       "permanent": true
     },
     {
+      "source": "/operations/doctor/",
+      "destination": "/docs/operations/doctor/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/doctor.md",
+      "destination": "/docs/operations/doctor.md",
+      "permanent": true
+    },
+    {
       "source": "/operations/remote-daemon/",
       "destination": "/docs/operations/remote-daemon/",
       "permanent": true
@@ -243,6 +263,16 @@
     {
       "source": "/operations/notion-sync.md",
       "destination": "/docs/operations/notion-sync.md",
+      "permanent": true
+    },
+    {
+      "source": "/operations/forgejo-connector/",
+      "destination": "/docs/operations/forgejo-connector/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/forgejo-connector.md",
+      "destination": "/docs/operations/forgejo-connector.md",
       "permanent": true
     },
     {
@@ -266,6 +296,16 @@
       "permanent": true
     },
     {
+      "source": "/operations/federation-signing/",
+      "destination": "/docs/operations/federation-signing/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/federation-signing.md",
+      "destination": "/docs/operations/federation-signing.md",
+      "permanent": true
+    },
+    {
       "source": "/operations/agent-orchestration/",
       "destination": "/docs/operations/agent-orchestration/",
       "permanent": true
@@ -273,6 +313,16 @@
     {
       "source": "/operations/agent-orchestration.md",
       "destination": "/docs/operations/agent-orchestration.md",
+      "permanent": true
+    },
+    {
+      "source": "/operations/containers/",
+      "destination": "/docs/operations/containers/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/containers.md",
+      "destination": "/docs/operations/containers.md",
       "permanent": true
     },
     {
@@ -438,6 +488,56 @@
     {
       "source": "/operations/plane-sync.md",
       "destination": "/docs/operations/plane-sync.md",
+      "permanent": true
+    },
+    {
+      "source": "/operations/linear-sync/",
+      "destination": "/docs/operations/linear-sync/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/linear-sync.md",
+      "destination": "/docs/operations/linear-sync.md",
+      "permanent": true
+    },
+    {
+      "source": "/operations/twenty-sync/",
+      "destination": "/docs/operations/twenty-sync/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/twenty-sync.md",
+      "destination": "/docs/operations/twenty-sync.md",
+      "permanent": true
+    },
+    {
+      "source": "/operations/todoist-sync/",
+      "destination": "/docs/operations/todoist-sync/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/todoist-sync.md",
+      "destination": "/docs/operations/todoist-sync.md",
+      "permanent": true
+    },
+    {
+      "source": "/operations/ticktick-sync/",
+      "destination": "/docs/operations/ticktick-sync/",
+      "permanent": true
+    },
+    {
+      "source": "/operations/ticktick-sync.md",
+      "destination": "/docs/operations/ticktick-sync.md",
+      "permanent": true
+    },
+    {
+      "source": "/guide/project-relays/",
+      "destination": "/docs/guide/project-relays/",
+      "permanent": true
+    },
+    {
+      "source": "/guide/project-relays.md",
+      "destination": "/docs/guide/project-relays.md",
       "permanent": true
     }
   ]

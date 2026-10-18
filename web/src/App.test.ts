@@ -20,6 +20,7 @@ describe('App', () => {
     document.documentElement.classList.remove('dark')
     vi.unstubAllGlobals()
     vi.useRealTimers()
+    vi.restoreAllMocks()
   })
 
   it('renders the Kata application shell while loading', () => {
@@ -42,6 +43,7 @@ describe('App', () => {
           input instanceof Request ? input.url : String(input),
           window.location.origin,
         )
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
         paths.push(target.pathname)
         if (target.pathname === '/api/v1/ui/session/local') {
           return new Response(
@@ -112,6 +114,7 @@ describe('App', () => {
         if (path.endsWith('/api/v1/ui/references')) {
           return Response.json({ issues: [], labels: [], owners: [], projects: [] })
         }
+        if (path === '/api/v1/ui/telemetry') return telemetryAccepted()
         selected.push(request.headers.get('X-Kata-Web-Daemon'))
         return Response.json(snapshot(), { headers: { ETag: '"snapshot-1"' } })
       }),
@@ -216,6 +219,7 @@ describe('App', () => {
         if (path.endsWith('/api/v1/ui/references')) {
           return Response.json({ issues: [], labels: [], owners: [], projects: [] })
         }
+        if (path === '/api/v1/ui/telemetry') return telemetryAccepted()
         selected.push(request.headers.get('X-Kata-Web-Daemon'))
         return Response.json(snapshot(), { headers: { ETag: '"snapshot-1"' } })
       }),
@@ -908,6 +912,7 @@ describe('App', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const target = new URL(String(input), window.location.origin)
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
         paths.push(target.pathname)
         if (target.pathname === '/api/v1/ui/daemons') return roster
         return Response.json(snapshot(), { headers: { ETag: '"snapshot-1"' } })
@@ -1149,6 +1154,7 @@ describe('App', () => {
           window.location.origin,
         )
         if (target.pathname === '/api/v1/ui/daemons') return Response.json(daemonRoster())
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
         snapshotReads += 1
         if (snapshotReads > 1) return new Promise<Response>(() => {})
         return new Response(JSON.stringify(snapshot()), {
@@ -1314,6 +1320,7 @@ describe('App', () => {
         if (target.pathname === '/api/v1/ui/references') {
           return Response.json({ issues: [], labels: [], owners: [], projects: [] })
         }
+        if (target.pathname === '/api/v1/teams') return Response.json({ teams: [] })
         if (target.pathname === '/api/v1/tokens') {
           tokenReads += 1
           if (tokenReads > 1) return new Response('', { status: 403 })
@@ -1484,6 +1491,10 @@ describe('App', () => {
   })
 
   it('switches configured daemons in place and restores each daemon route', async () => {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    const telemetry: Request[] = []
     history.replaceState(null, '', '/kata?view=all-open')
     sessionStorage.setItem(
       'kata.web.session.v1',
@@ -1502,6 +1513,11 @@ describe('App', () => {
             ? input
             : new Request(new URL(String(input), window.location.origin), init)
         const path = new URL(request.url).pathname
+        if (path === '/api/v1/ui/telemetry') {
+          const event = (await request.clone().json()).event
+          if (event === 'app_opened' || event === 'session_ended') telemetry.push(request)
+          return telemetryAccepted()
+        }
         if (path === '/api/v1/ui/daemons') {
           return Response.json({
             daemons: [
@@ -1535,10 +1551,18 @@ describe('App', () => {
     expect(await screen.findByRole('button', { name: /Example issue/ })).not.toBeNull()
     await fireEvent.click(screen.getByRole('button', { name: 'Today' }))
     await waitFor(() => expect(window.location.search).toBe('?view=today'))
+    now = 120_000
     await fireEvent.click(screen.getByRole('button', { name: 'Switch Kata daemon: example-local' }))
     await fireEvent.click(screen.getByRole('menuitemradio', { name: /example-remote/ }))
     expect(await screen.findByRole('button', { name: /Remote issue/ })).not.toBeNull()
     expect(window.location.search).toBe('?view=all-open')
+    now += 10_000
+    window.dispatchEvent(new Event('pagehide'))
+    await waitFor(() => expect(telemetry).toHaveLength(2))
+    expect(telemetry[1]!.headers.get('X-Kata-Web-Daemon')).toBeNull()
+    await expect(telemetry[1]!.json()).resolves.toMatchObject({
+      properties: { duration_bucket: '1_to_5m' },
+    })
     expect(
       referenceRequests.find(
         (request) => request.headers.get('X-Kata-Web-Daemon') === 'example-local',
@@ -2019,6 +2043,102 @@ describe('App', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('retries a typed reply with the same key and changes the key for force', async () => {
+    history.replaceState(null, '', '/kata?issue=01J00000000000000000000001#direct=1')
+    sessionStorage.setItem(
+      'kata.web.session.v1',
+      JSON.stringify({ session: 'tab-session', csrf: 'tab-csrf' }),
+    )
+    const base = snapshot()
+    const targetUID = '01J00000000000000000000009'
+    const accepted = {
+      ...base,
+      selected: {
+        state: 'available',
+        issue: base.collection[0],
+        comments: [
+          {
+            id: 9,
+            uid: targetUID,
+            handle: 'c:000009',
+            issue_uid: base.collection[0]!.uid,
+            author: 'finder',
+            body: 'Finding',
+            created_at: '2026-08-01T12:00:00Z',
+          },
+        ],
+        labels: [],
+        links: [],
+        recurrences: [],
+        history: [],
+      },
+    }
+    const requests: Request[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request
+            ? input
+            : new Request(new URL(String(input), window.location.origin), init)
+        if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/comments')) {
+          requests.push(request)
+          if (requests.length === 1) return new Response('', { status: 502 })
+          if (requests.length === 2)
+            return Response.json(
+              {
+                error: {
+                  code: 'duplicate_reply',
+                  message: 'a reply of this kind already exists (c:000010)',
+                },
+              },
+              { status: 409 },
+            )
+          return Response.json({
+            issue: base.collection[0],
+            comment: {
+              uid: '01J00000000000000000000010',
+              author: 'worker',
+              body: 'Answer',
+              created_at: '2026-08-01T12:00:01Z',
+            },
+            changed: false,
+            event: null,
+          })
+        }
+        return Response.json(accepted, { headers: { ETag: '"snapshot-typed"' } })
+      }),
+    )
+    render(App)
+    await fireEvent.click(await screen.findByRole('button', { name: 'Reply' }))
+    await fireEvent.input(await screen.findByRole('textbox', { name: 'Reply evidence' }), {
+      target: { value: 'Answer' },
+    })
+    await fireEvent.click(screen.getByRole('button', { name: 'Add comment' }))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    const send = screen.getByRole('button', { name: 'Add comment' }) as HTMLButtonElement
+    await waitFor(() => expect(send.disabled).toBe(false))
+    await fireEvent.click(send)
+    await waitFor(() => expect(requests).toHaveLength(2))
+    await fireEvent.click(await screen.findByRole('button', { name: 'Send another reply' }))
+    await waitFor(() => expect(requests).toHaveLength(3))
+    const keys = requests.map((r) => r.headers.get('Idempotency-Key'))
+    expect(keys[0]).toBeTruthy()
+    expect(keys[1]).toBe(keys[0])
+    expect(keys[2]).not.toBe(keys[0])
+    expect(await requests[0]!.json()).toMatchObject({
+      body: 'Answer',
+      reply_to: targetUID,
+      kind: 'reply',
+      force: false,
+    })
+    expect(await requests[2]!.json()).toMatchObject({
+      reply_to: targetUID,
+      kind: 'reply',
+      force: true,
+    })
+  })
+
   it('preserves a comment draft during transparent session renewal', async () => {
     history.replaceState(null, '', '/kata?issue=01J00000000000000000000001')
     sessionStorage.setItem(
@@ -2104,39 +2224,384 @@ describe('App', () => {
     )
   })
 
-  it('keeps accepted authority visible while live updates reconnect', async () => {
+  it('refreshes and fences authority when live updates disconnect', async () => {
     history.replaceState(null, '', '/kata?view=all-open#direct=1')
     sessionStorage.setItem(
       'kata.web.session.v1',
       JSON.stringify({ session: 'tab-session', csrf: 'tab-csrf' }),
     )
-    const accepted = snapshot()
-    accepted.capabilities.updates = 'sse'
+    const initial = snapshot()
+    initial.capabilities.updates = 'sse'
+    Object.assign(initial.capabilities, { token_audit_read: true, access_admin: true })
+    const refreshed = snapshot()
+    Object.assign(refreshed.capabilities, { token_audit_read: true, access_admin: true })
+    refreshed.cursor = initial.cursor
+    refreshed.catalog.push({
+      project: {
+        active: true,
+        id: 8,
+        uid: '01J00000000000000000000003',
+        name: 'shared-project',
+        metadata: {},
+        revision: 1,
+        created_at: '2026-08-01T09:00:00.000Z',
+      },
+      stats: { Open: 1, Closed: 0, LastEventAt: '2026-08-01T11:00:00.000Z' },
+    })
+    refreshed.collection.push({
+      ...refreshed.collection[0]!,
+      id: 2,
+      uid: '01J00000000000000000000004',
+      project_id: 8,
+      project_uid: '01J00000000000000000000003',
+      project_name: 'shared-project',
+      short_id: 'b2',
+      qualified_id: 'shared-project#b2',
+      title: 'Previously existing shared issue',
+    })
+    const snapshotRequests: Request[] = []
+    let completeRefresh: ((response: Response) => void) | undefined
+    const refreshResponse = new Promise<Response>((resolve) => {
+      completeRefresh = resolve
+    })
+    let streamRequests = 0
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        if (String(input).includes('/api/v1/events/stream')) {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestOf(input, init)
+        const target = new URL(request.url)
+        if (target.pathname === '/api/v1/events/stream') {
+          streamRequests += 1
           return new Response(
             new ReadableStream({
               start(controller) {
-                controller.close()
+                if (streamRequests === 1) controller.close()
               },
             }),
             { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
           )
         }
-        return new Response(JSON.stringify(accepted), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json', ETag: '"snapshot-1"' },
-        })
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
+        if (target.pathname === '/api/v1/ui/references') {
+          return Response.json({ issues: [], labels: [], owners: [], projects: [] })
+        }
+        if (target.pathname === '/api/v1/ui/snapshot') {
+          snapshotRequests.push(request)
+          if (snapshotRequests.length === 1) {
+            return Response.json(initial, { headers: { ETag: '"snapshot-1"' } })
+          }
+          if (snapshotRequests.length === 2) return refreshResponse
+          return Response.json(refreshed, { headers: { ETag: '"snapshot-2"' } })
+        }
+        throw new Error(`Unexpected request ${target.pathname}`)
       }),
     )
 
     render(App)
 
     expect(await screen.findByRole('button', { name: /Example issue/ })).not.toBeNull()
-    expect(await screen.findByRole('status', { name: 'Kata daemon status' })).not.toBeNull()
+    await waitFor(() => expect(snapshotRequests).toHaveLength(2))
+    expect(snapshotRequests[1]?.headers.has('If-None-Match')).toBe(false)
+    expect((screen.getByRole('button', { name: 'New task' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+    expect(screen.queryByRole('button', { name: /Previously existing shared issue/ })).toBeNull()
+
+    completeRefresh?.(Response.json(refreshed, { headers: { ETag: '"snapshot-2"' } }))
+    expect(
+      await screen.findByRole('button', { name: /Previously existing shared issue/ }),
+    ).not.toBeNull()
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: 'New task' }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    )
+    await waitFor(() => expect(streamRequests).toBeGreaterThanOrEqual(2), { timeout: 5000 })
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'Active connection' }).textContent).toContain(
+        'Credential: Connected',
+      ),
+    )
+    await fireEvent.click(screen.getByRole('button', { name: 'Credentials' }))
+    expect(await screen.findByRole('heading', { name: 'Credentials' })).not.toBeNull()
+    expect(await screen.findByRole('heading', { name: 'Teams and visibility' })).not.toBeNull()
+  }, 15_000)
+
+  it('restores owner settings after a quiet SSE reconnect', async () => {
+    history.replaceState(null, '', '/kata?view=credentials#direct=1')
+    sessionStorage.setItem(
+      'kata.web.session.v1',
+      JSON.stringify({ session: 'admin-session', csrf: 'admin-csrf' }),
+    )
+    const current = snapshot()
+    current.capabilities.updates = 'sse'
+    Object.assign(current.capabilities, { token_audit_read: true, access_admin: true })
+    let streamRequests = 0
+    const snapshotRequests: Request[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestOf(input, init)
+        const target = new URL(request.url)
+        if (target.pathname === '/api/v1/events/stream') {
+          streamRequests += 1
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                if (streamRequests === 1) controller.close()
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+          )
+        }
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
+        if (target.pathname === '/api/v1/ui/references') {
+          return Response.json({ issues: [], labels: [], owners: [], projects: [] })
+        }
+        if (target.pathname === '/api/v1/ui/snapshot') {
+          snapshotRequests.push(request)
+          return Response.json(current, {
+            headers: { ETag: `"snapshot-${snapshotRequests.length}"` },
+          })
+        }
+        if (target.pathname === '/api/v1/tokens') {
+          return Response.json({ observed_at: '2026-08-01T12:00:00Z', tokens: [] })
+        }
+        throw new Error(`Unexpected request ${request.method} ${target.pathname}`)
+      }),
+    )
+
+    render(App)
+
+    expect(await screen.findByRole('heading', { name: 'Credentials' })).not.toBeNull()
+    await waitFor(() => expect(snapshotRequests.length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => expect(streamRequests).toBeGreaterThanOrEqual(2))
+    expect(await screen.findByRole('heading', { name: 'Teams and visibility' })).not.toBeNull()
   })
+
+  it('refreshes authority when the initial SSE connection opens', async () => {
+    history.replaceState(null, '', '/kata?view=all-open#direct=1')
+    sessionStorage.setItem(
+      'kata.web.session.v1',
+      JSON.stringify({ session: 'tab-session', csrf: 'tab-csrf' }),
+    )
+    const initial = snapshot()
+    initial.capabilities.updates = 'sse'
+    initial.catalog.push({
+      project: {
+        active: true,
+        id: 8,
+        uid: '01J00000000000000000000003',
+        name: 'shared-project',
+        metadata: {},
+        revision: 1,
+        created_at: '2026-08-01T09:00:00.000Z',
+      },
+      stats: { Open: 1, Closed: 0, LastEventAt: '2026-08-01T11:00:00.000Z' },
+    })
+    initial.collection.push({
+      ...initial.collection[0]!,
+      id: 2,
+      uid: '01J00000000000000000000004',
+      project_id: 8,
+      project_uid: '01J00000000000000000000003',
+      project_name: 'shared-project',
+      short_id: 'b2',
+      qualified_id: 'shared-project#b2',
+      title: 'Revoked project issue',
+    })
+    const refreshed = snapshot()
+    refreshed.capabilities.updates = 'sse'
+    refreshed.cursor = initial.cursor
+
+    const snapshotRequests: Request[] = []
+    let completeInitialStream: ((response: Response) => void) | undefined
+    const initialStream = new Promise<Response>((resolve) => {
+      completeInitialStream = resolve
+    })
+    let initialStreamSignal: AbortSignal | undefined
+    let streamRequests = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestOf(input, init)
+        const target = new URL(request.url)
+        if (target.pathname === '/api/v1/events/stream') {
+          streamRequests += 1
+          if (streamRequests === 1) {
+            initialStreamSignal = init?.signal ?? undefined
+            return initialStream
+          }
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+          )
+        }
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
+        if (target.pathname === '/api/v1/ui/references') {
+          return Response.json({ issues: [], labels: [], owners: [], projects: [] })
+        }
+        if (target.pathname === '/api/v1/ui/snapshot') {
+          snapshotRequests.push(request)
+          return Response.json(snapshotRequests.length === 1 ? initial : refreshed, {
+            headers: { ETag: `"snapshot-${snapshotRequests.length}"` },
+          })
+        }
+        throw new Error(`Unexpected request ${request.method} ${target.pathname}`)
+      }),
+    )
+
+    render(App)
+
+    expect(await screen.findByRole('button', { name: /Revoked project issue/ })).not.toBeNull()
+    await waitFor(() => expect(snapshotRequests).toHaveLength(1))
+    await waitFor(() => expect(streamRequests).toBe(1))
+
+    completeInitialStream?.(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            // The response stays open until App unmount aborts its request.
+            initialStreamSignal?.addEventListener('abort', () => controller.close(), { once: true })
+            controller.enqueue(new TextEncoder().encode(': connected\n\n'))
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ),
+    )
+
+    await waitFor(() => expect(snapshotRequests).toHaveLength(2))
+    expect(snapshotRequests[1]?.headers.has('If-None-Match')).toBe(false)
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Revoked project issue/ })).toBeNull(),
+    )
+  })
+
+  it('refreshes membership after an SSE reconnect opens', async () => {
+    history.replaceState(null, '', '/kata?view=all-open#direct=1')
+    sessionStorage.setItem(
+      'kata.web.session.v1',
+      JSON.stringify({ session: 'tab-session', csrf: 'tab-csrf' }),
+    )
+    const initial = snapshot()
+    initial.capabilities.updates = 'sse'
+    const refreshed = snapshot()
+    refreshed.capabilities.updates = 'sse'
+    refreshed.cursor = initial.cursor
+    refreshed.catalog.push({
+      project: {
+        active: true,
+        id: 8,
+        uid: '01J00000000000000000000003',
+        name: 'shared-project',
+        metadata: {},
+        revision: 1,
+        created_at: '2026-08-01T09:00:00.000Z',
+      },
+      stats: { Open: 1, Closed: 0, LastEventAt: '2026-08-01T11:00:00.000Z' },
+    })
+    refreshed.collection.push({
+      ...refreshed.collection[0]!,
+      id: 2,
+      uid: '01J00000000000000000000004',
+      project_id: 8,
+      project_uid: '01J00000000000000000000003',
+      project_name: 'shared-project',
+      short_id: 'b2',
+      qualified_id: 'shared-project#b2',
+      title: 'Previously existing shared issue',
+    })
+
+    const snapshotRequests: Request[] = []
+    let completeDisconnectRefresh: ((response: Response) => void) | undefined
+    const disconnectRefresh = new Promise<Response>((resolve) => {
+      completeDisconnectRefresh = resolve
+    })
+    let completeReconnectRefresh: ((response: Response) => void) | undefined
+    const reconnectRefresh = new Promise<Response>((resolve) => {
+      completeReconnectRefresh = resolve
+    })
+    let completeReconnectedStream: ((response: Response) => void) | undefined
+    const reconnectedStream = new Promise<Response>((resolve) => {
+      completeReconnectedStream = resolve
+    })
+    let streamRequests = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestOf(input, init)
+        const target = new URL(request.url)
+        if (target.pathname === '/api/v1/events/stream') {
+          streamRequests += 1
+          if (streamRequests === 1) {
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.close()
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+            )
+          }
+          if (streamRequests === 2) return reconnectedStream
+          return new Response(new ReadableStream(), {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          })
+        }
+        if (target.pathname === '/api/v1/ui/telemetry') return telemetryAccepted()
+        if (target.pathname === '/api/v1/ui/references') {
+          return Response.json({ issues: [], labels: [], owners: [], projects: [] })
+        }
+        if (target.pathname === '/api/v1/ui/snapshot') {
+          snapshotRequests.push(request)
+          if (snapshotRequests.length === 1) {
+            return Response.json(initial, { headers: { ETag: '"snapshot-1"' } })
+          }
+          if (snapshotRequests.length === 2) return disconnectRefresh
+          if (snapshotRequests.length === 3) return reconnectRefresh
+          return Response.json(refreshed, {
+            headers: { ETag: `"snapshot-${snapshotRequests.length}"` },
+          })
+        }
+        throw new Error(`Unexpected request ${request.method} ${target.pathname}`)
+      }),
+    )
+
+    render(App)
+
+    expect(await screen.findByRole('button', { name: /Example issue/ })).not.toBeNull()
+    await waitFor(() => expect(snapshotRequests).toHaveLength(2))
+    completeDisconnectRefresh?.(Response.json(initial, { headers: { ETag: '"snapshot-2"' } }))
+    await waitFor(() => expect(streamRequests).toBeGreaterThanOrEqual(2), { timeout: 5000 })
+
+    completeReconnectedStream?.(
+      new Response(new ReadableStream(), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    )
+    await waitFor(() => expect(snapshotRequests).toHaveLength(3))
+    expect(snapshotRequests[2]?.headers.has('If-None-Match')).toBe(false)
+    expect((screen.getByRole('button', { name: 'New task' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+    expect(screen.queryByRole('button', { name: /Previously existing shared issue/ })).toBeNull()
+
+    completeReconnectRefresh?.(Response.json(refreshed, { headers: { ETag: '"snapshot-3"' } }))
+    expect(
+      await screen.findByRole('button', { name: /Previously existing shared issue/ }),
+    ).not.toBeNull()
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: 'New task' }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    )
+  }, 15_000)
 
   it('keeps a reset refresh unconditional across 401 and transparent reauthentication', async () => {
     history.replaceState(null, '', '/kata#direct=1')
@@ -2217,6 +2682,325 @@ describe('App', () => {
     )
   })
 
+  describe('app_opened telemetry', () => {
+    const telemetryPath = '/api/v1/ui/telemetry'
+    const storeSession = (session = 'tab-session', csrf = 'tab-csrf') =>
+      sessionStorage.setItem('kata.web.session.v1', JSON.stringify({ session, csrf }))
+    const references = () => Response.json({ issues: [], labels: [], owners: [], projects: [] })
+
+    function expectServingDaemonPost(
+      request: Request | undefined,
+      session = 'tab-session',
+      csrf = 'tab-csrf',
+    ) {
+      expect(request).toBeDefined()
+      expect(request!.method).toBe('POST')
+      expect(new URL(request!.url).pathname).toBe(telemetryPath)
+      expect(request!.headers.get('X-Kata-Web-Daemon')).toBeNull()
+      expect(request!.headers.get('X-Kata-Web-Session')).toBe(session)
+      expect(request!.headers.get('X-Kata-CSRF')).toBe(csrf)
+    }
+
+    it('reports accepted screens through the serving daemon and revisits on UTC focus', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-02T12:00:00Z'))
+      storeSession()
+      const telemetry: Request[] = []
+      let rejectedSnapshots = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestOf(input, init)
+          const target = new URL(request.url)
+          const path = target.pathname
+          if (
+            path.endsWith('/api/v1/ui/snapshot') &&
+            target.searchParams.get('view') === 'delegated'
+          ) {
+            rejectedSnapshots += 1
+            return new Response('', { status: 503 })
+          }
+          if (path === telemetryPath) {
+            if ((await request.clone().json()).event === 'screen_viewed') telemetry.push(request)
+            return telemetryAccepted()
+          }
+          if (path === '/api/v1/ui/daemons') return Response.json(daemonRoster())
+          if (path.endsWith('/api/v1/ui/references')) return references()
+          return Response.json(snapshot(), { headers: { ETag: '"snapshot-1"' } })
+        }),
+      )
+      render(App)
+      await waitFor(() => expect(telemetry).toHaveLength(1))
+      expectServingDaemonPost(telemetry[0])
+      await expect(telemetry[0]!.clone().json()).resolves.toEqual({
+        event: 'screen_viewed',
+        properties: { screen: 'inbox', surface: 'web' },
+      })
+      history.pushState(null, '', '/kata?view=today')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+      await waitFor(() => expect(telemetry).toHaveLength(2))
+      history.pushState(null, '', '/kata?view=delegated')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+      await waitFor(() => expect(rejectedSnapshots).toBeGreaterThan(0))
+      await tick()
+      expect(telemetry).toHaveLength(2)
+      window.dispatchEvent(new Event('focus'))
+      await tick()
+      expect(telemetry).toHaveLength(2)
+      vi.setSystemTime(new Date('2026-10-03T00:00:30Z'))
+      window.dispatchEvent(new Event('focus'))
+      await waitFor(() => expect(telemetry).toHaveLength(3))
+    })
+
+    it('reports app_opened once on load', async () => {
+      let now = 0
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+      storeSession()
+      const telemetry: Request[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestOf(input, init)
+          const path = new URL(request.url).pathname
+          if (path === telemetryPath) {
+            const event = (await request.clone().json()).event
+            if (event === 'app_opened' || event === 'session_ended') telemetry.push(request)
+            return telemetryAccepted()
+          }
+          if (path === '/api/v1/ui/daemons') return Response.json(daemonRoster())
+          if (path.endsWith('/api/v1/ui/references')) return references()
+          return Response.json(snapshot(), { headers: { ETag: '"snapshot-1"' } })
+        }),
+      )
+
+      render(App)
+
+      expect(await screen.findByRole('region', { name: 'Kata workspace' })).not.toBeNull()
+      expect(telemetry).toHaveLength(1)
+      expectServingDaemonPost(telemetry[0])
+      await expect(telemetry[0]!.json()).resolves.toEqual({
+        event: 'app_opened',
+        properties: { surface: 'web' },
+      })
+      now = 120_000
+      window.dispatchEvent(new Event('pagehide'))
+      await waitFor(() => expect(telemetry).toHaveLength(2))
+      expectServingDaemonPost(telemetry[1])
+      expect(telemetry[1]!.keepalive).toBe(true)
+      await expect(telemetry[1]!.json()).resolves.toEqual({
+        event: 'session_ended',
+        properties: { surface: 'web', duration_bucket: '1_to_5m' },
+      })
+    })
+
+    it('an anonymous viewer sends no app_opened', async () => {
+      const telemetry: Request[] = []
+      const anonymous = snapshot()
+      anonymous.capabilities.writable = false
+      anonymous.capabilities.actor_policy = 'readonly'
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestOf(input, init)
+          const path = new URL(request.url).pathname
+          if (path === telemetryPath) {
+            telemetry.push(request)
+            return telemetryAccepted()
+          }
+          if (path === '/api/v1/ui/session/local') return new Response('', { status: 404 })
+          if (path === '/api/v1/ui/daemons') return Response.json(daemonRoster())
+          if (path.endsWith('/api/v1/ui/references')) return references()
+          return Response.json(anonymous, { headers: { ETag: '"snapshot-1"' } })
+        }),
+      )
+
+      render(App)
+
+      expect(await screen.findByRole('region', { name: 'Kata workspace' })).not.toBeNull()
+      window.dispatchEvent(new Event('focus'))
+      await tick()
+      expect(sessionStorage.getItem('kata.web.session.v1')).toBeNull()
+      window.dispatchEvent(new Event('pagehide'))
+      expect(telemetry).toHaveLength(0)
+    })
+
+    it('reports app_opened with the renewed session when the stored one is stale', async () => {
+      let now = 0
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+      storeSession('stale-session', 'stale-csrf')
+      const telemetry: Request[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestOf(input, init)
+          const path = new URL(request.url).pathname
+          if (path === telemetryPath) {
+            const event = (await request.clone().json()).event
+            if (event === 'app_opened' || event === 'session_ended') telemetry.push(request)
+          }
+          if (path === '/api/v1/ui/session/local') {
+            return Response.json({
+              session: 'local-session',
+              csrf: 'local-csrf',
+              return_path: '/kata',
+              writable: true,
+              updates: 'poll',
+              actor_policy: 'request',
+            })
+          }
+          if (request.headers.get('X-Kata-Web-Session') === 'stale-session') {
+            return Response.json(
+              { status: 401, error: { code: 'unauthorized', message: 'session expired' } },
+              { status: 401, headers: { 'X-Kata-Web-Authentication': 'loopback' } },
+            )
+          }
+          if (path === telemetryPath) return telemetryAccepted()
+          if (path === '/api/v1/ui/daemons') return Response.json(daemonRoster())
+          if (path.endsWith('/api/v1/ui/references')) return references()
+          return Response.json(snapshot(), { headers: { ETag: '"snapshot-1"' } })
+        }),
+      )
+
+      render(App)
+
+      expect(await screen.findByRole('region', { name: 'Kata workspace' })).not.toBeNull()
+      await waitFor(() => expect(telemetry).toHaveLength(2))
+      expectServingDaemonPost(telemetry[1], 'local-session', 'local-csrf')
+      now = 120_000
+      window.dispatchEvent(new Event('pagehide'))
+      await waitFor(() => expect(telemetry).toHaveLength(3))
+      expectServingDaemonPost(telemetry[2], 'local-session', 'local-csrf')
+    })
+
+    it('a background refresh after UTC midnight is not an opening', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-02T12:00:00Z'))
+      history.replaceState(null, '', '/kata#direct=1')
+      storeSession()
+      const live = snapshot()
+      live.capabilities.updates = 'sse'
+      const telemetry: Request[] = []
+      let snapshotReads = 0
+      let stream: ReadableStreamDefaultController<Uint8Array> | undefined
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestOf(input, init)
+          const path = new URL(request.url).pathname
+          if (path === telemetryPath) {
+            if ((await request.clone().json()).event === 'app_opened') telemetry.push(request)
+            return telemetryAccepted()
+          }
+          if (path === '/api/v1/events/stream') {
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  stream = controller
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+            )
+          }
+          if (path === '/api/v1/ui/references') return references()
+          snapshotReads += 1
+          live.cursor = 11 + snapshotReads
+          return Response.json(live, { headers: { ETag: `"snapshot-${snapshotReads}"` } })
+        }),
+      )
+
+      render(App)
+
+      expect(await screen.findByRole('region', { name: 'Kata workspace' })).not.toBeNull()
+      await waitFor(() => expect(stream).toBeDefined())
+      expect(telemetry).toHaveLength(1)
+      const readsBeforeMidnight = snapshotReads
+
+      vi.setSystemTime(new Date('2026-10-03T00:00:30Z'))
+      stream!.enqueue(new TextEncoder().encode('id: 13\nevent: issue.updated\ndata: {}\n\n'))
+      await waitFor(() => expect(snapshotReads).toBeGreaterThan(readsBeforeMidnight))
+      await tick()
+      expect(telemetry).toHaveLength(1)
+
+      window.dispatchEvent(new Event('focus'))
+      await waitFor(() => expect(telemetry).toHaveLength(2))
+      expectServingDaemonPost(telemetry[1])
+    })
+  })
+
+  describe('completed issue action telemetry', () => {
+    for (const action of ['create', 'close'] as const) {
+      it(`${action} sends its surface with the mutation`, async () => {
+        history.replaceState(null, '', '/kata?issue=01J00000000000000000000001#direct=1')
+        sessionStorage.setItem(
+          'kata.web.session.v1',
+          JSON.stringify({ session: 'tab-session', csrf: 'tab-csrf' }),
+        )
+        const base = snapshot()
+        base.catalog[0]!.project.metadata.role = 'inbox'
+        const accepted = {
+          ...base,
+          selected: {
+            state: 'available',
+            issue: base.collection[0],
+            comments: [],
+            labels: [],
+            links: [],
+            history: [],
+          },
+        }
+        const actionRequests: Request[] = []
+        let writes = 0
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const request = requestOf(input, init)
+            const path = new URL(request.url).pathname
+            if (path === '/api/v1/ui/telemetry') {
+              return telemetryAccepted()
+            }
+            if (
+              request.method === 'POST' &&
+              (path.endsWith('/issues') || path.endsWith('/close'))
+            ) {
+              actionRequests.push(request)
+              writes += 1
+              return Response.json({ changed: true })
+            }
+            if (path === '/api/v1/ui/daemons') return Response.json(daemonRoster())
+            if (path.endsWith('/references'))
+              return Response.json({ issues: [], labels: [], owners: [], projects: [] })
+            return Response.json(accepted, { headers: { ETag: '"snapshot-1"' } })
+          }),
+        )
+        render(App)
+        if (action === 'create') {
+          await fireEvent.click(await screen.findByRole('button', { name: 'New task' }))
+          await fireEvent.input(await screen.findByRole('textbox', { name: 'Quick capture' }), {
+            target: { value: 'Example task' },
+          })
+          await fireEvent.click(screen.getByRole('button', { name: 'Capture' }))
+        } else {
+          await fireEvent.click(await screen.findByRole('button', { name: 'Edit issue' }))
+          await fireEvent.click(await screen.findByRole('button', { name: 'Complete' }))
+          await fireEvent.input(screen.getByRole('textbox', { name: 'Evidence value' }), {
+            target: { value: 'go test ./example' },
+          })
+          await fireEvent.input(screen.getByRole('textbox', { name: /Completion note/ }), {
+            target: { value: 'Completed the requested work and checked the result.' },
+          })
+          const buttons = screen.getAllByRole('button', { name: 'Complete' })
+          await fireEvent.click(buttons[buttons.length - 1]!)
+        }
+        await waitFor(() => expect(writes).toBe(1))
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+        expect(actionRequests).toHaveLength(1)
+        expect(actionRequests[0]!.headers.get('X-Kata-Surface')).toBe('web')
+      })
+    }
+  })
+
   it('replaces the shell with a visible version mismatch after guarded recovery fails', async () => {
     render(App)
 
@@ -2290,4 +3074,14 @@ function daemonRoster() {
       },
     ],
   }
+}
+
+function requestOf(input: RequestInfo | URL, init?: RequestInit): Request {
+  return input instanceof Request
+    ? input
+    : new Request(new URL(String(input), window.location.origin), init)
+}
+
+function telemetryAccepted(): Response {
+  return Response.json({ status: 'disabled' }, { status: 202 })
 }

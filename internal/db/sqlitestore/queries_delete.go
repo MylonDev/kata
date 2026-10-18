@@ -32,6 +32,12 @@ func (d *Store) softDeleteIssue(ctx context.Context, issueID int64, actor string
 	if err != nil {
 		return db.Issue{}, nil, false, err
 	}
+	if err := db.CheckProjectAccessTransaction(ctx, tx, issue.ProjectUID); err != nil {
+		return db.Issue{}, nil, false, err
+	}
+	if err := ensureProjectWritableTx(ctx, tx, issue.ProjectID); err != nil {
+		return db.Issue{}, nil, false, err
+	}
 	if issue.DeletedAt != nil {
 		// Already soft-deleted; commit so the read-side state is consistent
 		// (no-op tx is harmless) and return the no-op envelope.
@@ -114,6 +120,12 @@ func (d *Store) restoreIssue(ctx context.Context, issueID int64, actor string) (
 
 	issue, projectName, err := lookupIssueIncludingDeleted(ctx, tx, issueID)
 	if err != nil {
+		return db.Issue{}, nil, false, err
+	}
+	if err := db.CheckProjectAccessTransaction(ctx, tx, issue.ProjectUID); err != nil {
+		return db.Issue{}, nil, false, err
+	}
+	if err := ensureProjectWritableTx(ctx, tx, issue.ProjectID); err != nil {
 		return db.Issue{}, nil, false, err
 	}
 	if issue.DeletedAt == nil {
@@ -224,11 +236,26 @@ func (d *Store) purgeIssue(ctx context.Context, issueID int64, actor string, rea
 	if err != nil {
 		return db.PurgeLog{}, err
 	}
+	// The issue may have moved since the request resolved it; its current
+	// project decides whether the caller may purge it.
+	if err := db.CheckProjectAccessTransaction(ctx, conn, issue.ProjectUID); err != nil {
+		return db.PurgeLog{}, err
+	}
 	if err := ensureFederatedSpokeUnsupportedTx(ctx, conn, issue.ProjectID); err != nil {
 		return db.PurgeLog{}, err
 	}
 	if err := rejectActiveExternalRootIssuePurge(ctx, conn, issue.ID); err != nil {
 		return db.PurgeLog{}, err
+	}
+	// A live peer's emitted manifest must remain downloadable. Permanent
+	// deletion waits for its current namespace to drain; retired epochs and
+	// explicitly revoked enrollments retain history without blocking cleanup.
+	var pendingRelay bool
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM federation_relay_outbox o JOIN federation_enrollments e ON e.relay_binding_uid=o.binding_uid AND e.relay_reset_epoch=o.reset_epoch WHERE o.project_uid=? AND o.acknowledged=0 AND e.revoked_at IS NULL) OR EXISTS(SELECT 1 FROM federation_enrollments e JOIN meta m ON m.key=? || e.relay_binding_uid WHERE e.project_id=? AND e.revoked_at IS NULL AND json_extract(m.value,'$.translation.authority.epoch')>e.relay_reset_epoch)`, issue.ProjectUID, db.RelayResetMetadataPrefix+issue.ProjectUID+".", issue.ProjectID).Scan(&pendingRelay); err != nil {
+		return db.PurgeLog{}, err
+	}
+	if pendingRelay {
+		return db.PurgeLog{}, db.ErrFederationResetBlockedByPendingPush
 	}
 
 	purgeLogID, err := purgeCascade(ctx, conn, issue, projectName, actor, reason, d.instanceUID)
@@ -349,20 +376,32 @@ func purgeCascade(
 		return 0, fmt.Errorf("delete events: %w", err)
 	}
 	// Detach surviving aggregated issue.links_changed events from the
-	// purged issue: NULL the envelope's related_issue_id (and its UID
-	// counterpart) so the FK constraint passes when the issues row is
-	// deleted in step 7. The payload retains the peer's UID as an
-	// orphan reference — that is the intentional preservation per
-	// kata#1's design call. Iteration-16 set related_issue_id for
-	// single-peer aggregated events; without this UPDATE the FK would
-	// block purge.
+	// purged issue by clearing only the local FK. The UID is part of the
+	// immutable event envelope and may also be covered by a retained root
+	// receipt, so preserve it as historical evidence.
 	if _, err := c.ExecContext(ctx,
 		`UPDATE events
-		    SET related_issue_id  = NULL,
-		        related_issue_uid = NULL
+		    SET related_issue_id = NULL
 		  WHERE related_issue_id = ? AND type = 'issue.links_changed'`,
 		issue.ID); err != nil {
 		return 0, fmt.Errorf("detach aggregated event peer refs: %w", err)
+	}
+	// A source reply keeps its original event, payload and portable target UID.
+	// Only the local FK is detached, so the event's content hash is unchanged.
+	if _, err := c.ExecContext(ctx,
+		`UPDATE events SET related_issue_id = NULL WHERE related_issue_id = ? AND type = 'issue.commented'`, issue.ID); err != nil {
+		return 0, fmt.Errorf("detach reply target issue: %w", err)
+	}
+	// Signed receipts stay: their per-project sequence is a relay cursor, and
+	// removing one would let the next receipt reuse a delivered sequence.
+	if _, err := c.ExecContext(ctx, `DELETE FROM federation_entity_provenance
+		 WHERE project_uid = ? AND ((kind = 'issue' AND entity_uid = ?)
+		    OR (kind = 'comment' AND entity_uid IN (SELECT uid FROM comments WHERE issue_id = ?)))`,
+		issue.ProjectUID, issue.UID, issue.ID); err != nil {
+		return 0, fmt.Errorf("delete entity attribution: %w", err)
+	}
+	if err := deleteIssuePendingCreationTx(ctx, c, issue); err != nil {
+		return 0, fmt.Errorf("delete pending creation intent: %w", err)
 	}
 	if _, err := c.ExecContext(ctx,
 		`DELETE FROM comments WHERE issue_id = ?`, issue.ID); err != nil {
@@ -400,10 +439,10 @@ func purgeCascade(
 		}
 	}
 
-	// Step 5: reserve an SSE cursor by bumping sqlite_sequence past the
-	// max events.id we just deleted. Skip when no events were attached —
-	// there's nothing for subscribers to skip past.
-	reservedCursor, err := reserveEventSequence(ctx, c, minEventID.Valid)
+	// Step 5: every successful issue purge changes snapshot-visible state, including
+	// imported comments whose source events are absent. Reserve a reset cursor
+	// unconditionally so clients cannot reuse a snapshot that still contains it.
+	reservedCursor, err := reserveEventSequence(ctx, c, true)
 	if err != nil {
 		return 0, err
 	}
@@ -436,6 +475,11 @@ func purgeCascade(
 		return 0, fmt.Errorf("purge_log last id: %w", err)
 	}
 
+	// Portable vectors are issue data even when their input is stale.
+	if _, err := c.ExecContext(ctx, `DELETE FROM federation_embedding_artifacts WHERE issue_uid=?`, issue.UID); err != nil {
+		return 0, fmt.Errorf("delete embedding artifacts: %w", err)
+	}
+
 	// Step 7: remove the issues row. The issues_ad_fts trigger fires here and
 	// drops the matching FTS row.
 	if _, err := c.ExecContext(ctx,
@@ -456,21 +500,33 @@ func scanCount(ctx context.Context, r sqlReader, query string, args ...any) (int
 
 // reserveEventSequence advances sqlite_sequence for events past the current
 // seq, returning the reserved value as a NullInt64 (Valid=true) for the
-// purge_log row's purge_reset_after_event_id column. If hadEvents is false,
-// returns NullInt64{} so the column stores NULL (no SSE reset needed).
-func reserveEventSequence(ctx context.Context, c connExec, hadEvents bool) (sql.NullInt64, error) {
-	if !hadEvents {
+// purge_log row's purge_reset_after_event_id column. It creates the sequence
+// row when no event has ever been inserted. If needsReset is false, it returns
+// NullInt64{} so the column stores NULL (no SSE reset needed).
+func reserveEventSequence(ctx context.Context, c connExec, needsReset bool) (sql.NullInt64, error) {
+	if !needsReset {
 		return sql.NullInt64{}, nil
 	}
 	var seq int64
 	if err := c.QueryRowContext(ctx,
-		`SELECT seq FROM sqlite_sequence WHERE name = 'events'`).Scan(&seq); err != nil {
+		`SELECT COALESCE(MAX(seq), 0) FROM sqlite_sequence WHERE name = 'events'`).Scan(&seq); err != nil {
 		return sql.NullInt64{}, fmt.Errorf("read events seq: %w", err)
 	}
 	seq++
-	if _, err := c.ExecContext(ctx,
-		`UPDATE sqlite_sequence SET seq = ? WHERE name = 'events'`, seq); err != nil {
+	res, err := c.ExecContext(ctx,
+		`UPDATE sqlite_sequence SET seq = ? WHERE name = 'events'`, seq)
+	if err != nil {
 		return sql.NullInt64{}, fmt.Errorf("bump events seq: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return sql.NullInt64{}, fmt.Errorf("count updated events seq: %w", err)
+	}
+	if rows == 0 {
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO sqlite_sequence(name, seq) VALUES('events', ?)`, seq); err != nil {
+			return sql.NullInt64{}, fmt.Errorf("create events seq: %w", err)
+		}
 	}
 	return sql.NullInt64{Int64: seq, Valid: true}, nil
 }
@@ -505,14 +561,10 @@ func scanPurgeLog(ctx context.Context, r sqlReader, id int64) (db.PurgeLog, erro
 // lookupIssueIncludingDeleted fetches an issue + its project's name for
 // event snapshotting. Unlike lookupIssueForEvent (queries.go), this version
 // does NOT filter out soft-deleted rows — it's the right primitive for the
-// destructive ladder verbs that need to operate on deleted issues.
+// destructive ladder verbs that need to operate on deleted issues. Each verb
+// applies its own federation gate.
 func lookupIssueIncludingDeleted(ctx context.Context, r sqlReader, issueID int64) (db.Issue, string, error) {
-	const q = `
-		SELECT i.id, i.uid, i.project_id, p.uid, i.short_id, i.title, i.body, i.status,
-		       i.closed_reason, i.owner, i.assignment_expires_on, i.priority, i.author,
-		       i.metadata, i.revision,
-		       i.recurrence_id, i.occurrence_key,
-		       i.created_at, i.updated_at, i.closed_at, i.deleted_at, p.name
+	const q = `SELECT ` + issueColumns + `, p.name
 		FROM issues i
 		JOIN projects p ON p.id = i.project_id
 		WHERE i.id = ?`
@@ -525,16 +577,16 @@ func lookupIssueIncludingDeleted(ctx context.Context, r sqlReader, issueID int64
 			&i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author,
 			&i.Metadata, &i.Revision,
 			&i.RecurrenceID, &i.OccurrenceKey,
-			&i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &projectName)
+			&i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &i.AttributionView, &projectName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Issue{}, "", db.ErrNotFound
 	}
 	if err != nil {
 		return db.Issue{}, "", fmt.Errorf("lookup issue including deleted: %w", err)
 	}
-	if err := ensureProjectWritableTx(ctx, r, i.ProjectID); err != nil {
-		return db.Issue{}, "", err
-	}
+	handle, _ := db.IssueTeammate(i.Metadata)
+	i.SourceFallback(i.Author, handle)
+	db.RecordExposedIssue(ctx, i.ID)
 	return i, projectName, nil
 }
 
@@ -543,7 +595,8 @@ func lookupIssueIncludingDeleted(ctx context.Context, r sqlReader, issueID int64
 // this issue, plus per-link events (issue.linked / issue.unlinked) whose
 // related_issue_id pointed at this issue.
 //
-// Aggregated issue.links_changed events are excluded from the
+// Reply issue.commented events retain their source history and portable target.
+// Aggregated issue.links_changed events are also excluded from the
 // related_issue_id delete path even though iteration-16 sets
 // related_issue_id for single-peer edits. Without that exclusion a
 // `kata edit subject --blocks target` would lose subject's link history
@@ -558,7 +611,7 @@ func lookupIssueIncludingDeleted(ctx context.Context, r sqlReader, issueID int64
 // (issue.created with an initial-link to this issue, issue.links_changed
 // with this issue in a *_uids slice) are likewise PRESERVED.
 func purgeEventsCleanupWhere(issue db.Issue) (string, []any) {
-	clause := `(issue_id = ? OR (related_issue_id = ? AND type != 'issue.links_changed'))`
+	clause := `(issue_id = ? OR (related_issue_id = ? AND type NOT IN ('issue.links_changed', 'issue.commented')))`
 	args := []any{issue.ID, issue.ID}
 	return clause, args
 }

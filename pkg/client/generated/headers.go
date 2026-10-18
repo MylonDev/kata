@@ -20,15 +20,18 @@ type PurgeProjectHeaders struct {
 }
 
 type PollFederationProjectEventsHeaders struct {
-	Authorization *string `json:"Authorization,omitempty"`
+	XKataEventFeatures *string `json:"X-Kata-Event-Features,omitempty"`
+	Authorization      *string `json:"Authorization,omitempty"`
 }
 
 type IngestFederationProjectEventsHeaders struct {
-	Authorization *string `json:"Authorization,omitempty"`
+	XKataEventFeatures *string `json:"X-Kata-Event-Features,omitempty"`
+	Authorization      *string `json:"Authorization,omitempty"`
 }
 
 type GetFederationProjectMetadataHeaders struct {
-	Authorization *string `json:"Authorization,omitempty"`
+	XKataEventFeatures *string `json:"X-Kata-Event-Features,omitempty"`
+	Authorization      *string `json:"Authorization,omitempty"`
 }
 
 type RetryFederationQuarantineHeaders struct {
@@ -39,7 +42,30 @@ type SkipFederationQuarantineHeaders struct {
 	XKataConfirm *string `json:"X-Kata-Confirm,omitempty"`
 }
 
+type OfferRelayDeliveriesHeaders struct {
+	Authorization *string `json:"Authorization,omitempty"`
+}
+
+type GetRelayResetHeaders struct {
+	Authorization *string `json:"Authorization,omitempty"`
+}
+
+type AcceptRelayDeliveriesHeaders struct {
+	Authorization *string `json:"Authorization,omitempty"`
+}
+
+type AckRelayDeliveriesHeaders struct {
+	Authorization *string `json:"Authorization,omitempty"`
+}
+
+type DisconnectRelayEnrollmentHeaders struct {
+	Authorization *string `json:"Authorization,omitempty"`
+}
+
 type CreateIssueHeaders struct {
+	// XKataSurface Client interface for action telemetry (web, tui, or cli); other values are ignored.
+	XKataSurface *string `json:"X-Kata-Surface,omitempty"`
+
 	// XKataProjectAlias Workspace alias identity; requires a name: selector
 	XKataProjectAlias *string `json:"X-Kata-Project-Alias,omitempty"`
 
@@ -61,6 +87,8 @@ type ClaimIssueHeaders struct {
 }
 
 type CloseIssueHeaders struct {
+	// XKataSurface Client interface for action telemetry (web, tui, or cli); other values are ignored.
+	XKataSurface   *string `json:"X-Kata-Surface,omitempty"`
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 	IfMatch        *string `json:"If-Match,omitempty"`
 }

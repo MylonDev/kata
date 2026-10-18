@@ -1,8 +1,11 @@
 <script lang="ts">
   import { Button, cleanupTheme, initTheme, setThemeMode } from '@kenn-io/kit-ui'
+  import { startAppOpenedReporting } from '@kenn-io/kit-ui/utils/app-opened'
   import { onMount } from 'svelte'
   import { SvelteMap } from 'svelte/reactivity'
 
+  import { commentRetryIdentity } from './lib/kata/commentRetry'
+  import type { KataCommentReplyIntent } from './lib/kata/types'
   import AppShell from './components/AppShell.svelte'
   import KataDaemonSwitcher from './components/KataDaemonSwitcher.svelte'
   import LaunchHint from './components/LaunchHint.svelte'
@@ -13,6 +16,7 @@
   import {
     addLabel as addLabelRequest,
     assignIssue,
+    captureTelemetryEvent,
     claimIssue as claimIssueRequest,
     closeIssue as closeIssueRequest,
     createComment,
@@ -61,7 +65,7 @@
     RefreshScheduler,
   } from './lib/events/controller'
   import { openEventStream } from './lib/events/sse'
-  import { parseRoute, serializeRoute, type KataRoute } from './lib/router'
+  import { parseRoute, serializeRoute, screenNameForRoute, type KataRoute } from './lib/router'
   import type {
     KataCreateRecurrenceInput,
     KataPatchRecurrenceInput,
@@ -86,6 +90,7 @@
   } from './lib/state/snapshot'
   import { loadPreferences, savePreferences, type Preferences } from './lib/state/preferences'
   import { applicationRoutePath, currentApplicationBaseURL } from './lib/applicationBase'
+  import { startSessionEndedReporting } from './lib/session-ended'
 
   type ShellMode = 'loading' | 'launch' | 'login' | 'route-error' | 'ready'
   type AppRoute = Exclude<KataRoute, { kind: 'route-error' }>
@@ -113,7 +118,7 @@
   let mutationState = $state<MutationState>({ kind: 'idle' })
   let draftFenceGeneration = $state(0)
   let pendingCreate: { title: string; parentIssueUID?: string; key: string } | undefined
-  let pendingComment: { issueUID: string; body: string; key: string } | undefined
+  let pendingComment: { identity: string; key: string } | undefined
   let automaticSessionAttempted: 'loopback' | 'proxy' | undefined
   let advertisedAuthentication: 'loopback' | 'login' | 'proxy' | 'unavailable' | undefined
   let preferences = $state(loadPreferences())
@@ -155,6 +160,64 @@
     rejectCredentialsAndRequireAuthentication,
   )
   setGeneratedFetch(browserFetch)
+  let stopAppOpened: (() => void) | undefined
+  let sessionEnded: ReturnType<typeof startSessionEndedReporting> | undefined
+  // Only a signed-in tab counts as an opening; anonymous viewers send nothing.
+  function reportAppOpened(): void {
+    if (destroyed || loadSessionCredentials() === undefined) return
+    sessionEnded ??= startSessionEndedReporting((duration) =>
+      captureTelemetryEvent(
+        {
+          event: 'session_ended',
+          properties: { surface: 'web', duration_bucket: duration },
+        },
+        { keepalive: true },
+      ),
+    )
+    sessionEnded.resume()
+    stopAppOpened ??= startAppOpenedReporting({
+      route: '/api/v1/ui/telemetry',
+      surface: 'web',
+      storageKey: 'kata.web.app-opened.v1',
+      post: async (_route, event) => {
+        const response = await captureTelemetryEvent(event)
+        if (response.status === 401) restartAppOpenedAfterAuthentication()
+        return response
+      },
+    })
+  }
+  // Stopping before the 401 resolves keeps the day unrecorded; the renewed
+  // session, now or after navigateAfterAuthentication, reports it instead.
+  function restartAppOpenedAfterAuthentication(): void {
+    sessionEnded?.pause()
+    stopAppOpened?.()
+    stopAppOpened = undefined
+    reportAppOpened()
+  }
+  let reportedScreen: string | undefined
+  let reportedScreenDay: string | undefined
+  function reportScreenViewed(visit = false): void {
+    if (destroyed || mode !== 'ready' || !acceptedRoute || !loadSessionCredentials()) return
+    const screen = screenNameForRoute(acceptedRoute)
+    const day = new Date().toISOString().slice(0, 10)
+    if (!screen || (reportedScreen === screen && (reportedScreenDay === day || !visit))) return
+    reportedScreen = screen
+    reportedScreenDay = day
+    void captureTelemetryEvent(
+      { event: 'screen_viewed', properties: { screen, surface: 'web' } },
+      { signal: AbortSignal.timeout(1000) },
+    )
+      .then((response) => {
+        if (response.status >= 400 && reportedScreen === screen && reportedScreenDay === day)
+          reportedScreen = undefined
+      })
+      .catch(() => {
+        if (reportedScreen === screen && reportedScreenDay === day) reportedScreen = undefined
+      })
+  }
+  $effect(() => {
+    reportScreenViewed()
+  })
   const snapshots = new SnapshotController(createUISnapshotRequest(), uiSnapshotIntentKey)
   const mutations = new MutationController({
     authority: () => ({
@@ -164,13 +227,47 @@
     refresh: refreshMutationAuthority,
     onAuthenticationRequired: requireAuthentication,
   })
+  const accessMutations = new MutationController({
+    authority: () => ({
+      canMutate: canAdministerAccess(),
+      actorPolicy: authority?.snapshot?.capabilities.actor_policy ?? 'readonly',
+    }),
+    refresh: async () => {
+      await refreshSnapshot(true)
+      return canAdministerAccess()
+    },
+    onAuthenticationRequired: requireAuthentication,
+  })
+
+  function canAdministerAccess(): boolean {
+    const expiresAt = authority?.snapshot?.capabilities.expires_at
+    return (
+      authority?.snapshot?.capabilities.access_admin === true &&
+      !authority.stale &&
+      !authority.loading &&
+      !authority.authenticationRequired &&
+      !daemonSwitching &&
+      !daemonError &&
+      !liveUpdatesReconnecting &&
+      (!expiresAt || Date.parse(expiresAt) > Date.now()) &&
+      (!activeDaemonID ||
+        daemonInfos.find((daemon) => daemon.id === activeDaemonID)?.local === true)
+    )
+  }
+
   const invalidations = new InvalidationController((full) => refreshSnapshot(full))
   const stream = new EventStreamController({
-    connect: (cursor, signal) => openEventStream(browserFetch, cursor, signal),
+    connect: (cursor, signal, onOpen) => openEventStream(browserFetch, cursor, signal, onOpen),
     onFrame: (frame) => invalidations.frame(frame),
     onAuthenticationRequired: requireAuthentication,
     onState: (state) => {
+      const wasReconnecting = liveUpdatesReconnecting
       liveUpdatesReconnecting = state === 'reconnecting'
+      if (state === 'reconnecting' || (state === 'online' && wasReconnecting)) {
+        invalidations.reconnect()
+      } else if (state === 'online') {
+        invalidations.refreshAll()
+      }
     },
   })
   const scheduler = new RefreshScheduler({
@@ -202,7 +299,10 @@
       scheduler.visibilityChanged(!document.hidden)
       if (!document.hidden && !credentialLoading) void refreshCredentials()
     }
-    const focus = () => scheduler.focused()
+    const focus = () => {
+      scheduler.focused()
+      reportScreenViewed(true)
+    }
     const environment = () => scheduler.environmentChanged()
     const showVersionMismatch = () => {
       versionMismatch = true
@@ -226,6 +326,7 @@
     const credentialRefreshTimer = window.setInterval(() => {
       if (!document.hidden && !credentialLoading) void refreshCredentials()
     }, 30_000)
+    reportAppOpened()
     if (route.kind !== 'route-error' && launch.kind !== 'login') {
       if (loadSessionCredentials() !== undefined) {
         void startAuthority()
@@ -241,6 +342,8 @@
       window.removeEventListener('popstate', popstate)
       window.removeEventListener('kata:versionMismatch', showVersionMismatch)
       window.clearInterval(credentialRefreshTimer)
+      stopAppOpened?.()
+      sessionEnded?.stop()
       scheduler.stop()
       stream.stop()
       invalidations.stop()
@@ -269,6 +372,7 @@
   }
 
   async function navigateAfterAuthentication(target: string): Promise<boolean> {
+    reportAppOpened()
     const parsed = new URL(target, window.location.origin)
     const canonicalTarget =
       parsed.pathname === '/'
@@ -400,7 +504,7 @@
           },
           requestActor,
         ),
-        { headers: { 'Idempotency-Key': create.key } },
+        { headers: { 'Idempotency-Key': create.key, 'X-Kata-Surface': 'web' } },
       ),
     )
     if (!accepted) throw new Error(mutationMessage(mutationState) ?? 'Could not create task.')
@@ -477,18 +581,29 @@
     )
   }
 
-  async function addComment(uid: string, body: string): Promise<boolean> {
+  async function addComment(
+    uid: string,
+    body: string,
+    reply?: KataCommentReplyIntent,
+  ): Promise<boolean> {
     const target = selectedMutationTarget(uid)
     if (!target) return false
+    const identity = commentRetryIdentity(uid, body, reply)
     const comment =
-      pendingComment?.issueUID === uid && pendingComment.body === body
+      pendingComment?.identity === identity
         ? pendingComment
-        : { issueUID: uid, body, key: crypto.randomUUID() }
+        : { identity, key: crypto.randomUUID() }
     pendingComment = comment
     const accepted = await runMutation({ draft: body }, (context) =>
       createComment(
         { projectId: String(target.project_id), ref: target.ref },
-        context.body({ body }, requestActor),
+        context.body(
+          {
+            body,
+            ...(reply ? { reply_to: reply.replyTo, kind: reply.kind, force: reply.force } : {}),
+          },
+          requestActor,
+        ),
         { headers: { 'Idempotency-Key': comment.key } },
       ),
     )
@@ -687,6 +802,7 @@
       closeIssueRequest(
         { projectId: target.project_id, ref: target.ref },
         context.body({ ...request }, requestActor),
+        { headers: { 'X-Kata-Surface': 'web' } },
       ),
     )
   }
@@ -715,11 +831,12 @@
   async function runMutation(
     options: { draft?: unknown; revision?: string; createKey?: string },
     mutate: (context: MutationContext) => Promise<MutationResult>,
+    controller: MutationController = mutations,
   ): Promise<boolean> {
     mutationPending = true
     try {
-      const result = await mutations.execute(options, mutate)
-      mutationState = { ...mutations.state }
+      const result = await controller.execute(options, mutate)
+      mutationState = { ...controller.state }
       return result !== false
     } finally {
       mutationPending = false
@@ -780,6 +897,7 @@
   }
 
   function rejectCredentialsAndRequireAuthentication(): boolean {
+    sessionEnded?.pause()
     fenceCredentialAudit()
     clearSessionCredentials()
     draftFenceGeneration += 1
@@ -1142,6 +1260,7 @@
         {credentialTokens}
         {credentialLoading}
         {credentialError}
+        onAccessMutation={(draft, mutate) => runMutation({ draft }, mutate, accessMutations)}
         onRefreshCredentials={refreshCredentials}
         onBackFromCredentials={returnFromCredentials}
         onSelectDaemon={(id) => void switchDaemon(id)}

@@ -15,7 +15,7 @@ import (
 
 func agentHooksStatusJSON(t *testing.T, args ...string) map[string]any {
 	t.Helper()
-	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, append([]string{"agent-hooks", "status", "--json"}, args...)...)
+	out, stderr, err := executeAgentHook(t, unreadableHookInput{}, append([]string{"agent-hook", "status", "--json"}, args...)...)
 	require.NoError(t, err, stderr)
 	var report map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &report))
@@ -28,12 +28,12 @@ func TestAgentHooksStatusSchemaAndExecutable(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "example path's kata")
 	require.NoError(t, os.WriteFile(executable, []byte("fixture"), 0o700)) //nolint:gosec // G306: executable fixture requires execute permission.
 	userConfig := filepath.Join(t.TempDir(), "selected-home", "hooks.json")
-	installHookFixture(t, agenthook.AgentCodex, userConfig, executable, agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, userConfig, executable, legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 	workspaceConfig := filepath.Join(workspace, ".codex", "hooks.json")
-	installHookFixture(t, agenthook.AgentCodex, workspaceConfig, "missing-kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
-	installHookFixture(t, agenthook.AgentCodex, workspaceConfig, "missing-kata", attentionHookSource+"start", agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, workspaceConfig, "./missing-kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, workspaceConfig, "./missing-kata", legacyAttentionHookSource+"start", agenthook.Hook{Event: agenthook.EventSessionStart})
 	claudeConfig := filepath.Join(workspace, ".claude", "settings.json")
-	installHookFixture(t, agenthook.AgentClaude, claudeConfig, "missing-kata", attentionHookSource+"end", agenthook.Hook{Event: agenthook.EventSessionEnd})
+	installHookFixture(t, agenthook.AgentClaude, claudeConfig, "./missing-kata", legacyAttentionHookSource+"end", agenthook.Hook{Event: agenthook.EventSessionEnd})
 	before, err := os.ReadFile(userConfig) //nolint:gosec // G304: isolated user/workspace config fixture under TempDir.
 	require.NoError(t, err)
 	report := agentHooksStatusJSON(t, "codex", "--config", userConfig, "--workspace", workspace)
@@ -42,7 +42,7 @@ func TestAgentHooksStatusSchemaAndExecutable(t *testing.T) {
 	harnesses := report["harnesses"].([]any)
 	require.Len(t, harnesses, 1)
 	harness := harnesses[0].(map[string]any)
-	require.ElementsMatch(t, []string{"harness", "user", "duplicate", "overlap"}, agentHookStatusKeys(harness))
+	require.ElementsMatch(t, []string{"harness", "user", "duplicate", "overlap", "scope", "capabilities", "configured"}, agentHookStatusKeys(harness))
 	require.Equal(t, "codex", harness["harness"])
 	require.Equal(t, true, harness["duplicate"])
 	require.Equal(t, false, harness["overlap"])
@@ -71,7 +71,7 @@ func TestAgentHooksStatusSchemaAndExecutable(t *testing.T) {
 	entry = report["harnesses"].([]any)[0].(map[string]any)["user"].(map[string]any)["entries"].([]any)[0].(map[string]any)
 	require.Equal(t, false, entry["executable_exists"])
 	for _, mode := range []string{"", "--agent"} {
-		args := []string{"agent-hooks", "status", "codex", "--config", userConfig, "--workspace", workspace}
+		args := []string{"agent-hook", "status", "codex", "--config", userConfig, "--workspace", workspace}
 		if mode != "" {
 			args = append(args, mode)
 		}
@@ -101,7 +101,7 @@ func agentHookStatusKeys(m map[string]any) []string {
 }
 
 func TestAgentHookCommandForPlatformSelectsNativeVariant(t *testing.T) {
-	windowsCommand := `"C:\Program Files\Kata\kata.exe" agent-hooks contract codex --source kata-agent-contract-hook`
+	windowsCommand := `"C:\Program Files\Kata\kata.exe" agent-hook contract codex --source kata-agent-contract-hook`
 	for _, tc := range []struct {
 		name   string
 		agent  agenthook.Agent
@@ -113,24 +113,24 @@ func TestAgentHookCommandForPlatformSelectsNativeVariant(t *testing.T) {
 		{
 			name:  "Codex on Windows",
 			agent: agenthook.AgentCodex,
-			entry: agentHookEntry{Command: `"/usr/local/bin/kata" agent-hooks contract codex --source kata-agent-contract-hook`, Fields: map[string]any{"commandWindows": windowsCommand}},
+			entry: agentHookEntry{Command: `"/usr/local/bin/kata" agent-hook contract codex --source kata-agent-contract-hook`, Fields: map[string]any{"commandWindows": windowsCommand}},
 			goos:  "windows",
 			want:  windowsCommand,
 		},
 		{
 			name:   "Copilot on Windows",
 			agent:  agenthook.AgentCopilot,
-			entry:  agentHookEntry{Command: "kata agent-hooks contract copilot", Fields: map[string]any{"bash": "kata agent-hooks contract copilot", "powershell": "& 'C:\\Program Files\\Kata\\kata.exe' agent-hooks contract copilot"}},
+			entry:  agentHookEntry{Command: "kata agent-hook contract copilot", Fields: map[string]any{"bash": "kata agent-hook contract copilot", "powershell": "& 'C:\\Program Files\\Kata\\kata.exe' agent-hook contract copilot"}},
 			goos:   "windows",
-			want:   "& 'C:\\Program Files\\Kata\\kata.exe' agent-hooks contract copilot",
+			want:   "& 'C:\\Program Files\\Kata\\kata.exe' agent-hook contract copilot",
 			wantPS: true,
 		},
 		{
 			name:  "Codex on Unix",
 			agent: agenthook.AgentCodex,
-			entry: agentHookEntry{Command: `"/usr/local/bin/kata" agent-hooks contract codex --source kata-agent-contract-hook`, Fields: map[string]any{"commandWindows": windowsCommand}},
+			entry: agentHookEntry{Command: `"/usr/local/bin/kata" agent-hook contract codex --source kata-agent-contract-hook`, Fields: map[string]any{"commandWindows": windowsCommand}},
 			goos:  "linux",
-			want:  `"/usr/local/bin/kata" agent-hooks contract codex --source kata-agent-contract-hook`,
+			want:  `"/usr/local/bin/kata" agent-hook contract codex --source kata-agent-contract-hook`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,7 +144,7 @@ func TestAgentHookCommandForPlatformSelectsNativeVariant(t *testing.T) {
 func TestAgentHooksStatusCommittedOverlap(t *testing.T) {
 	isolateAgentHookHomes(t)
 	config := filepath.Join(t.TempDir(), "hooks.json")
-	installHookFixture(t, agenthook.AgentCodex, config, "kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, config, "kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 	for _, state := range []string{"untracked", "staged", "committed", "modified", "ordinary"} {
 		t.Run(state, func(t *testing.T) {
 			repo := t.TempDir()
@@ -189,26 +189,25 @@ func TestAgentHooksStatusCommittedOverlap(t *testing.T) {
 func TestAgentHooksStatusMissingAndSameFile(t *testing.T) {
 	isolateAgentHookHomes(t)
 	workspace := t.TempDir()
-	report := agentHooksStatusJSON(t, "--workspace", workspace)
-	require.Len(t, report["harnesses"], 7)
+	report := agentHooksStatusJSON(t, "--scope", "user", "--workspace", workspace)
+	require.Len(t, report["harnesses"], 18)
 	for _, raw := range report["harnesses"].([]any) {
 		harness := raw.(map[string]any)
-		require.NotEqual(t, "droid", harness["harness"])
 		require.Equal(t, false, harness["duplicate"])
 		user := harness["user"].(map[string]any)
 		require.Equal(t, false, user["present"])
 		require.Equal(t, []any{}, user["entries"])
 	}
 	config := filepath.Join(workspace, ".codex", "hooks.json")
-	installHookFixture(t, agenthook.AgentCodex, config, "kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentCodex, config, "kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 	report = agentHooksStatusJSON(t, "codex", "--config", config, "--workspace", workspace)
 	require.Equal(t, false, report["harnesses"].([]any)[0].(map[string]any)["duplicate"])
 }
 
 func TestAgentHooksStatusUsage(t *testing.T) {
 	isolateAgentHookHomes(t)
-	for _, args := range [][]string{{"claude", "codex"}, {"droid"}, {"unknown"}, {"--config", "example"}, {"codex", "--config="}, {"--all"}} {
-		out, stderr, err := executeAgentHook(t, unreadableHookInput{}, append([]string{"agent-hooks", "status"}, args...)...)
+	for _, args := range [][]string{{"claude", "codex"}, {"unknown"}, {"--config", "example"}, {"codex", "--config="}, {"--all"}} {
+		out, stderr, err := executeAgentHook(t, unreadableHookInput{}, append([]string{"agent-hook", "status"}, args...)...)
 		require.Error(t, err, strings.Join(args, " "))
 		require.Empty(t, out)
 		require.Equal(t, ExitUsage, exitCodeForErr(err, runEEntered), stderr)
@@ -228,12 +227,12 @@ func TestAgentHooksStatusHermesEventAndNestedGuidance(t *testing.T) {
 	runGit(t, repo, "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
 	config, err := agenthook.ConfigPath(agenthook.AgentHermes)
 	require.NoError(t, err)
-	installHookFixture(t, agenthook.AgentHermes, config, "kata", agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+	installHookFixture(t, agenthook.AgentHermes, config, "kata", legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 	report := agentHooksStatusJSON(t, "hermes", "--workspace", workspace)
 	harness := report["harnesses"].([]any)[0].(map[string]any)
 	require.Equal(t, false, harness["user"].(map[string]any)["present"])
 	require.Equal(t, false, harness["overlap"])
-	_, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "install", "hermes", "--executable", os.Args[0], "--workspace", workspace)
+	_, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "install", "--contract-only", "hermes", "--executable", os.Args[0], "--workspace", workspace)
 	require.NoError(t, err, stderr)
 	report = agentHooksStatusJSON(t, "hermes", "--workspace", workspace)
 	harness = report["harnesses"].([]any)[0].(map[string]any)
@@ -252,7 +251,7 @@ func TestAgentHooksStatusWorkspaceFailuresAreAdvisory(t *testing.T) {
 			workspace := t.TempDir()
 			t.Chdir(workspace)
 			config := filepath.Join(t.TempDir(), "hooks.json")
-			installHookFixture(t, agenthook.AgentCodex, config, os.Args[0], agentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
+			installHookFixture(t, agenthook.AgentCodex, config, os.Args[0], legacyAgentContractHookSource, agenthook.Hook{Event: agenthook.EventSessionStart})
 			warning := "committed guidance"
 			switch problem {
 			case "no git":
@@ -273,7 +272,7 @@ func TestAgentHooksStatusWorkspaceFailuresAreAdvisory(t *testing.T) {
 			require.Equal(t, []any{}, report["workspace"].(map[string]any)["committed_guidance"])
 			require.Contains(t, fmt.Sprint(report["warnings"]), warning)
 			for _, mode := range []string{"human", "agent"} {
-				out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hooks", "status", "codex", "--config", config, "--format", mode)
+				out, stderr, err := executeAgentHook(t, unreadableHookInput{}, "agent-hook", "status", "codex", "--config", config, "--format", mode)
 				require.NoError(t, err, stderr)
 				require.Contains(t, out, warning)
 			}

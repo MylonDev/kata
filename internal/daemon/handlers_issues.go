@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,8 +15,10 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"go.kenn.io/kata/internal/api"
+	"go.kenn.io/kata/internal/commentref"
 	"go.kenn.io/kata/internal/db"
 	"go.kenn.io/kata/internal/metadata"
+	"go.kenn.io/kata/internal/pagination"
 	"go.kenn.io/kata/internal/similarity"
 	"go.kenn.io/kata/internal/uid"
 )
@@ -50,7 +53,7 @@ func parseMetaFilters(raw []string) ([]db.MetaFilter, error) {
 		if key == "" {
 			return nil, api.NewError(400, "validation",
 				"meta filter key must not be empty",
-				"pass meta=key or meta=key=value", nil)
+				"pass --meta key or --meta key=value", nil)
 		}
 		out = append(out, db.MetaFilter{Key: key, Value: value, HasValue: hasValue})
 	}
@@ -73,6 +76,7 @@ func validateIssueTitle(title string) error {
 // issue.created event in one tx (see db.CreateIssue) so the response always
 // carries an event for the CLI to render.
 func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
+	registerIssuePlanningDateHandlers(humaAPI, cfg)
 	huma.Register(humaAPI, huma.Operation{
 		OperationID: "createIssue",
 		Method:      "POST",
@@ -215,6 +219,7 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 			return nil, internalAPIError(err)
 		}
 		cfg.Publish().Event(in.ProjectID, evt)
+		captureCoreAction(ctx, cfg, "issue_created", in.Surface)
 		projected, err := scopedMutationEvent(ctx, cfg.DB, &evt)
 		if err != nil {
 			return nil, err
@@ -239,24 +244,30 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 		if _, err := activeProjectByID(ctx, cfg.DB, in.ProjectID); err != nil {
 			return nil, err
 		}
-		priority, err := parsePriorityQuery(in.Priority, "priority")
+		priority, maxPriority, unset, err := listPriorities(in.Priority, in.MaxPriority)
 		if err != nil {
 			return nil, err
 		}
-		maxPriority, err := parsePriorityQuery(in.MaxPriority, "max_priority")
-		if err != nil {
-			return nil, err
-		}
+
 		metaFilters, err := parseMetaFilters(in.Meta)
 		if err != nil {
 			return nil, err
 		}
-		issues, err := cfg.DB.ListIssues(ctx, db.ListIssuesParams{
+		probeLimit, err := pageProbeLimit(in.Limit)
+		if err != nil {
+			return nil, err
+		}
+		if in.Cursor != "" && in.Sort == "" {
+			return nil, api.NewError(400, "validation", "cursor requires sort=created or sort=oldest", "", nil)
+		}
+		params := db.ListAllIssuesParams{
 			ProjectID:     in.ProjectID,
 			Status:        in.Status,
 			Priority:      priority,
 			MaxPriority:   maxPriority,
-			Limit:         in.Limit,
+			Limit:         probeLimit,
+			PriorityUnset: unset,
+			CreatedFirst:  in.Sort == "created",
 			OldestFirst:   in.Sort == "oldest",
 			Unowned:       in.Unowned,
 			Owner:         in.Owner,
@@ -264,9 +275,23 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 			ExcludeLabels: in.ExcludeLabels,
 			Meta:          metaFilters,
 			IssueScope:    issueScopeFromContext(ctx),
-		})
+		}
+		hash := listPageHash(cfg, "project-list", params)
+		params.After, err = pagination.Decode(in.Cursor, hash)
+		if err != nil {
+			return nil, api.NewError(400, "validation", err.Error(), "", nil)
+		}
+		issues, err := cfg.DB.ListIssues(ctx, scopedListParams(params))
 		if err != nil {
 			return nil, internalAPIError(err)
+		}
+		issues, page := pageBoundary(issues, in.Limit, hash, in.Sort != "")
+		if in.IncludeTotal {
+			count, countErr := cfg.DB.CountIssues(ctx, scopedListParams(params))
+			if countErr != nil {
+				return nil, internalAPIError(countErr)
+			}
+			page.Total = &count
 		}
 		issueOuts, err := hydrateIssueOuts(ctx, cfg.DB, in.ProjectID, issues)
 		out := &api.ListIssuesResponse{}
@@ -274,6 +299,7 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 			return nil, internalAPIError(err)
 		}
 		addIssueWebURLs(cfg, issueOuts)
+		out.Body.PageMetadata = page
 		out.Body.Issues = issueOuts
 		return out, nil
 	})
@@ -298,11 +324,22 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 			return nil, api.NewError(400, "validation",
 				"--unowned and --owner are mutually exclusive", "", nil)
 		}
-		var projectIDs []int64
+		projectIDs := slices.Clone(in.ProjectIDs)
+		if in.ProjectID > 0 && len(projectIDs) > 0 {
+			return nil, api.NewError(400, "validation", "project_id and project_ids are mutually exclusive", "", nil)
+		}
+		for _, id := range projectIDs {
+			if id <= 0 {
+				return nil, api.NewError(400, "validation", "project_ids must contain positive integers", "", nil)
+			}
+		}
+		slices.Sort(projectIDs)
+		projectIDs = slices.Compact(projectIDs)
 		if in.ProjectID > 0 {
 			projectIDs = []int64{in.ProjectID}
 		}
-		ctx, err := authorizeHostProjectScope(ctx, projectIDs, nil, in.ProjectID == 0)
+
+		ctx, err := authorizeHostProjectScope(ctx, projectIDs, nil, len(projectIDs) == 0)
 		if err != nil {
 			return nil, err
 		}
@@ -311,40 +348,61 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 				return nil, err
 			}
 		}
-		priority, err := parsePriorityQuery(in.Priority, "priority")
+		priority, maxPriority, unset, err := listPriorities(in.Priority, in.MaxPriority)
 		if err != nil {
 			return nil, err
 		}
-		maxPriority, err := parsePriorityQuery(in.MaxPriority, "max_priority")
-		if err != nil {
-			return nil, err
-		}
+
 		metaFilters, err := parseMetaFilters(in.Meta)
 		if err != nil {
 			return nil, err
 		}
-		issues, err := cfg.DB.ListAllIssues(ctx, db.ListAllIssuesParams{
-			ProjectID:     in.ProjectID,
-			Status:        in.Status,
-			Priority:      priority,
-			MaxPriority:   maxPriority,
-			Limit:         in.Limit,
-			OldestFirst:   in.Sort == "oldest",
-			Unowned:       in.Unowned,
-			Owner:         in.Owner,
-			Labels:        in.Labels,
-			ExcludeLabels: in.ExcludeLabels,
-			Meta:          metaFilters,
-			IssueScope:    issueScopeFromContext(ctx),
-		})
+		probeLimit, err := pageProbeLimit(in.Limit)
+		if err != nil {
+			return nil, err
+		}
+		params := db.ListAllIssuesParams{
+			ProjectID:         in.ProjectID,
+			Status:            in.Status,
+			Priority:          priority,
+			MaxPriority:       maxPriority,
+			Limit:             probeLimit,
+			PriorityUnset:     unset,
+			CreatedFirst:      true,
+			AllowedProjectIDs: projectIDs,
+			OldestFirst:       in.Sort == "oldest",
+			Unowned:           in.Unowned,
+			Owner:             in.Owner,
+			Labels:            in.Labels,
+			ExcludeLabels:     in.ExcludeLabels,
+			Meta:              metaFilters,
+			IssueScope:        issueScopeFromContext(ctx),
+		}
+		hash := listPageHash(cfg, "global-list", params)
+		params.After, err = pagination.Decode(in.Cursor, hash)
+		if err != nil {
+			return nil, api.NewError(400, "validation", err.Error(), "", nil)
+		}
+		issues, err := cfg.DB.ListAllIssues(ctx, params)
 		if err != nil {
 			return nil, internalAPIError(err)
 		}
+
+		issues, page := pageBoundary(issues, in.Limit, hash, true)
+		if in.IncludeTotal {
+			count, countErr := cfg.DB.CountAllIssues(ctx, params)
+			if countErr != nil {
+				return nil, internalAPIError(countErr)
+			}
+			page.Total = &count
+		}
+
 		issueOuts, err := hydrateIssueOutsCrossProject(ctx, cfg.DB, issues)
 		if err != nil {
 			return nil, internalAPIError(err)
 		}
 		out := &api.ListAllIssuesResponse{}
+		out.Body.PageMetadata = page
 		out.Body.Issues = make([]api.ListGlobalIssueOut, len(issueOuts))
 		names := projectNames{store: cfg.DB, byID: map[int64]string{}}
 		for i, issueOut := range issueOuts {
@@ -374,7 +432,7 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 		if err != nil {
 			return nil, err
 		}
-		return buildShowIssueResponse(ctx, cfg, issue, in.IncludeDeleted)
+		return buildShowIssueResponse(ctx, cfg, issue, in.IncludeDeleted, commentref.Options{Thread: in.Thread, Inbound: in.Inbound, Kind: in.Kind, Since: in.Since})
 	})
 
 	huma.Register(humaAPI, huma.Operation{
@@ -403,7 +461,7 @@ func registerIssuesHandlers(humaAPI huma.API, cfg ServerConfig) {
 		if err := authorizeIssueScopedIssue(ctx, cfg.DB, issue); err != nil {
 			return nil, err
 		}
-		return buildShowIssueResponse(ctx, cfg, issue, in.IncludeDeleted)
+		return buildShowIssueResponse(ctx, cfg, issue, in.IncludeDeleted, commentref.Options{Thread: in.Thread, Inbound: in.Inbound, Kind: in.Kind, Since: in.Since})
 	})
 
 	huma.Register(humaAPI, huma.Operation{
@@ -911,8 +969,8 @@ func issueUIDPrefixMatchesForCaller(
 // canonical Lease* fields onto their deprecated Claim* aliases. Hydration has
 // several early returns; funneling every success through here is what keeps
 // the two spellings from ever disagreeing.
-func buildShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Issue, includeDeleted bool) (*api.ShowIssueResponse, error) {
-	out, err := hydrateShowIssueResponse(ctx, cfg, issue, includeDeleted)
+func buildShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Issue, includeDeleted bool, selectors ...commentref.Options) (*api.ShowIssueResponse, error) {
+	out, err := hydrateShowIssueResponse(ctx, cfg, issue, includeDeleted, selectors...)
 	if err != nil {
 		return nil, err
 	}
@@ -920,16 +978,12 @@ func buildShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Issu
 	return out, nil
 }
 
-func hydrateShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Issue, includeDeleted bool) (*api.ShowIssueResponse, error) {
+func hydrateShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Issue, includeDeleted bool, selectors ...commentref.Options) (*api.ShowIssueResponse, error) {
 	if issue.DeletedAt != nil && !includeDeleted {
 		return nil, api.NewError(404, "issue_not_found",
 			"issue not found",
 			"pass include_deleted=true to view soft-deleted issues",
 			nil)
-	}
-	comments, err := listComments(ctx, cfg.DB, issue.ID)
-	if err != nil {
-		return nil, internalAPIError(err)
 	}
 	links, err := loadLinkOuts(ctx, cfg.DB, issue.ID)
 	if err != nil {
@@ -966,7 +1020,29 @@ func hydrateShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Is
 	}
 	out := &api.ShowIssueResponse{}
 	out.Body.Issue = api.ShowIssueOut{Issue: issue, Labels: labelNames}
-	out.Body.Comments = comments
+	var includeDeletedSourceIssueID int64
+	if includeDeleted && issue.DeletedAt != nil {
+		includeDeletedSourceIssueID = issue.ID
+	}
+	opts := commentref.Options{}
+	if len(selectors) > 0 {
+		opts = selectors[0]
+	}
+	query := db.CommentGraphQuery{ProjectID: issue.ProjectID, IncludeDeletedSourceIssueID: includeDeletedSourceIssueID}
+	if opts.Thread == "" && opts.Inbound == "" && opts.Since == "" {
+		query.SelectedIssueID = issue.ID
+	}
+	records, err := readCommentRecords(ctx, cfg.DB, query)
+	if err != nil {
+		return nil, err
+	}
+	selected, err := commentref.Select(records, issue.UID, opts)
+	if err != nil {
+		return nil, commentReferenceError(err)
+	}
+	recordCommentResponseScope(ctx, records, selected.Comments)
+	out.Body.Comments = selected.Comments
+	out.Body.CommentsTruncated = selected.Truncated
 	out.Body.Links = links
 	out.Body.Labels = labels
 	out.Body.Parent = parent
@@ -1053,6 +1129,9 @@ func loadParentRef(ctx context.Context, store db.Storage, issue db.Issue) (*api.
 		return nil, err
 	}
 	parent, err := store.IssueByID(ctx, link.ToIssueID)
+	if errors.Is(err, db.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1385,12 +1464,6 @@ func loadLinkOuts(ctx context.Context, store db.Storage, issueID int64) ([]api.L
 	return out, nil
 }
 
-// listComments fetches every comment attached to issueID in chronological
-// order. Plan 1 ships no pagination; the show handler embeds the full slice.
-func listComments(ctx context.Context, store db.Storage, issueID int64) ([]db.Comment, error) {
-	return store.CommentsByIssue(ctx, issueID)
-}
-
 const (
 	// idempotencyWindow is the 7-day lookback per spec §3.6.
 	idempotencyWindow = 7 * 24 * time.Hour
@@ -1459,7 +1532,7 @@ func tryIdempotencyMatch(ctx context.Context, cfg ServerConfig, in *api.CreateIs
 		}
 		return "", nil, api.NewError(409, "idempotency_mismatch",
 			"idempotency key matched a prior issue with a different fingerprint",
-			"either use a fresh key, or send the exact same fields as the original",
+			"use a fresh --idempotency-key, or repeat the original create exactly",
 			map[string]any{
 				"uid":          prior.UID,
 				"short_id":     prior.ShortID,
@@ -1530,7 +1603,7 @@ func runLookalikeCheck(ctx context.Context, cfg ServerConfig, in *api.CreateIssu
 	}
 	return api.NewError(409, "duplicate_candidates",
 		formatDuplicateMessage(matched),
-		"comment on an existing issue, or pass force_new=true to create anyway",
+		"comment on an existing issue, or pass --force-new to create anyway",
 		map[string]any{"candidates": matched})
 }
 

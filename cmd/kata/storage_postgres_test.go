@@ -59,6 +59,12 @@ func TestStoragePostgresMigrateAndStatusWithSeparatedRoles(t *testing.T) {
 		GRANT EXECUTE ON FUNCTION operator_store.rewrite_project_uid_for_adoption(BIGINT, TEXT) TO %s;
 	`, runtimeRole, runtimeRole, runtimeRole, runtimeRole, runtimeRole)) // #nosec G201 -- role is a fixed prefix plus process ID.
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := admin.ExecContext(context.Background(), fmt.Sprintf(
+			`DROP OWNED BY %s; DROP ROLE %s`, runtimeRole, runtimeRole,
+		)) // #nosec G201 -- role is a fixed prefix plus process ID.
+		require.NoError(t, err, "roles are cluster-wide and outlive the test database")
+	})
 
 	runtimeDSN := postgresDSNForCLIUser(t, dsn, runtimeRole, "runtime-password")
 	t.Setenv("KATA_DSN", runtimeDSN)
@@ -153,7 +159,7 @@ mode = "validate"
 schema_owner = "runtime_schema_owner"
 `), 0o600))
 
-	startup, err := preflightDaemonStartup(context.Background(), "127.0.0.1:0", false)
+	startup, err := preflightDaemonStartup(context.Background(), "127.0.0.1:0", false, false)
 	require.NoError(t, err)
 	assert.Equal(t, "runtime_store", startup.StoreConfig.Postgres.Schema)
 	assert.Equal(t, "validate", string(startup.StoreConfig.Postgres.SchemaMode))

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"go.kenn.io/kata/internal/daemon"
 	"go.kenn.io/kata/internal/db"
 	"go.kenn.io/kata/internal/federation"
+	"go.kenn.io/kata/internal/federationsigning"
 	"go.kenn.io/kata/pkg/federationprovider"
 )
 
@@ -64,7 +66,7 @@ func TestRemovedProviderCleanupSurvivesPurgedProjectAndDatabaseRetry(t *testing.
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(3 * time.Second):
+	case <-time.After(federationprovider.AttemptTimeout + time.Second):
 		require.FailNow(t, "cleanup did not retry the retained request")
 	}
 	_, found, err := credentials.FindManagedFederationCredential(t.Context(), project.Name)
@@ -178,7 +180,7 @@ func TestRemovedProviderCleanupDoesNotFollowReusedName(t *testing.T) {
 			select {
 			case err := <-done:
 				require.ErrorIs(t, err, context.Canceled)
-			case <-time.After(10 * time.Second):
+			case <-time.After(2 * federationprovider.AttemptTimeout):
 				cancel()
 				<-done
 				require.FailNow(t, "renamed project's request was not cleaned up", "health: %+v", r.Health())
@@ -242,7 +244,8 @@ func TestReconcilerRemovesProviderMappingAndRetriesExactCleanup(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
-	require.Eventually(t, func() bool { return r.Health().LastErrorCategory != "" }, 3*time.Second, 10*time.Millisecond)
+	//nolint:kennlint // Native database and HTTP worker progress requires real I/O; bounded polling observes retained state.
+	require.Eventually(t, func() bool { return r.Health().LastErrorCategory != "" }, federationprovider.AttemptTimeout+time.Second, 10*time.Millisecond)
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 	binding, err := store.FederationBindingByProject(t.Context(), project.ID)
@@ -281,8 +284,10 @@ func TestReconcileProviderUsesApprovedMetadataWithoutCatalogAdministration(t *te
 	for _, tc := range []struct {
 		name, intent string
 		existingData bool
+		signed       bool
 	}{
 		{name: "read_only", intent: "read_only"},
+		{name: "signed collaborate", intent: "collaborate", signed: true},
 		{name: "collaborate", intent: "collaborate"},
 		{name: "collaborate without claiming", intent: "collaborate"},
 		{name: "migrate", intent: "migrate", existingData: true},
@@ -302,6 +307,9 @@ func TestReconcileProviderUsesApprovedMetadataWithoutCatalogAdministration(t *te
 			badMetadata := true
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				metadataCalls++
+				if tc.signed {
+					assert.NotEmpty(t, r.Header.Get("Signature"), "saved signing selection applies to provider metadata")
+				}
 				assert.Equal(t, "/tasks/api/v1/projects/42/federation/metadata", r.URL.Path)
 				assert.Equal(t, http.MethodGet, r.Method)
 				saved, found, err := credentials.FindManagedFederationCredential(r.Context(), "spoke-project")
@@ -341,6 +349,14 @@ func TestReconcileProviderUsesApprovedMetadataWithoutCatalogAdministration(t *te
 			require.NoError(t, err)
 			require.True(t, found)
 			assert.Equal(t, federationprovider.StatusApprovalRequired, pending.Credential.Provider.Status)
+			if tc.signed {
+				t.Setenv("TEST_PROVIDER_SIGNING_KEY", strings.Repeat("k", 64))
+				replacement := pending
+				replacement.Credential.Signing = &federationsigning.Source{KeyID: "key-a", KeyEnv: "TEST_PROVIDER_SIGNING_KEY", HubURL: catalog.URL}
+				require.NoError(t, credentials.ReplaceManagedFederationCredential(t.Context(), pending, replacement))
+				pending = replacement
+			}
+
 			if tc.existingData {
 				local, err := store.ProjectByName(t.Context(), mapping.SpokeProject)
 				require.NoError(t, err)
@@ -376,6 +392,7 @@ func TestReconcileProviderUsesApprovedMetadataWithoutCatalogAdministration(t *te
 			require.True(t, found)
 			assert.Equal(t, pending.Credential.Provider.RequestID, saved.Credential.Provider.RequestID)
 			assert.True(t, pending.Credential.Token == saved.Credential.Token, "retry must preserve the candidate")
+			assert.Equal(t, pending.Credential.Signing, saved.Credential.Signing, "attachment retains the signing selection")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			factoryCalls := 0
@@ -417,7 +434,8 @@ func TestProviderInputErrorIsVisibleAndRetainsExactRequest(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
-	require.Eventually(t, func() bool { return r.Health().LastErrorCategory != "" }, 3*time.Second, 10*time.Millisecond)
+	//nolint:kennlint // Native database and HTTP worker progress requires real I/O; bounded polling observes retained state.
+	require.Eventually(t, func() bool { return r.Health().LastErrorCategory != "" }, federationprovider.AttemptTimeout+time.Second, 10*time.Millisecond)
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 	assert.Equal(t, "configuration_conflict", r.Health().LastErrorCategory)
@@ -460,7 +478,8 @@ func TestReconcilerStopsTerminalProviderDecisionsWithoutDroppingCleanup(t *testi
 						cancel()
 						require.ErrorIs(t, <-done, context.Canceled)
 					}()
-					require.Eventually(t, func() bool { return r.Health().LastErrorCategory == status }, 3*time.Second, time.Millisecond)
+					//nolint:kennlint // Native database and HTTP worker progress requires real I/O; bounded polling observes retained state.
+					require.Eventually(t, func() bool { return r.Health().LastErrorCategory == status }, federationprovider.AttemptTimeout+time.Second, time.Millisecond)
 					assert.Equal(t, 1, r.Health().Conflicted)
 					assert.Zero(t, r.Health().Pending)
 					attemptAt := *r.Health().LastAttemptAt

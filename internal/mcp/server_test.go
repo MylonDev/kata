@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,8 @@ import (
 
 var sectionLoaderNames = []string{
 	"kata.load_activity",
+	"kata.load_coordination",
+	"kata.load_docs",
 	"kata.load_external_roots",
 	"kata.load_federation",
 	"kata.load_import",
@@ -41,6 +44,7 @@ var sectionLoaderNames = []string{
 	"kata.load_storage",
 	"kata.load_sync",
 	"kata.load_system",
+	"kata.load_teams",
 	"kata.load_tokens",
 }
 
@@ -141,6 +145,7 @@ func TestServerPublishesCurrentToolsOnly(t *testing.T) {
 	require.Equal(t, "private", result.CacheScope)
 
 	wantNames := []string{
+		"kata.assign",
 		"kata.audit_closes",
 		"kata.bridge_bind",
 		"kata.bridge_pause",
@@ -163,13 +168,18 @@ func TestServerPublishesCurrentToolsOnly(t *testing.T) {
 		"kata.edit",
 		"kata.edit_comment",
 		"kata.events",
+		"kata.federation_bridge_connect",
+		"kata.federation_bridge_disconnect",
+		"kata.federation_bridge_status",
 		"kata.federation_enrollment_revoke",
 		"kata.federation_leave",
 		"kata.federation_quarantine",
 		"kata.federation_rebind",
+		"kata.federation_root_key_repin",
 		"kata.federation_status",
 		"kata.graph",
 		"kata.import_issues",
+		"kata.inbox",
 		"kata.labels",
 		"kata.lease",
 		"kata.lease_force_release",
@@ -183,9 +193,11 @@ func TestServerPublishesCurrentToolsOnly(t *testing.T) {
 		"kata.project_purge",
 		"kata.project_remove",
 		"kata.project_restore",
+		"kata.project_show",
 		"kata.project_update",
 		"kata.projects",
 		"kata.purge",
+		"kata.read_doc",
 		"kata.ready",
 		"kata.recurrence_delete",
 		"kata.recurrence_update",
@@ -193,34 +205,48 @@ func TestServerPublishesCurrentToolsOnly(t *testing.T) {
 		"kata.reopen",
 		"kata.restore",
 		"kata.search",
+		"kata.search_docs",
 		"kata.set_deadline",
 		"kata.set_label",
 		"kata.set_metadata",
 		"kata.set_schedule",
 		"kata.show",
+		"kata.status",
 		"kata.sync_once",
 		"kata.sync_status",
 		"kata.sync_update",
 		"kata.system",
+		"kata.project_access_set",
+		"kata.project_access_show",
+		"kata.team_create",
+		"kata.team_delete",
+		"kata.team_member_set",
+		"kata.team_show",
+		"kata.teams",
 		"kata.token_create",
 		"kata.token_revoke",
 		"kata.tokens",
+		"kata.unassign",
 		"kata.wait",
 	}
 	wantNames = append(wantNames, sectionLoaderNames...)
 	sort.Strings(wantNames)
 	gotNames := make([]string, 0, len(result.Tools))
 	projectSelectors := map[string]bool{
+		"kata.federation_bridge_connect": true, "kata.federation_bridge_disconnect": true, "kata.federation_bridge_status": true,
+		"kata.project_access_set": true, "kata.project_access_show": true,
 		"kata.audit_closes": true,
 		"kata.create":       true, "kata.digest": true, "kata.events": true,
 		"kata.federation_leave": true, "kata.federation_quarantine": true, "kata.federation_rebind": true,
-		"kata.import_issues": true, "kata.labels": true, "kata.list": true, "kata.next": true,
+		"kata.federation_root_key_repin": true,
+		"kata.import_issues":             true, "kata.inbox": true, "kata.labels": true, "kata.list": true, "kata.next": true,
 		"kata.project_purge": true, "kata.project_remove": true, "kata.project_restore": true,
-		"kata.project_update": true, "kata.projects": true, "kata.ready": true,
+		"kata.project_show": true, "kata.project_update": true, "kata.projects": true, "kata.ready": true,
 		"kata.recurrence_delete": true, "kata.recurrence_update": true, "kata.recurrences": true,
 		"kata.search": true, "kata.sync_once": true, "kata.sync_status": true, "kata.sync_update": true,
 	}
 	openWorld := map[string]bool{
+		"kata.federation_bridge_connect": true, "kata.federation_bridge_disconnect": true, "kata.federation_bridge_status": true,
 		"kata.bridge_bind":                  true,
 		"kata.bridge_reconcile":             true,
 		"kata.bridge_resolve_comment":       true,
@@ -275,6 +301,8 @@ func TestServerToolAnnotationsMatchMutationRisk(t *testing.T) {
 	require.NoError(t, err)
 
 	readOnly := map[string]bool{
+		"kata.federation_bridge_status": true,
+		"kata.teams":                    true, "kata.team_show": true, "kata.project_access_show": true,
 		"kata.audit_closes":      true,
 		"kata.bridge_show":       true,
 		"kata.connector_fields":  true,
@@ -283,15 +311,20 @@ func TestServerToolAnnotationsMatchMutationRisk(t *testing.T) {
 		"kata.events":            true,
 		"kata.federation_status": true,
 		"kata.graph":             true,
+		"kata.inbox":             true,
 		"kata.labels":            true,
 		"kata.lease_status":      true,
 		"kata.list":              true,
 		"kata.next":              true,
+		"kata.project_show":      true,
 		"kata.projects":          true,
+		"kata.read_doc":          true,
 		"kata.ready":             true,
 		"kata.recurrences":       true,
 		"kata.search":            true,
+		"kata.search_docs":       true,
 		"kata.show":              true,
+		"kata.status":            true,
 		"kata.sync_status":       true,
 		"kata.system":            true,
 		"kata.tokens":            true,
@@ -303,11 +336,13 @@ func TestServerToolAnnotationsMatchMutationRisk(t *testing.T) {
 	// Mixed-mode tools with any overwriting or removing input (forced
 	// claims, lease release, recurrence patch) advertise destructive.
 	additive := map[string]bool{
-		"kata.comment": true, "kata.create": true,
+		"kata.team_create": true,
+		"kata.comment":     true, "kata.create": true,
 		"kata.project_create": true, "kata.project_restore": true,
 		"kata.restore": true, "kata.token_create": true,
 	}
 	nonIdempotentTools := map[string]bool{
+		"kata.team_create": true,
 		// Identical retries mint new records: no idempotency key or natural
 		// unique key deduplicates these creations.
 		"kata.token_create":      true,
@@ -333,28 +368,31 @@ func TestServerToolAnnotationsMatchMutationRisk(t *testing.T) {
 
 func TestToolAdmissionMiddlewareBoundsCalls(t *testing.T) {
 	t.Run("rate", func(t *testing.T) {
-		var calls atomic.Int64
-		handler := toolAdmissionMiddleware(rate.NewLimiter(1, 1), make(chan struct{}, 1))(
+		toolError := errors.New("tool failed")
+		var calls, observations atomic.Int64
+		handler := toolAdmissionMiddleware(rate.NewLimiter(rate.Every(time.Hour), 1), make(chan struct{}, 1), func() { observations.Add(1) })(
 			func(context.Context, string, sdkmcp.Request) (sdkmcp.Result, error) {
 				calls.Add(1)
-				return nil, nil
+				return nil, toolError
 			},
 		)
 		_, err := handler(t.Context(), "tools/call", nil)
-		require.NoError(t, err)
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		require.ErrorIs(t, err, toolError)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
 		_, err = handler(ctx, "tools/call", nil)
 		require.ErrorContains(t, err, "deadline")
-		_, err = handler(t.Context(), "server/discover", nil)
-		require.NoError(t, err)
+		_, err = handler(t.Context(), "tools/list", nil)
+		require.ErrorIs(t, err, toolError)
 		require.EqualValues(t, 2, calls.Load())
+		require.EqualValues(t, 1, observations.Load())
 	})
 
 	t.Run("concurrency", func(t *testing.T) {
+		var observations atomic.Int64
 		started := make(chan struct{})
 		release := make(chan struct{})
-		handler := toolAdmissionMiddleware(rate.NewLimiter(rate.Inf, 1), make(chan struct{}, 1))(
+		handler := toolAdmissionMiddleware(rate.NewLimiter(rate.Inf, 1), make(chan struct{}, 1), func() { observations.Add(1) })(
 			func(context.Context, string, sdkmcp.Request) (sdkmcp.Result, error) {
 				close(started)
 				<-release
@@ -367,29 +405,31 @@ func TestToolAdmissionMiddlewareBoundsCalls(t *testing.T) {
 			firstDone <- err
 		}()
 		<-started
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond) //nolint:kennlint // the deadline is the expected result; release holds the only concurrency slot until it fires
 		defer cancel()
 		_, err := handler(ctx, "tools/call", nil)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		close(release)
 		require.NoError(t, <-firstDone)
+		require.EqualValues(t, 1, observations.Load())
 	})
 
 	t.Run("concurrency wait does not consume rate permit", func(t *testing.T) {
 		concurrent := make(chan struct{}, 1)
 		concurrent <- struct{}{}
-		handler := toolAdmissionMiddleware(rate.NewLimiter(1, 1), concurrent)(
+		// An hour-long refill makes a spent permit fail the admitted call at once.
+		handler := toolAdmissionMiddleware(rate.NewLimiter(rate.Every(time.Hour), 1), concurrent, nil)(
 			func(context.Context, string, sdkmcp.Request) (sdkmcp.Result, error) {
 				return nil, nil
 			},
 		)
-		blockedContext, cancelBlocked := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		blockedContext, cancelBlocked := context.WithTimeout(t.Context(), 10*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the filled concurrency channel blocks admission until it fires
 		defer cancelBlocked()
 		_, err := handler(blockedContext, "tools/call", nil)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		<-concurrent
 
-		admittedContext, cancelAdmitted := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		admittedContext, cancelAdmitted := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancelAdmitted()
 		_, err = handler(admittedContext, "tools/call", nil)
 		require.NoError(t, err)
@@ -552,9 +592,21 @@ func TestRecurrencePatchSchemaRequiresRevision(t *testing.T) {
 	require.NoError(t, schema.Validate(map[string]any{"action": "create", "template": map[string]any{"title": "Review"}}))
 }
 
+func discoveryHealth(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/api/v1/health" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"ok":true,"api_schema_version":"0.27.0"}`))
+	return true
+}
+
 func TestToolsUseBoundDaemonProjectAndActor(t *testing.T) {
 	requests := make(chan capturedRequest, 20)
 	daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if discoveryHealth(writer, request) {
+			return
+		}
 		body, err := io.ReadAll(request.Body)
 		require.NoError(t, err)
 		requests <- capturedRequest{
@@ -583,8 +635,8 @@ func TestToolsUseBoundDaemonProjectAndActor(t *testing.T) {
 		wantKey    string
 		wantMatch  string
 	}{
-		{name: "search", tool: "kata.search", arguments: map[string]any{"query": "callback race", "limit": 3, "labels": []string{"bug"}}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/search", wantQuery: []string{"q=callback+race", "limit=4", "label=bug"}, wantMatch: "abc1"},
-		{name: "list", tool: "kata.list", arguments: map[string]any{"status": "open", "limit": 3, "unowned": true}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/issues", wantQuery: []string{"status=open", "limit=4", "unowned=true"}, wantMatch: "abc1"},
+		{name: "search", tool: "kata.search", arguments: map[string]any{"query": "callback race", "limit": 3, "labels": []string{"bug"}}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/search", wantQuery: []string{"q=callback+race", "limit=3", "label=bug"}, wantMatch: "abc1"},
+		{name: "list", tool: "kata.list", arguments: map[string]any{"status": "open", "limit": 3, "unowned": true}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/issues", wantQuery: []string{"status=open", "limit=3", "unowned=true", "sort=created"}, wantMatch: "abc1"},
 		{name: "show", tool: "kata.show", arguments: map[string]any{"ref": "abc1", "comment_limit": 1}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/issues/abc1", wantMatch: "Issue title"},
 		{name: "ready", tool: "kata.ready", arguments: map[string]any{"limit": 3, "unowned": true}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/ready", wantQuery: []string{"limit=4", "unowned=true"}, wantMatch: "abc1"},
 		{name: "labels", tool: "kata.labels", arguments: map[string]any{}, wantMethod: http.MethodGet, wantPath: "/api/v1/projects/42/labels", wantMatch: "bug"},
@@ -830,7 +882,7 @@ func assertSummaryHydration(t *testing.T, tool string, structured map[string]any
 	}
 }
 
-func TestListLikeToolsProbeOneExtraResult(t *testing.T) {
+func TestDiscoveryToolsReportIncompletePages(t *testing.T) {
 	tests := []struct {
 		name      string
 		tool      string
@@ -846,10 +898,17 @@ func TestListLikeToolsProbeOneExtraResult(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if discoveryHealth(writer, request) {
+					return
+				}
 				require.Equal(t, tt.path, request.URL.Path)
-				require.Equal(t, "3", request.URL.Query().Get("limit"))
+				count := 3
+				if tt.tool != "kata.ready" {
+					count = 2
+				}
+				require.Equal(t, fmt.Sprint(count), request.URL.Query().Get("limit"))
 				writer.Header().Set("Content-Type", "application/json")
-				_, _ = writer.Write(listLikeResponse(tt.tool, 3))
+				_, _ = writer.Write(listLikeResponse(tt.tool, count))
 			}))
 			t.Cleanup(daemon.Close)
 			apiClient, err := kataclient.NewWithHTTPClient(daemon.URL, daemon.Client())
@@ -1122,9 +1181,9 @@ func daemonResponse(request *http.Request) []byte {
 	path := request.URL.Path
 	switch {
 	case strings.HasSuffix(path, "/search"):
-		return mustJSONBytes(map[string]any{"query": "callback race", "mode": "lexical", "results": []any{map[string]any{"issue": issue, "score": 1.5, "matched_in": []string{"title"}}}})
+		return mustJSONBytes(map[string]any{"query": "callback race", "mode": "lexical", "complete": true, "results": []any{map[string]any{"issue": issue, "score": 1.5, "matched_in": []string{"title"}}}})
 	case strings.HasSuffix(path, "/ready"):
-		return mustJSONBytes(map[string]any{"issues": []any{issue}})
+		return mustJSONBytes(map[string]any{"complete": true, "issues": []any{issue}})
 	case strings.HasSuffix(path, "/labels") && request.Method == http.MethodGet:
 		return mustJSONBytes(map[string]any{"labels": []any{map[string]any{"label": "bug", "count": 1}}})
 	case strings.HasSuffix(path, "/comments"):
@@ -1138,7 +1197,7 @@ func daemonResponse(request *http.Request) []byte {
 	case strings.Contains(path, "/actions/"):
 		return mustJSONBytes(map[string]any{"changed": true, "issue": issue, "event": event})
 	case strings.HasSuffix(path, "/issues") && request.Method == http.MethodGet:
-		return mustJSONBytes(map[string]any{"issues": []any{issue}})
+		return mustJSONBytes(map[string]any{"complete": true, "issues": []any{issue}})
 	case strings.HasSuffix(path, "/issues") && request.Method == http.MethodPost:
 		return mustJSONBytes(map[string]any{"changed": true, "issue": issue, "event": event})
 	case request.Method == http.MethodPatch:
@@ -1174,9 +1233,9 @@ func listLikeResponse(tool string, count int) []byte {
 		results = append(results, map[string]any{"issue": issue, "score": 1.0, "matched_in": []string{"title"}})
 	}
 	if tool == "kata.search" {
-		return mustJSONBytes(map[string]any{"query": "work", "mode": "lexical", "results": results})
+		return mustJSONBytes(map[string]any{"query": "work", "mode": "lexical", "complete": false, "truncated": true, "results": results})
 	}
-	return mustJSONBytes(map[string]any{"issues": issues})
+	return mustJSONBytes(map[string]any{"complete": false, "truncated": true, "next_cursor": "page-two", "issues": issues})
 }
 
 func mustJSON(t *testing.T, value any) []byte {
@@ -1201,9 +1260,12 @@ func schemaObject(t *testing.T, schema any) map[string]any {
 
 func TestListPreservesIssueBrowserURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if discoveryHealth(w, r) {
+			return
+		}
 		require.Equal(t, "/api/v1/projects/42/issues", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"issues":[{"uid":"01ARZ3NDEKTSV4RRFFQ69G5FAV","short_id":"5fav","web_url":"https://tasks.example/kata?issue=01ARZ3NDEKTSV4RRFFQ69G5FAV"}]}`))
+		_, _ = w.Write([]byte(`{"complete":true,"issues":[{"uid":"01ARZ3NDEKTSV4RRFFQ69G5FAV","short_id":"5fav","web_url":"https://tasks.example/kata?issue=01ARZ3NDEKTSV4RRFFQ69G5FAV"}]}`))
 	}))
 	t.Cleanup(server.Close)
 	client, err := kataclient.NewWithHTTPClient(server.URL, server.Client())
