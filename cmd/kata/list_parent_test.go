@@ -50,7 +50,7 @@ func TestList_Parent(t *testing.T) {
 
 	t.Run("agent rows carry each child's status", func(t *testing.T) {
 		out := runCLI(t, env, dir, "--agent", "list", "--parent", parent, "--status", "all")
-		assert.Contains(t, out, "OK list count=2\n")
+		assert.Contains(t, out, "OK list count=2 complete=true\n")
 		assert.Regexp(t, `(?m)^- issue=`+openChild+` status=open .*title="open child"`, out)
 		assert.Regexp(t, `(?m)^- issue=`+closedChild+` status=closed .*title="closed child"`, out)
 		assert.NotContains(t, out, "unrelated issue")
@@ -85,7 +85,7 @@ func TestList_Parent(t *testing.T) {
 	})
 
 	t.Run("a leaf lists nothing", func(t *testing.T) {
-		assert.Equal(t, "OK list count=0", runCLI(t, env, dir, "--agent", "list", "--parent", openChild))
+		assert.Equal(t, "OK list count=0 complete=true", runCLI(t, env, dir, "--agent", "list", "--parent", openChild))
 	})
 
 	t.Run("all projects includes children elsewhere", func(t *testing.T) {
