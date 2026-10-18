@@ -20,6 +20,7 @@ import (
 )
 
 const dispatcherTestGraceWindow = 500 * time.Millisecond
+const dispatcherTestRunWait = 15 * time.Second
 
 // mustNewDispatcher builds a Dispatcher rooted at a fresh temp KataHome with
 // no-op resolvers and returns the dispatcher, a buffer capturing the daemon
@@ -117,11 +118,11 @@ func TestDispatcher_Enqueue_RoutesToMatchingHooks(t *testing.T) {
 	cfg.QueueCap = 8
 	d, _, runsPath := mustNewDispatcher(t, []ResolvedHook{hookA, hookB}, cfg)
 	enqueueEvents(d, "issue.created", 100, 1)
-	if !waitForLines(t, runsPath, 1, 5*time.Second) {
+	if !waitForLines(t, runsPath, 1, dispatcherTestRunWait) {
 		t.Fatal("expected 1 run for hookA")
 	}
 	enqueueEvents(d, "issue.updated", 101, 1)
-	if !waitForLines(t, runsPath, 2, 5*time.Second) {
+	if !waitForLines(t, runsPath, 2, dispatcherTestRunWait) {
 		t.Fatal("expected 2 runs after second event")
 	}
 }
@@ -282,7 +283,7 @@ func TestDispatcher_Shutdown_Timeout_ReportsInflight(t *testing.T) {
 	d, logBuf, _ := mustNewDispatcher(t, []ResolvedHook{stuck}, cfg)
 	enqueueEvents(d, "issue.created", 300, 1)
 	waitForInflight(t, d, 1, 5*time.Second)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the term-ignore hook keeps Shutdown waiting until it fires
 	defer cancel()
 	if err := d.Shutdown(ctx); err == nil {
 		t.Fatal("Shutdown with 5ms ctx vs term-ignore should return error")

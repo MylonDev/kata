@@ -18,10 +18,14 @@ var errMovePreview = errors.New("move preview complete")
 // stable UID relationships and allocating a fresh target-local short ID.
 func (s *Store) MoveIssueProject(ctx context.Context, input db.MoveIssueProjectIn) (db.MoveIssueProjectOut, error) {
 	var output db.MoveIssueProjectOut
+	var committedEvent *db.Event
 	if input.FromProjectID == input.ToProjectID {
 		return output, fmt.Errorf("source and target projects are the same")
 	}
 	err := s.withSerializableTx(ctx, func(tx *sql.Tx) error {
+		if err := lockProjectAccessExclusive(ctx, tx); err != nil {
+			return err
+		}
 		if err := ensureFederatedMoveAllowedTx(ctx, tx, input.FromProjectID, input.ToProjectID); err != nil {
 			return err
 		}
@@ -40,6 +44,9 @@ func (s *Store) MoveIssueProject(ctx context.Context, input db.MoveIssueProjectI
 		}
 		if current.RecurrenceID != nil {
 			return &db.RecurrencePinnedError{}
+		}
+		if err := db.CheckNativeRecurringParentMove(ctx, tx, true, input.FromProjectID, current.UID); err != nil {
+			return err
 		}
 		if err := lockAndRejectFreshExternalRootClaimsForIssueTx(
 			ctx, tx, current.ID, time.Now().UTC().Add(-db.ExternalRootClaimStaleAfter),
@@ -87,6 +94,14 @@ SET project_id = $1, short_id = $2, revision = $3, updated_at = $4
 WHERE id = $5`, target.ID, newShortID, newRevision, updatedAt, current.ID); err != nil {
 			return mapSQLError(err, nil)
 		}
+		// A moved issue changes who can see it, so in-flight requests recheck
+		// what they exposed exactly as they do after a policy change.
+		if err := bumpProjectAccess(ctx, tx); err != nil {
+			return fmt.Errorf("advance project access revision: %w", err)
+		}
+		if err := rebindIssueEmbeddingArtifactsTx(ctx, tx, current.UID, target.UID); err != nil {
+			return fmt.Errorf("rehome embedding artifacts: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE issue_claims SET project_id = $1 WHERE issue_id = $2`, target.ID, current.ID); err != nil {
 			return fmt.Errorf("rehome issue claims: %w", mapSQLError(err, nil))
@@ -126,16 +141,24 @@ SET project_id = $1 WHERE issue_id = $2`,
 		if err != nil {
 			return err
 		}
-		output.Issue, err = scanIssue(tx.QueryRowContext(ctx, issueSelect+` WHERE i.id = $1`, current.ID))
+		output.Issue, err = scanIssue(ctx, tx.QueryRowContext(ctx, issueSelect+` WHERE i.id = $1`, current.ID))
+		if err != nil {
+			return err
+		}
+		committedEvent = &event
 		output.EventID = event.ID
 		output.NewShortID = newShortID
 		output.NewRevision = newRevision
-		return err
+		return nil
 	})
 	if errors.Is(err, errMovePreview) {
 		return output, nil
 	}
-	return output, err
+	if err != nil {
+		return db.MoveIssueProjectOut{}, err
+	}
+	output.Event = committedEvent
+	return output, nil
 }
 
 func rejectIssueMoveExternalRootIssueSyncTx(

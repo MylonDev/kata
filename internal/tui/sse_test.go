@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -165,6 +166,19 @@ func TestSSEParser_LinkPayloadType(t *testing.T) {
 	}
 }
 
+func TestSSEParser_CommentEditedPayloadUID(t *testing.T) {
+	body := []byte(`{
+		"type":"issue.comment_edited",
+		"project_id":7,
+		"issue_uid":"source-issue",
+		"payload":{"comment_uid":"edited-comment"}
+	}`)
+	got := decodeEventReceived(frame{kind: frameEvent, data: body})
+	if got.commentUID != "edited-comment" {
+		t.Fatalf("commentUID = %q, want edited-comment", got.commentUID)
+	}
+}
+
 // TestSSEParser_LinkPayloadDecodesDaemonWireShape pins that the TUI
 // linkPayload decoder reads the daemon's emitted UID field names
 // (`from_uid` / `to_uid` — see queries_links.go::CreateLinkAndEvent and
@@ -266,7 +280,7 @@ func TestSSE_NoConnectedStatusBeforeFirstFrame(t *testing.T) {
 	select {
 	case msg := <-ch:
 		t.Fatalf("expected no message, got %T = %+v", msg, msg)
-	case <-time.After(50 * time.Millisecond):
+	default:
 		// Expected: no message on the channel.
 	}
 }
@@ -277,10 +291,14 @@ func TestSSE_NoConnectedStatusBeforeFirstFrame(t *testing.T) {
 func TestSSE_ReconnectSendsLastEventID(t *testing.T) {
 	var connects atomic.Int32
 	var secondHeader atomic.Value
+	secondConnected := make(chan struct{})
 	srv := newSSEMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		n := connects.Add(1)
 		if n >= 2 {
 			secondHeader.Store(r.Header.Get("Last-Event-ID"))
+			if n == 2 {
+				close(secondConnected)
+			}
 			// Hold so the test has time to see the header.
 			<-r.Context().Done()
 			return
@@ -314,18 +332,11 @@ Reconnect:
 	// Wait for the SSE goroutine to reconnect (second connect arrives
 	// after the 1s reconnect backoff). The test deadline must outlast
 	// that — we use 4s for slack.
-	deadline = time.After(4 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("second connect never arrived")
-		case <-time.After(50 * time.Millisecond):
-			if connects.Load() >= 2 {
-				goto Done
-			}
-		}
+	select {
+	case <-time.After(4 * time.Second):
+		t.Fatal("second connect never arrived")
+	case <-secondConnected:
 	}
-Done:
 	cancel()
 	<-done
 	// The second connect carries Last-Event-ID: 5.
@@ -335,59 +346,62 @@ Done:
 	}
 }
 
-// TestSSE_GracePeriod_FastReconnect_NoReconnectingBadge verifies that a
-// disconnect followed by a quick recovery (within reconnectStatusGrace)
-// never surfaces sseReconnecting to the channel — fast restarts must be
-// invisible to the UI. The handler returns a frame on the first connect,
-// closes, and returns another frame on the second connect; with the
-// default 1s initial backoff the reconnect lands well inside the 1.5s
-// grace window.
+// A reconnect inside the grace period must suppress the reconnecting badge.
+// Use fake time and in-memory streams so scheduler and HTTP delays cannot
+// turn the intended fast recovery into a long outage.
 func TestSSE_GracePeriod_FastReconnect_NoReconnectingBadge(t *testing.T) {
-	var connects atomic.Int32
-	srv := newSSEMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		n := connects.Add(1)
-		writeSSEFrame(t, w, int64(n), "issue.created",
-			`{"type":"issue.created","project_id":7}`)
-		if n == 1 {
-			return // close so reconnect happens
-		}
-		<-r.Context().Done()
-	})
+	synctest.Test(t, func(t *testing.T) {
+		savedBackoff := initialReconnectBackoff
+		initialReconnectBackoff = 100 * time.Millisecond // Even maximum jitter stays inside the grace period.
+		t.Cleanup(func() { initialReconnectBackoff = savedBackoff })
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ch := make(chan tea.Msg, 16)
-	done := make(chan struct{})
-	go func() {
-		startSSE(ctx, srv.Client(), srv.URL, nil, ch)
-		close(done)
-	}()
+		var connects int
+		hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			connects++
+			frame := formatSSEFrame(int64(connects), "issue.created",
+				`{"type":"issue.created","project_id":7}`)
+			body := io.NopCloser(strings.NewReader(frame))
+			if connects > 1 {
+				reader, writer := io.Pipe()
+				body = reader
+				go func() {
+					defer func() { _ = writer.Close() }()
+					_, _ = io.WriteString(writer, frame)
+					<-r.Context().Done()
+				}()
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+		})}
 
-	// Wait for two eventReceivedMsg arrivals (one per connect). The
-	// second arrival proves the reconnect succeeded; if no sseReconnecting
-	// crossed the channel by then, the grace timer was correctly cancelled.
-	var sawEvents int
-	var sawReconnecting bool
-	deadline := time.After(5 * time.Second)
-	for sawEvents < 2 {
-		select {
-		case <-deadline:
-			t.Fatalf("only saw %d eventReceivedMsg, want 2", sawEvents)
-		case msg := <-ch:
-			switch m := msg.(type) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := make(chan tea.Msg, 16)
+		done := make(chan struct{})
+		go func() {
+			startSSE(ctx, hc, "http://kata.invalid", nil, ch)
+			close(done)
+		}()
+
+		for sawEvents := 0; sawEvents < 2; {
+			switch msg := drainOne(t, ch).(type) {
 			case eventReceivedMsg:
 				sawEvents++
 			case sseStatusMsg:
-				if m.state == sseReconnecting {
-					sawReconnecting = true
+				if msg.state == sseReconnecting {
+					t.Fatal("reconnecting badge appeared during fast recovery")
 				}
 			}
 		}
-	}
-	cancel()
-	<-done
-	if sawReconnecting {
-		t.Fatal("sseReconnecting pushed during fast reconnect — grace timer should have suppressed it")
-	}
+		time.Sleep(reconnectStatusGrace)
+		synctest.Wait()
+		select {
+		case msg := <-ch:
+			t.Fatalf("unexpected message after recovery: %T = %+v", msg, msg)
+		default:
+		}
+		cancel()
+		<-done
+	})
 }
 
 // TestSSE_GracePeriod_TimerVsConnectIsRaceFree drives startSSE with a

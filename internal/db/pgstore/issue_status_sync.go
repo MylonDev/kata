@@ -49,7 +49,7 @@ func loadIssueStatusMappingTx(ctx context.Context, tx *sql.Tx, binding db.IssueS
 		if err := tx.QueryRowContext(ctx, `SELECT uid FROM issues WHERE id=$1`, *mapping.IssueID).Scan(&issueUID); err != nil {
 			return db.IssueStatusMapping{}, err
 		}
-		if event.ProjectID != binding.ProjectID || event.IssueUID == nil || *event.IssueUID != issueUID || (event.Type != "issue.closed" && event.Type != "issue.reopened") {
+		if event.ProjectID != binding.ProjectID || db.FederationEventIssueUID(event.IssueUID, event.Payload) != issueUID || (event.Type != "issue.closed" && event.Type != "issue.reopened") {
 			return db.IssueStatusMapping{}, fmt.Errorf("%w: pending status event belongs to a different identity or mutation", db.ErrImportValidation)
 		}
 		result.PendingEvent = &event
@@ -139,7 +139,7 @@ func enqueueIssueStatusIntentTx(ctx context.Context, tx *sql.Tx, event db.Event)
 	_, err := tx.ExecContext(ctx, `UPDATE import_mappings SET pending_event_uid=$1
 WHERE issue_id=$2 AND project_id=$3 AND object_type='issue'
  AND EXISTS (SELECT 1 FROM issue_sync_bindings b WHERE b.project_id=import_mappings.project_id AND b.source_key=import_mappings.source
-  AND b.provider IN ('notion','github','plane') AND b.config_json::jsonb->>'status_sync'='two-way')
+  AND b.provider IN ('notion','github','plane','linear','twenty','todoist','ticktick') AND b.config_json::jsonb->>'status_sync'='two-way')
  AND NOT EXISTS (SELECT 1 FROM federation_bindings f WHERE f.project_id=import_mappings.project_id AND f.role='spoke' AND f.enabled=1)`, event.UID, event.IssueID, event.ProjectID)
 	return err
 }
@@ -180,7 +180,10 @@ func reconcileFederatedStatusIntentTx(ctx context.Context, tx *sql.Tx, projectID
 		}
 		switch event.Type {
 		case "issue.closed", "issue.reopened", "issue.updated", "issue.created", "issue.snapshot":
-			accepted[event.IssueUID] = append(accepted[event.IssueUID], event)
+			issueUID := db.FederationEventIssueUID(&event.IssueUID, string(event.Payload))
+			if issueUID != "" {
+				accepted[issueUID] = append(accepted[issueUID], event)
+			}
 		}
 	}
 	if len(accepted) == 0 {

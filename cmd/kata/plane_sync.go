@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +19,21 @@ func newPlaneSyncCmd() *cobra.Command {
 func newPlaneSyncEnableCmd() *cobra.Command {
 	var workspace, project, interval, since, statusSync, closedState, openState string
 	var titlePrefix bool
-	cmd := &cobra.Command{Use: "enable", Short: "enable daemon-side Plane sync for this project", Args: cobra.NoArgs}
+	cmd := &cobra.Command{
+		Use:   "enable",
+		Short: "enable daemon-side Plane sync for this project",
+		Long: `Bind the Kata project (bound or --project) to one Plane project and start
+daemon-side polling. The first enable needs --plane-workspace (slug) and
+--plane-project (UUID); both are fixed after that. The daemon reads its API
+key from KATA_PLANE_TOKEN; [plane_sync] in config.toml sets token_env and
+self-hosted origins. Re-enable keeps every option you omit. --since limits
+the import to work items updated after a date; pass --since= to clear it.
+--status-sync two-way also sends Kata close and reopen back to Plane;
+--closed-state and --open-state pick the target states.`,
+		Example: `  kata sync plane enable --plane-workspace example-workspace --plane-project <project-uuid> --agent
+  kata sync plane enable --status-sync two-way --interval 10m --agent`,
+		Args: cobra.NoArgs,
+	}
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		config := map[string]any{}
 		invalid := func(message string) error {
@@ -78,15 +91,9 @@ func newPlaneSyncEnableCmd() *cobra.Command {
 			config[target.key] = value
 		}
 		if cmd.Flags().Changed("interval") {
-			value := strings.TrimSpace(interval)
-			seconds, err := strconv.Atoi(value)
+			value, err := issueSyncIntervalFlag("plane", interval)
 			if err != nil {
-				duration, parseErr := time.ParseDuration(value)
-				if parseErr != nil || duration < time.Second {
-					return invalid("Plane sync interval must be at least one second")
-				}
-			} else if seconds < 1 {
-				return invalid("Plane sync interval must be at least one second")
+				return err
 			}
 			body.Interval = &value
 		}

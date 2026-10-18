@@ -221,6 +221,43 @@ func TestMCPServeHTTPBearerProtectsMCPButNotHealth(t *testing.T) {
 	require.NoError(t, session.Close())
 }
 
+// The session listener keeps loaders' list-changed notifications working, so a
+// per-request 2026-07-28 call must learn which session versions it can use.
+func TestMCPServeHTTPPerRequestProtocolListsSessionVersions(t *testing.T) {
+	setupKataEnv(t)
+	t.Setenv("KATA_AUTHOR", "example-agent")
+	daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if serveMCPTestHealth(writer, request) {
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	t.Cleanup(daemon.Close)
+
+	endpoint := startMCPHTTPTestServer(t, daemon.URL)
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"` + currentMCPProtocolVersion + `","io.modelcontextprotocol/clientCapabilities":{}}}}`)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, endpoint, body)
+	require.NoError(t, err)
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("Authorization", "Bearer test-mcp-token")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Mcp-Protocol-Version", currentMCPProtocolVersion)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+	var decoded struct {
+		Error struct {
+			Code int64                                 `json:"code"`
+			Data sdkmcp.UnsupportedProtocolVersionData `json:"data"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&decoded))
+	require.EqualValues(t, sdkmcp.CodeUnsupportedProtocolVersion, decoded.Error.Code)
+	require.Contains(t, decoded.Error.Data.Supported, "2025-11-25")
+	require.NotContains(t, decoded.Error.Data.Supported, currentMCPProtocolVersion)
+}
+
 func TestMCPServeHTTPCrossOriginBrowserMutationRejected(t *testing.T) {
 	setupKataEnv(t)
 	t.Setenv("KATA_AUTHOR", "example-agent")
@@ -297,7 +334,7 @@ func TestMCPServeHTTPRejectsLoopbackHostThatDoesNotMatchConfiguredAuthority(t *t
 }
 
 func TestResolveMCPHTTPTokenLoopbackRequiresBearer(t *testing.T) {
-	_, err := resolveMCPHTTPToken("127.0.0.1:8080", "", false)
+	_, err := resolveMCPHTTPToken("127.0.0.1:8080", "", "", false)
 	require.ErrorContains(t, err, "--http-token-env")
 }
 
@@ -351,7 +388,7 @@ func TestRunMCPHTTPServerWaitsForInflightHandlersDuringShutdown(t *testing.T) {
 	select {
 	case err := <-serveDone:
 		t.Fatalf("server returned before its in-flight handler completed: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence window; release holds the in-flight handler, so Serve must not return
 	}
 	close(release)
 	require.NoError(t, <-serveDone)
@@ -387,7 +424,7 @@ func TestMCPServeHTTPTrustedPrivateNetworkRejectsPublicAndHostnameBinds(t *testi
 	t.Setenv("KATA_MCP_TEST_TOKEN", "test-mcp-token")
 	for _, address := range []string{"203.0.113.10:8080", "daemon.example:8080"} {
 		t.Run(address, func(t *testing.T) {
-			_, err := resolveMCPHTTPToken(address, "KATA_MCP_TEST_TOKEN", true)
+			_, err := resolveMCPHTTPToken(address, "", "KATA_MCP_TEST_TOKEN", true)
 			require.ErrorContains(t, err, "non-public")
 		})
 	}
@@ -397,7 +434,7 @@ func TestMCPServeHTTPTrustedPrivateNetworkAllowsPrivateAndWildcardBinds(t *testi
 	t.Setenv("KATA_MCP_TEST_TOKEN", "test-mcp-token")
 	for _, address := range []string{"10.0.0.5:8080", "100.64.0.5:8080", "0.0.0.0:8080", "[::]:8080"} {
 		t.Run(address, func(t *testing.T) {
-			token, err := resolveMCPHTTPToken(address, "KATA_MCP_TEST_TOKEN", true)
+			token, err := resolveMCPHTTPToken(address, "", "KATA_MCP_TEST_TOKEN", true)
 			require.NoError(t, err)
 			require.Equal(t, "test-mcp-token", token)
 		})

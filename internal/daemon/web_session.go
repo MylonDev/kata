@@ -333,6 +333,39 @@ func (m *WebSessionManager) CanWrite(principal Principal) bool {
 	return m.writable && principalAllowsWebWrites(principal)
 }
 
+// CanAdministerAccess reports narrow source-daemon team and project-policy authority.
+// It never grants ordinary attributed writes or target-daemon administration.
+func (m *WebSessionManager) CanAdministerAccess(principal Principal) bool {
+	return m.writable && (principal.Kind == PrincipalBootstrap || principal.Kind == PrincipalStaticToken)
+}
+
+func browserAccessAdministrationRequest(r *http.Request) bool {
+	parts, ok := escapedPathSegments(r.URL)
+	if !ok || len(parts) < 3 || parts[0] != "api" || parts[1] != "v1" {
+		return false
+	}
+	if parts[2] == "teams" {
+		return (len(parts) == 3 && r.Method == http.MethodPost) ||
+			(len(parts) == 4 && r.Method == http.MethodDelete) ||
+			(len(parts) == 6 && parts[4] == "members" && (r.Method == http.MethodPut || r.Method == http.MethodDelete))
+	}
+	return len(parts) == 5 && parts[2] == "projects" && parts[4] == "access" && r.Method == http.MethodPut
+}
+
+// escapedPathSegments splits the escaped path before unescaping each segment,
+// as the HTTP router does, so an encoded slash stays inside its segment.
+func escapedPathSegments(u *url.URL) ([]string, bool) {
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	for i, part := range parts {
+		segment, err := url.PathUnescape(part)
+		if err != nil {
+			return nil, false
+		}
+		parts[i] = segment
+	}
+	return parts, true
+}
+
 func principalAllowsWebWrites(principal Principal) bool {
 	switch principal.Kind {
 	case PrincipalBootstrap, PrincipalTrustedProxyAbsent:
@@ -421,7 +454,8 @@ func requireBrowserSession(manager *WebSessionManager, policy ListenerPolicy, ne
 		}
 		if isMutation(r.Method) {
 			isLogout := r.Method == http.MethodDelete && r.URL.Path == "/api/v1/ui/session"
-			if !isLogout && !manager.CanWrite(principal) {
+			canWrite := manager.CanWrite(principal) || (manager.CanAdministerAccess(principal) && browserAccessAdministrationRequest(r))
+			if !isLogout && !canWrite {
 				writeWebSessionError(w, http.StatusForbidden, "read_only", manager.Origin(), policy)
 				return
 			}
@@ -445,7 +479,7 @@ func webLocalSPARequestAllowed(r *http.Request) bool {
 		return r.Method == http.MethodGet
 	case "/api/v1/ui/session":
 		return r.Method == http.MethodDelete
-	case "/api/v1/projects":
+	case "/api/v1/projects", "/api/v1/ui/telemetry":
 		return r.Method == http.MethodPost
 	}
 	if strings.HasPrefix(r.URL.Path, webDaemonProxyPrefix+"/") {
@@ -466,6 +500,8 @@ func webLocalSPARequestAllowed(r *http.Request) bool {
 	}
 
 	switch parts[1] {
+	case "federation":
+		return len(parts) == 3 && parts[2] == "status" && r.Method == http.MethodGet
 	case "metadata":
 		return len(parts) == 2 && r.Method == http.MethodPost
 	case "recurrences":
@@ -514,13 +550,25 @@ func browserSessionRequired(r *http.Request, policy ListenerPolicy, manager *Web
 	if r.URL.Path == pathPing || r.URL.Path == pathHealth || isWebSessionBootstrapRequest(r) {
 		return false
 	}
+	if r.URL.Path == pathDoctor &&
+		(policy.Kind == ListenerBrowser || isBrowserRequest(r)) &&
+		!ordinaryAPIBearerRequest(r) {
+		return true
+	}
 	if !manager.Writable() && r.Method == http.MethodGet && r.URL.Path != pathEventsStreamPath {
 		return r.Header.Get(webSessionHeader) != ""
+	}
+	// Login-mode listeners also serve ordinary bearer clients. Only configured
+	// bearer authentication can take this path; a keyless browser listener must
+	// never upgrade an arbitrary Authorization header to owner authority.
+	if (manager.auth.Token != "" || manager.auth.RequireTokenIdentity) && ordinaryAPIBearerRequest(r) {
+		return false
 	}
 	if policy.Kind == ListenerSharedTCP {
 		if manager.auth.Token != "" && r.Header.Get(authHeader) != "" &&
 			r.Header.Get("Origin") == "" && r.Header.Get(webSessionHeader) == "" &&
-			r.Header.Get("Cookie") == "" {
+			r.Header.Get("Cookie") == "" &&
+			r.Header.Get(webCSRFHeader) == "" && r.Header.Get("Sec-Fetch-Site") == "" {
 			return false
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/ui/") {
@@ -533,7 +581,8 @@ func browserSessionRequired(r *http.Request, policy ListenerPolicy, manager *Web
 			}
 			return true
 		}
-		if r.Header.Get("Origin") != "" || r.Header.Get(webSessionHeader) != "" {
+		if r.Header.Get("Origin") != "" || r.Header.Get(webSessionHeader) != "" ||
+			r.Header.Get(webCSRFHeader) != "" || r.Header.Get("Sec-Fetch-Site") != "" {
 			return true
 		}
 		if _, err := r.Cookie(manager.CookieName()); err == nil {

@@ -52,20 +52,27 @@ func (r *adapter) Prepare(ctx context.Context, binding db.IssueSyncBinding, sync
 		}
 	}
 
-	reportProgress(ctx, "parents", 0, 0)
-	parentData, err := fetcher.ParentData(ctx, ghConfig.Binding())
+	cutoff, err := ghConfig.SinceTime()
 	if err != nil {
 		return issuesync.Prepared{Binding: binding}, err
+	}
+	// Probe unsupported hosts before forcing a backfill REST pass. Otherwise
+	// their permanently pending marker would force full issue reads every run.
+	filteredBootstrap := binding.LastCursorAt == nil && cutoff != nil
+	preflightParents := !filteredBootstrap && (binding.LastCursorAt == nil || ghConfig.NeedsParentLinkBackfill())
+	var parentData ParentData
+	if preflightParents {
+		reportProgress(ctx, "parents", 0, 0)
+		parentData, err = fetcher.ParentData(ctx, ghConfig.Binding(), ParentRequest{})
+		if err != nil {
+			return issuesync.Prepared{Binding: binding}, err
+		}
 	}
 	parentLinkBackfill := ghConfig.NeedsParentLinkBackfill() && parentData.Scan == ParentScanComplete
 
 	since := syncSince(binding.LastCursorAt)
 	if reconcileLegacyTitles || parentLinkBackfill {
 		since = nil
-	}
-	cutoff, err := ghConfig.SinceTime()
-	if err != nil {
-		return issuesync.Prepared{Binding: binding}, err
 	}
 	if cutoff != nil && (since == nil || cutoff.After(*since)) {
 		since = cutoff
@@ -84,6 +91,18 @@ func (r *adapter) Prepare(ctx context.Context, binding db.IssueSyncBinding, sync
 		}
 		issues = eligible
 	}
+	if !preflightParents {
+		request, err := r.parentRequest(ctx, binding, issues, cutoff)
+		if err != nil {
+			return issuesync.Prepared{Binding: binding}, err
+		}
+		reportProgress(ctx, "parents", 0, len(request.IssueNumbers))
+		parentData, err = fetcher.ParentData(ctx, ghConfig.Binding(), request)
+		if err != nil {
+			return issuesync.Prepared{Binding: binding}, err
+		}
+	}
+	parentLinkBackfill = ghConfig.NeedsParentLinkBackfill() && parentData.Scan == ParentScanComplete
 	comments, err := r.fetchComments(ctx, fetcher, ghConfig, issues)
 	if err != nil {
 		return issuesync.Prepared{Binding: binding}, err
@@ -92,7 +111,7 @@ func (r *adapter) Prepare(ctx context.Context, binding db.IssueSyncBinding, sync
 	batch := BuildImportBatchWithConfig(binding.SourceKey, ghConfig, issues, comments, parentData, syncStartedAt)
 	batch.ProjectID = binding.ProjectID
 	batch.PreserveLocalParentConflicts = true
-	if parentData.Scan == ParentScanComplete {
+	if parentData.Scan == ParentScanComplete || parentData.Scan == ParentScanIncremental {
 		batch.ReconcileLinkTypesForUnchanged = map[string]bool{"parent": true}
 		batch.Items, err = r.appendScannedParentReconcileItems(ctx, batch, parentData, cutoff != nil)
 		if err != nil {
@@ -131,6 +150,61 @@ func (r *adapter) Prepare(ctx context.Context, binding db.IssueSyncBinding, sync
 		}
 	}
 	return prepared, nil
+}
+
+// parentRequest selects the parent coverage for a run that skipped the
+// repository-wide preflight scan. Without a cursor that is a filtered
+// bootstrap of the eligible issues; otherwise it is an incremental pass over
+// changed issues and recent relationship events.
+func (r *adapter) parentRequest(ctx context.Context, binding db.IssueSyncBinding, issues []Issue, cutoff *time.Time) (ParentRequest, error) {
+	numbers := make([]int, 0, len(issues))
+	for _, issue := range issues {
+		if !IsPullRequestIssue(issue) && issue.Number > 0 {
+			numbers = append(numbers, issue.Number)
+		}
+	}
+	if binding.LastCursorAt == nil {
+		covered, err := r.selectedIssuesCoverImports(ctx, binding, issues)
+		if err != nil || !covered {
+			// Config changes can clear the cursor while keeping old imports.
+			// Their parent-only changes still need authoritative coverage.
+			return ParentRequest{}, err
+		}
+		return ParentRequest{IssueNumbers: numbers}, nil
+	}
+	// Relationship changes do not update updatedAt. Event discovery uses the
+	// cursor overlap even if the issue cutoff excludes an already imported child.
+	childrenOf, err := r.firstImportsBeforeCutoff(ctx, binding, issues, cutoff)
+	if err != nil {
+		return ParentRequest{}, err
+	}
+	return ParentRequest{Since: syncSince(binding.LastCursorAt), IssueNumbers: numbers, ChildrenOf: childrenOf}, nil
+}
+
+// selectedIssuesCoverImports permits a scoped bootstrap only when every
+// previously imported child is selected. A nil cursor can mean a config reset
+// or a partial import retry, so it alone does not prove the binding is fresh.
+func (r *adapter) selectedIssuesCoverImports(ctx context.Context, binding db.IssueSyncBinding, issues []Issue) (bool, error) {
+	mappings, err := r.config.Store.ImportMappingsByProjectSource(ctx, binding.ProjectID, binding.SourceKey)
+	if err != nil {
+		return false, fmt.Errorf("lookup github bootstrap imports: %w", err)
+	}
+	selected := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		if IsPullRequestIssue(issue) || issue.Number <= 0 {
+			continue
+		}
+		selected[issueExternalID(issue)] = true
+		for _, alias := range issueLegacyExternalIDs(issue) {
+			selected[alias] = true
+		}
+	}
+	for _, mapping := range mappings {
+		if mapping.ObjectType == "issue" && !selected[mapping.ExternalID] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *adapter) refreshRepository(ctx context.Context, binding db.IssueSyncBinding, ghConfig Config, repo Repository, startedAt time.Time) (db.IssueSyncBinding, Config, error) {
@@ -207,8 +281,33 @@ func (r *adapter) fetchComments(ctx context.Context, fetcher Fetcher, ghConfig C
 	return out, nil
 }
 
+// firstImportsBeforeCutoff returns issues created before the cutoff that have no
+// import mapping yet. Earlier runs dropped links from imported children to these
+// issues, so their children need a parent check once they are imported.
+func (r *adapter) firstImportsBeforeCutoff(ctx context.Context, binding db.IssueSyncBinding, issues []Issue, cutoff *time.Time) ([]int, error) {
+	if cutoff == nil {
+		return nil, nil
+	}
+	var numbers []int
+	for _, issue := range issues {
+		if IsPullRequestIssue(issue) || issue.Number <= 0 || issue.CreatedAt == nil || issue.CreatedAt.After(*cutoff) {
+			continue
+		}
+		externalID := issueExternalID(issue)
+		_, err := r.config.Store.ImportMappingBySource(ctx, binding.ProjectID, binding.SourceKey, "issue", externalID)
+		if errors.Is(err, db.ErrNotFound) {
+			numbers = append(numbers, issue.Number)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lookup github issue mapping %q: %w", externalID, err)
+		}
+	}
+	return numbers, nil
+}
+
 func (r *adapter) appendScannedParentReconcileItems(ctx context.Context, batch db.ImportBatchParams, parentData ParentData, hasCutoff bool) ([]db.ImportItem, error) {
-	if parentData.Scan != ParentScanComplete || len(parentData.ScannedChildIDs) == 0 {
+	if (parentData.Scan != ParentScanComplete && parentData.Scan != ParentScanIncremental) || len(parentData.ScannedChildIDs) == 0 {
 		return batch.Items, nil
 	}
 	present := make(map[string]struct{}, len(batch.Items))

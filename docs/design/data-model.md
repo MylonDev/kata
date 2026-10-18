@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-09-13
+last_edited: 2026-10-08
 ---
 
 # Data model and durability
@@ -214,6 +214,23 @@ assuming a generated name. Constraint classification maps only query-owned
 constraint names to `db.Storage` sentinels; other server errors retain SQLSTATE
 and constraint diagnostics while omitting row values, hints, and query text.
 
+SQLite has one writer at a time. Within one store handle, write transactions
+take turns through a first-in, first-out write queue. Each one joins when it
+begins, so the snapshot it reads is still current when it writes. The queue
+hands the writer to the next waiter as soon as the current one commits or rolls
+back. Without it, SQLite's busy handler leaves blocked writers sleeping and
+polling, so a long transaction that restarts immediately, such as federation
+materialization, can starve paced local writes, and the reverse.
+
+- Read-only transactions and autocommit reads never wait for the queue.
+- A write that waits longer than the 5-second busy timeout fails with busy
+  contention, and the store retries the whole transaction.
+- Federation push preparation is the one optimistic exception. It reads before
+  joining the queue and retries when another write commits first; see
+  [Push Replication](federation.md#push-replication).
+- Other processes that open the same file still contend through SQLite's
+  `busy_timeout`.
+
 Backend parity is measured behaviorally rather than inferred from interface
 satisfaction or schema shape. `internal/db/dbtest` runs the same observable
 storage scenarios against fresh SQLite and Postgres stores. The Postgres
@@ -232,3 +249,15 @@ locked replay transaction, restores the snapshot, rebuilds derived token state,
 and reconciles identity sequences before commit. This lets `kata import
 --target postgres://...` create a fresh `kata` schema or replace an initialized
 one with `--force` without exposing partial restored state.
+
+`kata import --as-standalone` uses the same replay transaction for an independent
+copy. JSONL normalization removes federation bindings, sync status, quarantine,
+enrollments, root pins, signed provenance, root-key transition metadata, relay
+delivery and reset metadata, pending attribution state, claims, pending claim
+requests, and `token.created` / `token.revoked` events before replay. It keeps
+the fresh target's instance identity, preserves content and historical event
+identities, and requires a fresh target even when called through the library.
+Removing token events prevents a later ordinary restore of the copy from
+recreating source authority. Ordinary restore and `--new-instance` keep their
+existing authority behavior. This operation changes no schema and does not
+copy configuration or credential files.

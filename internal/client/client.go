@@ -21,6 +21,7 @@ import (
 
 	"go.kenn.io/kata/internal/config"
 	"go.kenn.io/kata/internal/daemon"
+	"go.kenn.io/kata/internal/federationsigning"
 	kitdaemon "go.kenn.io/kit/daemon"
 )
 
@@ -98,14 +99,31 @@ type liveDaemon struct {
 	Info       PingInfo
 }
 
+type runtimeRecordReader func(string) ([]kitdaemon.RuntimeRecord, error)
+
+type liveDaemonScanner func(context.Context, string) iter.Seq2[liveDaemon, error]
+
 // liveDaemons scans the namespace's runtime records lazily. A successful
 // result contains a live daemon; an error result preserves store, context, or
 // unreachable-endpoint failures for callers that must distinguish them from
 // an empty store. Laziness is load bearing: Discover runs on every CLI
 // invocation and must stop after the first live record.
 func liveDaemons(ctx context.Context, dataDir string) iter.Seq2[liveDaemon, error] {
+	return liveDaemonsUsing(ctx, dataDir, func(dir string) ([]kitdaemon.RuntimeRecord, error) {
+		return (kitdaemon.RuntimeStore{Dir: dir}).List()
+	}, probeAddressWithError)
+}
+
+// liveDaemonsReadOnly scans runtime records without creating or repairing
+// their directory. Diagnostics use this path so inspection cannot change
+// runtime state.
+func liveDaemonsReadOnly(ctx context.Context, dataDir string) iter.Seq2[liveDaemon, error] {
+	return liveDaemonsUsing(ctx, dataDir, readRuntimeRecords, probeAddressReadOnly)
+}
+
+func liveDaemonsUsing(ctx context.Context, dataDir string, readRecords runtimeRecordReader, probe func(context.Context, string) (string, PingInfo, error)) iter.Seq2[liveDaemon, error] {
 	return func(yield func(liveDaemon, error) bool) {
-		recs, err := (kitdaemon.RuntimeStore{Dir: dataDir}).List()
+		recs, err := readRecords(dataDir)
 		if err != nil {
 			yield(liveDaemon{}, err)
 			return
@@ -116,7 +134,7 @@ func liveDaemons(ctx context.Context, dataDir string) iter.Seq2[liveDaemon, erro
 			}
 			ep := r.Endpoint()
 			address := ep.ConfigAddress()
-			url, info, probeErr := probeAddressWithError(ctx, address)
+			url, info, probeErr := probe(ctx, address)
 			if probeErr != nil {
 				if err := ctx.Err(); err != nil {
 					yield(liveDaemon{}, err)
@@ -185,6 +203,15 @@ func probeAddressWithError(ctx context.Context, address string) (string, PingInf
 	return base, info, nil
 }
 
+// Diagnostic discovery must inspect the recorded endpoint without following
+// redirects. Ordinary discovery keeps its existing redirect behavior.
+func probeAddressReadOnly(ctx context.Context, address string) (string, PingInfo, error) {
+	client, base := LocalHTTPClient(address)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	info, err := Probe(ctx, client, base)
+	return base, info, err
+}
+
 // LocalHTTPClient returns a short-timeout client and request base for a local
 // daemon runtime address: a `unix://` socket path or a plain host:port.
 func LocalHTTPClient(address string) (*http.Client, string) {
@@ -245,6 +272,7 @@ const SSEHandshakeTimeout = 10 * time.Second
 // Opts shapes both NewHTTPClient and NewStreamingClient. ResponseHeaderTimeout
 // is non-zero only for SSE clients.
 type Opts struct {
+	FederationSigning     *federationsigning.Source
 	Timeout               time.Duration
 	ResponseHeaderTimeout time.Duration
 	AllowInsecure         bool
@@ -325,6 +353,7 @@ func NewHTTPClient(ctx context.Context, baseURL string, opts Opts) (*http.Client
 func NewHTTPClientWithBearer(ctx context.Context, baseURL, token string, opts Opts) (*http.Client, error) {
 	auth := resolveAuthConfig()
 	auth.Token = token
+	auth.CredentialError = nil // This caller selected its own credential source.
 	return newHTTPClientWithAuth(ctx, baseURL, auth, opts)
 }
 
@@ -351,6 +380,9 @@ func NewHTTPClientForTarget(ctx context.Context, baseURL string, auth TargetAuth
 // construction does not re-read remote configuration, catalog credentials,
 // or global authentication policy.
 func NewHTTPClientForResolved(ctx context.Context, d ResolvedDaemon, opts Opts) (*http.Client, error) {
+	if d.credentialError != nil {
+		return nil, d.credentialError
+	}
 	if d.BaseURL == "" {
 		return nil, errors.New("resolved daemon has no base URL")
 	}
@@ -383,6 +415,9 @@ func NewHTTPClientForResolved(ctx context.Context, d ResolvedDaemon, opts Opts) 
 }
 
 func newHTTPClientWithAuth(ctx context.Context, baseURL string, auth config.AuthConfig, opts Opts) (*http.Client, error) {
+	if auth.CredentialError != nil {
+		return nil, auth.CredentialError
+	}
 	c, err := newHTTPClientWithoutAuth(ctx, baseURL, opts)
 	if err != nil {
 		return nil, err

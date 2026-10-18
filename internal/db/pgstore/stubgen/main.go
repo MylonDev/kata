@@ -43,6 +43,56 @@ const (
 // *sql.DB. Each method that lands a real query gets added here, and
 // the generator's output for that method disappears on the next regenerate.
 var alreadyImplemented = map[string]bool{
+	"DispatchRecurringCron": true, // cron.go
+	"ListRecurringCronJobs": true, // cron.go
+
+	"ClaimScreenView":     true, // store.go
+	"ReleaseScreenView":   true, // store.go
+	"ObserveCronRun":      true,
+	"IssuePlanningDates":  true,
+	"CronRun":             true,
+	"ListCronRuns":        true,
+	"ReadFederation":      true, // federation_read.go
+	"PutCronJob":          true,
+	"PutCronWorkflow":     true,
+	"CronJob":             true,
+	"CronWorkflow":        true,
+	"ListCronJobs":        true,
+	"ListCronWorkflows":   true,
+	"ExportCronJobs":      true,
+	"ExportCronWorkflows": true,
+	"ExportCronRuns":      true,
+
+	"AcceptRelayDeliveries":    true, // native relay storage
+	"AckRelayDeliveries":       true, // native relay storage
+	"CreateRelayEnrollment":    true, // native relay storage
+	"ExportRelayState":         true, // native relay storage
+	"PendingRelayDeliveries":   true, // native relay storage
+	"SetRelayBindingConfig":    true, // native relay storage
+	"RotateRootAuthority":      true, // federation_root_rotation.go
+	"RootKeyTransitions":       true, // federation_root_rotation.go
+	"PinRootAuthority":         true, // federation_provenance.go
+	"RootAuthority":            true, // federation_provenance.go
+	"RecordRootAttribution":    true, // federation_provenance.go
+	"ApplyUpstreamAttribution": true, // federation_provenance.go
+	"EntityAttribution":        true, // federation_provenance.go
+	"AttributionReceiptsAfter": true, // federation_provenance.go
+	"ExportAttribution":        true, // federation_provenance.go
+
+	"CreateTeam":                           true, // project_access.go
+	"TeamByUID":                            true, // project_access.go
+	"ListTeams":                            true, // project_access.go
+	"DeleteTeam":                           true, // project_access.go
+	"TeamMembers":                          true, // project_access.go
+	"SetTeamMembership":                    true, // project_access.go
+	"MigrateTeamActor":                     true, // project_access.go
+	"ProjectAccessPolicy":                  true, // project_access.go
+	"SetProjectAccessPolicy":               true, // project_access.go
+	"AccessibleProjectUIDs":                true, // project_access.go
+	"AnonymousAccessibleProjectUIDs":       true, // project_access.go
+	"ProjectAccessRevision":                true, // project_access.go
+	"ProjectAccessTransactionFence":        true, // project_access.go
+	"ExportProjectAccess":                  true, // project_access.go
 	"ApplyExternalFieldProjection":         true, // external_roots.go
 	"ActiveFederationQuarantine":           true, // federation_quarantine.go
 	"ActiveFederationQuarantinesByProject": true, // federation_quarantine.go
@@ -108,7 +158,9 @@ var alreadyImplemented = map[string]bool{
 	"CloseIssueGuarded":                    true, // issue_lifecycle.go
 	"CloseIssueWithEvents":                 true, // issue_lifecycle.go
 	"CommentBodyByID":                      true, // comments.go
+	"CommentIssueIDsByUIDs":                true, // comments.go
 	"CommentsByIssue":                      true, // comments.go
+	"ReadCommentGraph":                     true, // comment_graph.go
 	"CountOpenIssues":                      true, // project_lifecycle.go
 	"CountLiveClaims":                      true, // claims_core.go
 	"CountPendingClaims":                   true, // claims_core.go
@@ -176,14 +228,17 @@ var alreadyImplemented = map[string]bool{
 	"HasLabel":                             true, // labels.go
 	"ImportBatch":                          true, // imports.go
 	"ImportReplay":                         true, // import_replay.go
+	"InstanceCreatedAt":                    true, // store.go
 	"InstanceUID":                          true, // store.go
 	"InsertCloseThrottledEvent":            true, // events.go
 	"IngestFederationEvents":               true, // federation_ingest.go
 	"InsertRemoteEvent":                    true, // federation_events.go
+	"InsertRemoteEvents":                   true, // federation_events.go
 	"IssueByID":                            true, // issues.go
 	"IssueByShortID":                       true, // issues.go
 	"IssueByUID":                           true, // issues.go
 	"IssueQualifiersByUIDs":                true, // discovery.go
+	"IssuesByUIDs":                         true, // issues.go
 	"ImportMappingBySource":                true, // import_mappings.go
 	"ImportMappingsByProjectSource":        true, // import_mappings.go
 	"IssueSyncBindingByID":                 true, // issue_sync.go
@@ -197,6 +252,8 @@ var alreadyImplemented = map[string]bool{
 	"LabelsByIssues":                       true, // labels.go
 	"LabelsForIssue":                       true, // labels.go
 	"ListAPITokens":                        true, // tokens.go
+	"CountIssues":                          true,
+	"CountAllIssues":                       true,
 	"ListAllIssues":                        true, // issues.go
 	"ListDueIssueSyncBindings":             true, // issue_sync.go
 	"ListDueExternalRootBindings":          true, // external_roots.go

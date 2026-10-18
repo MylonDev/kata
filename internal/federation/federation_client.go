@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"go.kenn.io/kata/internal/federationsigning"
 	"go.kenn.io/kata/internal/httpurl"
 
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
@@ -43,6 +44,11 @@ func NewClient(ctx context.Context, baseURL string, token string, opts clientpkg
 	c, err := clientpkg.NewHTTPClientWithBearer(ctx, canonicalBaseURL, token, opts)
 	if err != nil {
 		return nil, err
+	}
+	if opts.FederationSigning != nil {
+		if err := federationsigning.ConfigureClient(c, canonicalBaseURL, token, *opts.FederationSigning); err != nil {
+			return nil, err
+		}
 	}
 	return &Client{
 		baseURL: canonicalBaseURL,
@@ -102,8 +108,33 @@ func (c *Client) IngestProjectEventsWithOptions(
 	if err != nil {
 		return api.FederationIngestEventsBody{}, err
 	}
+	// Schema30 accepts every pre-cron envelope supported here. Database
+	// schema versions are not feature negotiation: ordinary traffic remains
+	// compatible, while cron publication requires positive hub support and
+	// reply-bearing comments require a hub that understands replies.
+	schemaVersion := 30
+	requiredFeatures := ""
+	for _, event := range events {
+		version, required, err := db.FederationEventPayloadWireVersion(event.Type, event.Payload)
+		if err != nil {
+			return api.FederationIngestEventsBody{}, err
+		}
+		schemaVersion = max(schemaVersion, version)
+		if required != "" {
+			requiredFeatures = required
+		}
+	}
+	if requiredFeatures != "" {
+		_, supported, err := c.projectFederationFeatures(ctx, hubProjectID)
+		if err != nil {
+			return api.FederationIngestEventsBody{}, err
+		}
+		if err := db.RequireEventFeatures(supported, requiredFeatures); err != nil {
+			return api.FederationIngestEventsBody{}, err
+		}
+	}
 	data, err := json.Marshal(api.FederationIngestEventsRequestBody{
-		SchemaVersion: db.CurrentSchemaVersion(), AdoptionBaseline: opts.AdoptionBaseline,
+		SchemaVersion: schemaVersion, AdoptionBaseline: opts.AdoptionBaseline,
 		AdoptionBaselineEndEventID: opts.AdoptionBaselineEndEventID, Events: events,
 	})
 	if err != nil {
@@ -124,23 +155,130 @@ func (c *Client) IngestProjectEventsWithOptions(
 
 // ProjectFederation fetches the hub metadata needed to bind a spoke replica.
 func (c *Client) ProjectFederation(ctx context.Context, hubProjectID int64) (api.ProjectFederationBody, error) {
+	body, _, err := c.projectFederationFeatures(ctx, hubProjectID)
+	return body, err
+}
+func (c *Client) projectFederationFeatures(ctx context.Context, hubProjectID int64) (api.ProjectFederationBody, string, error) {
 	apiClient, err := generated.NewDefaultClient(c.baseURL, runtime.WithHTTPClient(replicationDoer{c.client}))
 	if err != nil {
-		return api.ProjectFederationBody{}, err
+		return api.ProjectFederationBody{}, "", err
 	}
 	response, callErr := apiClient.GetFederationProjectMetadataWithResponse(ctx, &generated.GetFederationProjectMetadataRequestOptions{PathParams: &generated.GetFederationProjectMetadataPath{ProjectID: hubProjectID}})
 	var body api.ProjectFederationBody
 	if response == nil {
-		return body, callErr
+		return body, "", callErr
 	}
 	err = decodeReplicationResponse(response.HTTPResponse, response.Body, &body)
-	return body, err
+	return body, response.HTTPResponse.Header.Get(db.EventFeaturesHeader), err
+}
+
+// RelayReset retrieves a retained root-signed checkpoint through the same
+// origin-pinned enrollment credential as ordinary relay delivery.
+func (c *Client) RelayReset(ctx context.Context, projectID int64) (db.RelayResetCheckpoint, error) {
+	apiClient, err := generated.NewDefaultClient(c.baseURL, runtime.WithHTTPClient(replicationDoer{c.client}))
+	if err != nil {
+		return db.RelayResetCheckpoint{}, err
+	}
+	response, callErr := apiClient.GetRelayResetWithResponse(ctx, &generated.GetRelayResetRequestOptions{PathParams: &generated.GetRelayResetPath{ProjectID: projectID}})
+	var checkpoint db.RelayResetCheckpoint
+	if response == nil {
+		return checkpoint, callErr
+	}
+	err = decodeReplicationResponse(response.HTTPResponse, response.Body, &checkpoint)
+	return checkpoint, err
+}
+
+// OfferRelayDeliveries polls the existing enrolled connection. Offers retain
+// their identity until the receiver commits and acknowledges their prefix.
+func (c *Client) OfferRelayDeliveries(ctx context.Context, projectID int64, stream string, limit int, epoch ...int64) (db.RelayBatch, error) {
+	apiClient, err := generated.NewDefaultClient(c.baseURL, runtime.WithHTTPClient(replicationDoer{c.client}))
+	if err != nil {
+		return db.RelayBatch{}, err
+	}
+	queryStream := generated.OfferRelayDeliveriesQueryStream(stream)
+	queryLimit := int64(limit)
+	query := &generated.OfferRelayDeliveriesQuery{Stream: &queryStream, Limit: &queryLimit}
+	if len(epoch) > 0 {
+		query.Epoch = &epoch[0]
+	}
+	response, callErr := apiClient.OfferRelayDeliveriesWithResponse(ctx, &generated.OfferRelayDeliveriesRequestOptions{PathParams: &generated.OfferRelayDeliveriesPath{ProjectID: projectID}, Query: query})
+	var batch db.RelayBatch
+	if response == nil {
+		return batch, callErr
+	}
+	err = decodeReplicationResponse(response.HTTPResponse, response.Body, &batch)
+	return batch, err
+}
+
+// AcceptRelayDeliveries submits an authenticated hop batch and returns its accepted prefix.
+func (c *Client) AcceptRelayDeliveries(ctx context.Context, projectID int64, batch db.RelayBatch) (db.RelayAcceptance, error) {
+	apiClient, err := generated.NewDefaultClient(c.baseURL, runtime.WithHTTPClient(replicationDoer{c.client}))
+	if err != nil {
+		return db.RelayAcceptance{}, err
+	}
+	raw, err := json.Marshal(batch)
+	if err != nil {
+		return db.RelayAcceptance{}, err
+	}
+	var payload generated.AcceptRelayDeliveriesBody
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return db.RelayAcceptance{}, err
+	}
+	response, callErr := apiClient.AcceptRelayDeliveriesWithResponse(ctx, &generated.AcceptRelayDeliveriesRequestOptions{PathParams: &generated.AcceptRelayDeliveriesPath{ProjectID: projectID}, Body: &payload})
+	var accepted db.RelayAcceptance
+	if response == nil {
+		return accepted, callErr
+	}
+	err = decodeReplicationResponse(response.HTTPResponse, response.Body, &accepted)
+	return accepted, err
+}
+
+// DownloadRelayArtifacts requests complete misses from the same origin-pinned
+// relay route. The sender resolves each digest against its emitted epoch.
+func (c *Client) DownloadRelayArtifacts(ctx context.Context, projectID, epoch int64, digests []string) (db.RelayBatch, error) {
+	apiClient, err := generated.NewDefaultClient(c.baseURL, runtime.WithHTTPClient(replicationDoer{c.client}))
+	if err != nil {
+		return db.RelayBatch{}, err
+	}
+	stream := generated.OfferRelayDeliveriesQueryStream(db.RelayStreamArtifact)
+	response, callErr := apiClient.OfferRelayDeliveriesWithResponse(ctx, &generated.OfferRelayDeliveriesRequestOptions{PathParams: &generated.OfferRelayDeliveriesPath{ProjectID: projectID}, Query: &generated.OfferRelayDeliveriesQuery{Stream: &stream, ArtifactDigest: digests, Epoch: &epoch}})
+	var batch db.RelayBatch
+	if response == nil {
+		return batch, callErr
+	}
+	err = decodeReplicationResponse(response.HTTPResponse, response.Body, &batch)
+	if err == nil && (batch.Stream != db.RelayStreamArtifact || len(batch.Envelopes) != 0 || len(batch.Artifacts) != len(digests)) {
+		return db.RelayBatch{}, db.ErrFederationIngestValidation
+	}
+	return batch, err
+}
+
+// AckRelayDeliveries acknowledges an exact emitted prefix for the authenticated hop.
+func (c *Client) AckRelayDeliveries(ctx context.Context, projectID, epoch int64, stream string, accepted db.RelayAcceptance) error {
+	apiClient, err := generated.NewDefaultClient(c.baseURL, runtime.WithHTTPClient(replicationDoer{c.client}))
+	if err != nil {
+		return err
+	}
+	payload := generated.AckRelayDeliveriesBody{Epoch: epoch, Stream: generated.RelayAckRequestBodyStream(stream), Through: accepted.Through, Digest: accepted.Digest}
+	response, callErr := apiClient.AckRelayDeliveriesWithResponse(ctx, &generated.AckRelayDeliveriesRequestOptions{PathParams: &generated.AckRelayDeliveriesPath{ProjectID: projectID}, Body: &payload})
+	if response == nil {
+		return callErr
+	}
+	var body api.RelayAckResponse
+	if err = decodeReplicationResponse(response.HTTPResponse, response.Body, &body.Body); err != nil {
+		return err
+	}
+	if !body.Body.Acknowledged {
+		return fmt.Errorf("relay acknowledgement was not retained")
+	}
+	return nil
 }
 
 // Keep the replication error body bounded before the generated runtime reads it.
 type replicationDoer struct{ client *http.Client }
 
 func (d replicationDoer) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
+	req.Header.Set(db.EventFeaturesHeader, db.SupportedEventFeatures)
 	resp, err := d.client.Do(req.WithContext(ctx)) //nolint:gosec // G704: generated replication routes use the explicitly configured trusted federation hub.
 	if err != nil {
 		return nil, err
@@ -149,6 +287,10 @@ func (d replicationDoer) Do(ctx context.Context, req *http.Request) (*http.Respo
 		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, &HubStatusError{Path: req.URL.Path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+	}
+	if err := db.RequireEventFeatures(db.SupportedEventFeatures, resp.Header.Get(db.RequiredEventFeaturesHeader)); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
 	}
 	return resp, nil
 }

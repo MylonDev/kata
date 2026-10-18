@@ -5,15 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"go.kenn.io/kata/internal/db/pgstore/pgstoretest"
+
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kata/internal/db/pgstore"
-	"go.kenn.io/kata/internal/testenv"
 )
 
 func TestFederationProjectAdvisoryLockCoordinatesStores(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	dsn, cleanup := testenv.NewPostgresContainer(t, ctx)
+	dsn, cleanup := pgstoretest.NewDatabase(t, ctx)
 	t.Cleanup(cleanup)
 
 	first, err := pgstore.Open(ctx, dsn)
@@ -38,7 +39,7 @@ func TestFederationProjectAdvisoryLockCoordinatesStores(t *testing.T) {
 	select {
 	case <-exclusiveAcquired:
 		t.Fatal("exclusive project lock acquired while another store held a shared lock")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence window; the shared lock holder keeps the exclusive lock from being granted
 	}
 	releaseShared()
 
@@ -62,7 +63,7 @@ func TestFederationProjectAdvisoryLockCoordinatesStores(t *testing.T) {
 	select {
 	case <-sharedAcquired:
 		t.Fatal("shared project lock acquired while another store held an exclusive lock")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence window; the exclusive lock holder keeps the shared lock from being granted
 	}
 	releaseExclusive()
 

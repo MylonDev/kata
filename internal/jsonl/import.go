@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.kenn.io/kata/internal/db"
@@ -32,6 +33,11 @@ type ImportOptions struct {
 	// cloned-from instance versus the new local one.
 	NewInstance bool
 
+	// AsStandalone creates a fresh, independently owned copy. It preserves
+	// content and history but drops federation state, claims, and replayable
+	// API-token events. Ordinary restore retains those records.
+	AsStandalone bool
+
 	// PreserveIssueSyncBindingEnabled is for trusted local schema cutover.
 	// External JSONL restores leave sync bindings disabled until re-enabled
 	// locally so restored provider config cannot use daemon credentials.
@@ -57,6 +63,13 @@ func Import(ctx context.Context, r io.Reader, store db.Storage) error {
 // atomically via store.ImportReplay. ImportWithOptions itself holds no SQL or
 // transaction state — the entire atomic insert lives in db.ImportReplay.
 func ImportWithOptions(ctx context.Context, r io.Reader, store db.Storage, opts ImportOptions) error {
+	if opts.AsStandalone {
+		if opts.MergeProject || opts.PreserveIssueSyncBindingEnabled || opts.PreserveExternalRootBindingsEnabled {
+			return fmt.Errorf("standalone copy cannot merge projects or preserve enabled external bindings")
+		}
+		opts.RequireFreshTarget = true
+		opts.NewInstance = true
+	}
 	if opts.MergeProject && (opts.RequireFreshTarget || opts.NewInstance) {
 		return fmt.Errorf("project merge cannot use fresh-target or new-instance restore options")
 	}
@@ -93,6 +106,30 @@ func ImportWithOptions(ctx context.Context, r io.Reader, store db.Storage, opts 
 		rec, err := toImportRecord(env, exportVersion, localInstanceUID, projectUIDByID)
 		if err != nil {
 			return err
+		}
+		if opts.AsStandalone {
+			switch record := rec.(type) {
+			case *db.FederationBindingExport, *db.FederationSyncStatusExport,
+				*db.FederationQuarantineExport, *db.FederationEnrollmentExport,
+				*db.IssueClaimExport, *db.PendingClaimRequestExport,
+				*db.RootKeyPin, *db.AttributionReceipt, *db.EntityProvenance,
+				*db.RelayOutboxExport, *db.RelayInboxExport, *db.RelayCursorExport:
+				continue
+			case *db.MetaKV:
+				if strings.HasPrefix(record.Key, db.RootKeyTransitionMetadataPrefix) ||
+					strings.HasPrefix(record.Key, db.RelayResetMetadataPrefix) ||
+					strings.HasPrefix(record.Key, db.RelayResetSupersededMetadataPrefix) ||
+					strings.HasPrefix(record.Key, db.AttributionUIResetMetadataPrefix) ||
+					strings.HasPrefix(record.Key, db.PendingCreationMetadataPrefix) {
+					continue
+				}
+			case *db.EventExport:
+				// Restore rebuilds token authority from these events. Omitting
+				// the projection alone would resurrect it on the next restore.
+				if record.Type == "token.created" || record.Type == "token.revoked" {
+					continue
+				}
+			}
 		}
 		recs = append(recs, rec)
 	}
@@ -195,6 +232,48 @@ func collectProjectUIDs(envs []Envelope) (map[int64]string, error) {
 
 func toImportRecord(env Envelope, exportVersion int, localInstanceUID string, projectUIDByID map[int64]string) (db.ImportRecord, error) {
 	switch env.Kind {
+	case KindEmbeddingArtifact:
+		var record db.EmbeddingArtifactExport
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
+	case KindRootKey:
+		var record db.RootKeyPin
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
+	case KindEventProvenance:
+		var record db.AttributionReceipt
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
+	case KindEntityProvenance:
+		var record db.EntityProvenance
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
+	case KindTeam:
+		var record db.Team
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
+	case KindTeamMembership:
+		var record db.TeamMembership
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
+	case KindProjectAccessPolicy:
+		var record db.ProjectAccessPolicy
+		if err := decodeData(env, &record); err != nil {
+			return nil, err
+		}
+		return &record, nil
 	case KindMeta:
 		var rec metaRecord
 		if err := decodeData(env, &rec); err != nil {
@@ -375,6 +454,25 @@ func toImportRecord(env Envelope, exportVersion int, localInstanceUID string, pr
 			return nil, err
 		}
 		return &rec, nil
+	case KindRelayOutbox:
+		var r db.RelayOutboxExport
+		if err := decodeData(env, &r); err != nil {
+			return nil, err
+		}
+		return &r, nil
+	case KindRelayInbox:
+		var r db.RelayInboxExport
+		if err := decodeData(env, &r); err != nil {
+			return nil, err
+		}
+		return &r, nil
+	case KindRelayCursors:
+		var r db.RelayCursorExport
+		if err := decodeData(env, &r); err != nil {
+			return nil, err
+		}
+		return &r, nil
+
 	case KindFederationEnrollment:
 		var rec db.FederationEnrollmentExport
 		if err := decodeData(env, &rec); err != nil {
@@ -399,6 +497,24 @@ func toImportRecord(env Envelope, exportVersion int, localInstanceUID string, pr
 			return nil, err
 		}
 		if err := normalizePendingClaimRequestTimes(&rec); err != nil {
+			return nil, err
+		}
+		return &rec, nil
+	case KindCronJob:
+		var rec db.CronJobExport
+		if err := json.Unmarshal(env.Data, &rec, json.RejectUnknownMembers(true)); err != nil {
+			return nil, err
+		}
+		return &rec, nil
+	case KindCronWorkflow:
+		var rec db.CronWorkflowExport
+		if err := json.Unmarshal(env.Data, &rec, json.RejectUnknownMembers(true)); err != nil {
+			return nil, err
+		}
+		return &rec, nil
+	case KindCronRun:
+		var rec db.CronRunExport
+		if err := json.Unmarshal(env.Data, &rec, json.RejectUnknownMembers(true)); err != nil {
 			return nil, err
 		}
 		return &rec, nil
@@ -863,7 +979,10 @@ func normalizeIssueTimes(rec *db.IssueExport) error {
 }
 
 func normalizeCommentTimes(rec *db.CommentExport) error {
-	return normalizePrecisionImportTime("comment.created_at", &rec.CreatedAt)
+	if err := normalizePrecisionImportTime("comment.created_at", &rec.CreatedAt); err != nil {
+		return err
+	}
+	return normalizePrecisionImportTime("comment.edited_at", &rec.EditedAt)
 }
 
 func normalizeIssueLabelTimes(rec *db.IssueLabelExport) error {

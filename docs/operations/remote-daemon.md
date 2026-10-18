@@ -1,7 +1,7 @@
 ---
 title: Remote daemon
 description: Serve Kata to trusted private-network clients with explicit authentication and transport settings.
-last_edited: 2026-09-28
+last_edited: 2026-10-08
 ---
 
 # Remote daemon
@@ -85,6 +85,22 @@ url = "http://100.64.0.5:7777"
 If none of those are set, clients next honor `active_daemon` in
 `<KATA_HOME>/config.toml`; otherwise they use local daemon discovery or
 auto-start.
+
+For project-scoped CLI commands such as `list`, `search`, and `create`, the
+client resolves `.kata.toml` and Git aliases on its own host. It never asks a
+remote daemon to search client directories:
+
+- Without either binding, the command fails with `project_not_initialized`
+  (exit code 4) and suggests `kata init` or `--project`.
+- A `--workspace` path that does not exist on the client fails with a
+  validation error (exit code 3) that names the path.
+
+Bind a client directory or select an existing project for one command:
+
+```sh
+kata init --project example-project
+kata list --project example-project
+```
 
 Ordinary remote CLI commands send their API requests without a preliminary
 ping. Refused connections still report `daemon_unavailable` (exit code 7).
@@ -299,8 +315,10 @@ The environment equivalent is
 token, browser sessions, and trusted-proxy principals still cannot administer
 connectors.
 
-The `kata federation enroll` CLI workflow also uses normal direct-client auth
-when it talks to the hub. Run it with a DB-backed personal token; the generated
+The `kata federation enroll` CLI workflow authenticates to the hub with
+`--hub-token-env` or a daemon-catalog credential whose URL has the same origin; the
+local daemon's global token is never sent to the hub. On an identity-mode hub,
+use a DB-backed personal token for the actor doing the setup. The generated
 enrollment token printed by that command is separate and is only for spoke
 transport. The enrollment is bound to the token actor in identity mode, and
 the hub rejects pushed federation events whose actor differs from that bound

@@ -138,6 +138,7 @@ type UIGraphUnresolvedRef struct {
 
 // UISnapshotData is captured wholly inside one backend read transaction.
 type UISnapshotData struct {
+	CommentGraph        CommentGraphData       `json:"-"`
 	Cursor              int64                  `json:"cursor"`
 	Projects            []UIProject            `json:"projects"`
 	Issues              []UIIssue              `json:"issues"`
@@ -195,4 +196,15 @@ type UIReferencesData struct {
 	Issues   []UIIssueReference `json:"issues"`
 	Owners   []string           `json:"owners"`
 	Labels   []string           `json:"labels"`
+}
+
+// RecordExposedUILinks registers both endpoints of each link a browser read
+// returns. A link carries its far endpoint's UID, qualified ID and status even
+// when that issue is outside the read's collection, so the project access
+// release must recheck it like any issue the read scanned.
+func RecordExposedUILinks(ctx context.Context, links []UILink) {
+	for _, link := range links {
+		RecordExposedIssue(ctx, link.FromIssueID)
+		RecordExposedIssue(ctx, link.ToIssueID)
+	}
 }

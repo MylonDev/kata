@@ -26,10 +26,10 @@ func TestBoundSpokeClaimPrincipalPreservesLocalOwnerIdentity(t *testing.T) {
 	binding := db.FederationBinding{Role: db.FederationRoleSpoke, Actor: "spoke-actor"}
 	first := boundSpokeClaimPrincipal(binding, db.ClaimPrincipal{
 		Holder: hostClaimHolder("user-one"), ClientKind: "cli", AuthenticatedHost: true,
-	})
+	}, "local-instance")
 	second := boundSpokeClaimPrincipal(binding, db.ClaimPrincipal{
 		Holder: hostClaimHolder("user-two"), ClientKind: "cli", AuthenticatedHost: true,
-	})
+	}, "local-instance")
 
 	assert.Equal(t, "spoke-actor", first.Holder)
 	assert.Equal(t, "spoke-actor", second.Holder)
@@ -41,17 +41,50 @@ func TestBoundSpokeClaimPrincipalKeepsLegacyClientIdentity(t *testing.T) {
 	for _, holder := range []string{"local-worker", "host:worker"} {
 		legacy := boundSpokeClaimPrincipal(binding, db.ClaimPrincipal{
 			Holder: holder, ClientKind: "cli",
-		})
+		}, "local-instance")
 
 		assert.Equal(t, "spoke-actor", legacy.Holder)
 		assert.Equal(t, "cli", legacy.ClientKind)
 	}
 }
 
+func TestApplyForwardedPendingClaimResponsePreservesCachedLease(t *testing.T) {
+	ctx := context.Background()
+	store := openClaimGateHelperDB(t)
+	project, issue := createClaimGateHelperIssue(t, store)
+	now := time.Now().UTC()
+	claimUID := newClaimGateHelperUID(t)
+	holder := db.ClaimPrincipal{
+		HolderInstanceUID: store.InstanceUID(), Holder: "competing-agent", ClientKind: "cli",
+	}
+	claim := &db.IssueClaim{
+		ClaimUID: claimUID, ProjectID: project.ID, IssueID: issue.ID, IssueUID: issue.UID,
+		Holder: holder.Holder, HolderInstanceUID: holder.HolderInstanceUID,
+		ClientKind: holder.ClientKind, ClaimKind: "hard", AcquiredAt: now,
+		Revision: 1, UpdatedAt: now,
+	}
+	require.NoError(t, store.ApplyClaimStatus(ctx, project.ID, issue.UID, db.ClaimStatus{
+		Held: true, Holder: holder, Claim: claim, HubNow: now,
+	}))
+
+	err := applyForwardedClaimAction(ctx, store, project.ID, issue.ShortID,
+		api.ClaimActionResponseBody{
+			Pending: true,
+			Holder:  api.ClaimPrincipalOut{HolderInstanceUID: "pending-leaf", Holder: "requesting-agent", ClientKind: "cli"},
+		}, true)
+	require.NoError(t, err)
+
+	status, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, now)
+	require.NoError(t, err)
+	require.True(t, status.Held, "a queued acquire is not an authoritative no-lease status")
+	require.NotNil(t, status.Claim)
+	assert.Equal(t, claimUID, status.Claim.ClaimUID)
+}
+
 func TestNewClaimHubClientHonorsTrustedPrivateNetwork(t *testing.T) {
 	t.Setenv("KATA_TRUST_PRIVATE_NETWORK", "1")
 
-	client, err := newClaimHubClient(context.Background(), "http://100.64.0.5:7787", "enrollment-token", false)
+	client, err := newClaimHubClient(context.Background(), "http://100.64.0.5:7787", "enrollment-token", false, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, client)
@@ -59,7 +92,7 @@ func TestNewClaimHubClientHonorsTrustedPrivateNetwork(t *testing.T) {
 }
 
 func TestNewClaimHubClientHonorsAllowInsecureHostnameOptIn(t *testing.T) {
-	client, err := newClaimHubClient(context.Background(), "http://tailnet-hub.internal:7787", "enrollment-token", true)
+	client, err := newClaimHubClient(context.Background(), "http://tailnet-hub.internal:7787", "enrollment-token", true, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, client)
@@ -83,7 +116,7 @@ func TestClaimHubClientNormalizesDeprecatedClaimFields(t *testing.T) {
 	}))
 	t.Cleanup(hub.Close)
 
-	client, err := newClaimHubClient(context.Background(), hub.URL, "enrollment-token", false)
+	client, err := newClaimHubClient(context.Background(), hub.URL, "enrollment-token", false, nil)
 	require.NoError(t, err)
 
 	actions := []struct {
@@ -166,7 +199,7 @@ func TestClaimHubClientUsesUnixRuntimeForKataInvalid(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	client, err := newClaimHubClient(context.Background(), "http://kata.invalid", "enrollment-token", false)
+	client, err := newClaimHubClient(context.Background(), "http://kata.invalid", "enrollment-token", false, nil)
 	require.NoError(t, err)
 	_, err = client.AcquireClaim(context.Background(), 42, "ABC", api.ClaimActionBody{})
 
@@ -339,4 +372,33 @@ func receiveInternalMsg(t *testing.T, ch <-chan StreamMsg, label string) StreamM
 		t.Fatalf("%s: did not receive within timeout", label)
 		return StreamMsg{}
 	}
+}
+
+// The forwarded claim answers with the issue reloaded after the replica
+// materialized. That reload is recorded like every issue read, so the final
+// access recheck withholds it from a member who lost the project.
+func TestApplyForwardedAssignmentClaimRecordsReloadedIssue(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "kata.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	project, err := store.CreateProject(ctx, "example-project")
+	require.NoError(t, err)
+	issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "claim target", Author: "tester"})
+	require.NoError(t, err)
+	revision, err := store.ProjectAccessRevision(ctx)
+	require.NoError(t, err)
+	decision := &ProjectAccessDecision{Actor: "member", ProjectUIDs: []string{project.UID}, PolicyRevision: revision, store: store}
+	requestCtx := db.WithExposedIssues(context.WithValue(ctx, projectAccessContextKey{}, decision))
+
+	_, err = applyForwardedAssignmentClaim(requestCtx, ServerConfig{DB: store}, project.ID, issue.UID, api.ClaimResponseBody{Changed: false})
+	require.NoError(t, err)
+	require.Contains(t, db.ExposedIssues(requestCtx), issue.ID, "the reload is recorded for the release recheck")
+	require.NoError(t, decision.revalidateRelease(requestCtx), "an unchanged membership releases the reload")
+
+	team, _, err := store.CreateTeam(ctx, "reviewers", "admin")
+	require.NoError(t, err)
+	_, _, err = store.SetProjectAccessPolicy(ctx, db.ProjectAccessPolicy{ProjectUID: project.UID, Visibility: "teams", TeamUIDs: []string{team.UID}}, "admin")
+	require.NoError(t, err)
+	require.ErrorContains(t, decision.revalidateRelease(requestCtx), "not found", "a project the member lost withholds the reloaded issue")
 }

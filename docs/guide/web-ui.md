@@ -1,7 +1,7 @@
 ---
 title: Web UI
 description: Browse and manage Kata projects and issues in the daemon-served browser application.
-last_edited: 2026-09-26
+last_edited: 2026-10-17
 ---
 
 # Web UI
@@ -103,6 +103,18 @@ project, and **Done editing** returns to the read-only view. The editor also sup
 - completing, reopening, moving, and deleting issues; and
 - creating, editing, or deleting the issue's recurrence.
 
+When a close saved a
+[closing-session reference](../reference/configuration.md#closing-session-transcripts),
+the issue's events show the agent and session ID, linked when a URL was saved.
+
+With daemon API `0.28.0` or newer, comments show handles, reply targets,
+backlinks, and edit markers. Select a reply target or backlink to open its issue
+and focus the linked comment. **Reply**, **Confirm**, **Refute**, and
+**Supersede** open a typed reply composer from the read view. An unchanged
+retry keeps its request identity; a duplicate refusal offers an explicit force
+action. See the [comment rules](../reference/cli.md#issue-lifecycle) for
+validation and handle syntax.
+
 When the editor pane is narrower than 640 pixels, the title appears above the
 actions so it remains readable.
 
@@ -129,12 +141,43 @@ move among them without leaving that browser origin. Configured bearer tokens
 remain server-side, and the application remembers the active route separately
 for each daemon.
 
+Project visibility can limit the switcher. If team visibility hides at least
+one project from your account, or your token is limited to an issue subtree,
+the switcher lists only the local daemon. Configured target tokens do not carry
+your project limits, so the gateway refuses to use them for you. If you can
+see every project, or you are signed in as the daemon owner, the switcher
+lists every configured daemon. See
+[Project access](../reference/http-api.md#project-access) for the exact rules.
+
 ![Kata Web UI switching between two synthetic configured daemons](/docs/assets/screenshots/web-ui/daemon-switcher.png)
 
 Use `kata ui --daemon <name>` when you want to open one configured target
 directly instead. See [Configuration](../reference/configuration.md#daemon-config)
 for catalog settings and [Remote daemon](../operations/remote-daemon.md) for
 network, authentication, and proxy setup.
+
+## Check the current connection
+
+The yellow summary at the top shows the active hub, account, and credential
+status. It stays visible while you navigate and wraps on narrow screens.
+The TUI shows the same information in its existing header row.
+
+Account-bound credentials show their canonical actor. A connection without an
+account identity shows how it authenticated instead:
+
+| Connection | Account label |
+| --- | --- |
+| Owner-local socket or direct loopback browser tab | **Local connection** |
+| Shared `[auth].token` daemon token | **Shared daemon token** |
+| Bootstrap token in token-identity mode | **Bootstrap token** |
+| `--insecure-readonly` anonymous reader | **Anonymous (read-only)** |
+| Tokenless private-network writes | **Unauthenticated private network** |
+| Trusted proxy request without an asserted actor | **Proxy without account** |
+
+Switching daemons or losing current authority clears the previous account
+while reconnection is pending. Finite credentials show **Credential expired**
+when their lifetime ends. These summaries never show token values and do not
+load the administrator credential inventory.
 
 ## Audit provisioned credentials
 
@@ -153,6 +196,15 @@ when its browser session cannot mutate issues, while a normal local-web,
 identity-token, scoped-worker, or proxy session cannot inspect them. Switching
 through the local daemon gateway cannot borrow a target's configured credential
 to gain this view.
+
+Original comments show nonzero incoming counts for Replies, Confirmations,
+Refutations, and Superseding replies. Activate a kind to inspect each visible
+reply's author, time, and evidence, then open its handle. **Return to original
+comment** restores focus to the source. Conflicting assertions remain visible;
+superseding replies do not hide the original body. Each kind includes up to 50
+of its newest visible incoming replies, in chronological order. Partial evidence uses a `+`
+count and a “More replies may be available” notice. A target edited after a
+reply is marked on that reply and in its incoming evidence list.
 
 ## Browser authority and deployment
 

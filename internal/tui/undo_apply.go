@@ -83,9 +83,13 @@ func (c *undoClient) undo(ctx context.Context, entry undoEntry, evidenceRequired
 				out.err = errors.New("evidence-bearing done close is required")
 				return out
 			}
-			out.resp, out.err = closer.CloseWithEvidence(ctx, entry.projectID, entry.uid, *evidence)
+			out.resp, out.err = closer.CloseWithEvidence(
+				suppressIssueActionTelemetry(ctx), entry.projectID, entry.uid, *evidence,
+			)
 		} else {
-			out.resp, out.err = c.KataAPI.Close(ctx, entry.projectID, entry.uid, entry.actor)
+			out.resp, out.err = c.KataAPI.Close(
+				suppressIssueActionTelemetry(ctx), entry.projectID, entry.uid, entry.actor,
+			)
 		}
 	case "owner.assign":
 		if equalStringPtr(current.Owner, entry.before.Owner) {
@@ -238,6 +242,9 @@ func (c *undoClient) restoredAfterNoop(ctx context.Context, entry undoEntry) (bo
 }
 
 func ambiguousWriteError(err error) bool {
+	if _, ok := errors.AsType[*mutationPreflightError](err); ok {
+		return false
+	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
 		return false

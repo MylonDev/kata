@@ -11,6 +11,9 @@ import (
 // replay projection.
 func FoldEvents(events []FoldEvent) FoldProjection {
 	p := FoldProjection{
+		CronRuns:        map[string]FoldCronRun{},
+		CronJobs:        map[string]FoldCronJob{},
+		CronWorkflows:   map[string]FoldCronWorkflow{},
 		Issues:          map[string]FoldIssue{},
 		Comments:        map[string]FoldComment{},
 		Labels:          map[FoldLabelKey]FoldElementState{},
@@ -29,6 +32,14 @@ func FoldEvents(events []FoldEvent) FoldProjection {
 }
 
 func (p *FoldProjection) apply(e FoldEvent) {
+	if e.Type == "cron.run.observed" || e.Type == "cron.run.snapshot" {
+		p.applyCronRun(e)
+		return
+	}
+	if isCronDefinitionEvent(e.Type) {
+		p.applyCronDefinition(e)
+		return
+	}
 	payload := PayloadMap(e.Payload)
 	switch e.Type {
 	case "issue.created", "issue.snapshot":
@@ -120,6 +131,9 @@ func (p *FoldProjection) applyIssueCreated(e FoldEvent) {
 			CreatedAt  string `json:"created_at"`
 		} `json:"links"`
 		Comments []struct {
+			ReplyToUID string `json:"reply_to_uid"`
+			ReplyKind  string `json:"reply_kind"`
+			EditedAt   string `json:"edited_at"`
 			CommentUID string `json:"comment_uid"`
 			Author     string `json:"author"`
 			Teammate   string `json:"teammate,omitempty"`
@@ -190,7 +204,7 @@ func (p *FoldProjection) applyIssueCreated(e FoldEvent) {
 		p.setLink(from, to, link.Type, true, clockOf(e), author, link.CreatedAt)
 	}
 	for _, comment := range in.Comments {
-		p.setComment(comment.CommentUID, uid, comment.Author, comment.Teammate, comment.Body, comment.CreatedAt, clockOf(e))
+		p.setComment(comment.CommentUID, uid, comment.Author, comment.Teammate, comment.Body, comment.CreatedAt, comment.ReplyToUID, comment.ReplyKind, comment.EditedAt, clockOf(e))
 	}
 }
 
@@ -209,6 +223,9 @@ func (p *FoldProjection) applyIssueUpdated(e FoldEvent, payload map[string]jsont
 	if owner, ok := optionalString(payload["owner"]); ok {
 		issue.Owner = owner
 		clearFoldAssignmentExpiry(&issue)
+	}
+	if expiresOn, ok := optionalString(payload["assignment_expires_on"]); ok {
+		setFoldAssignmentExpiry(&issue, expiresOn)
 	}
 	if priority, ok := optionalInt64(payload["priority"]); ok {
 		issue.Priority = priority
@@ -417,10 +434,13 @@ func (p *FoldProjection) applyComment(e FoldEvent, payload map[string]jsontext.V
 	body, _ := stringValue(payload["body"])
 	createdAt, _ := stringValue(payload["created_at"])
 	uid := issueUID(e, payload)
-	p.setComment(commentUID, uid, author, teammate, body, createdAt, clockOf(e))
+	replyTo, _ := stringValue(payload["reply_to_uid"])
+	replyKind, _ := stringValue(payload["reply_kind"])
+	editedAt, _ := stringValue(payload["edited_at"])
 	if createdAt == "" {
 		createdAt = e.CreatedAt
 	}
+	p.setComment(commentUID, uid, author, teammate, body, createdAt, replyTo, replyKind, editedAt, clockOf(e))
 	p.touchIssue(uid, createdAt)
 }
 
@@ -434,15 +454,15 @@ func (p *FoldProjection) applyCommentEdited(e FoldEvent, payload map[string]json
 		return
 	}
 	uid := issueUID(e, payload)
-	p.editCommentBody(commentUID, uid, body, clockOf(e))
 	editedAt := e.CreatedAt
 	if v, ok := stringValue(payload["edited_at"]); ok && v != "" {
 		editedAt = v
 	}
+	p.editCommentBody(commentUID, uid, body, editedAt, clockOf(e))
 	p.touchIssue(uid, editedAt)
 }
 
-func (p *FoldProjection) setComment(commentUID, issueUID, author, teammate, body, createdAt string, clock FoldClock) {
+func (p *FoldProjection) setComment(commentUID, issueUID, author, teammate, body, createdAt, replyTo, replyKind, editedAt string, clock FoldClock) {
 	if commentUID == "" {
 		return
 	}
@@ -451,9 +471,15 @@ func (p *FoldProjection) setComment(commentUID, issueUID, author, teammate, body
 	comment.Teammate = teammate
 	comment.Body = body
 	comment.CreatedAt = createdAt
+	comment.ReplyToUID, comment.ReplyKind, comment.EditedAt = replyTo, replyKind, editedAt
 	if existing, exists := p.Comments[commentUID]; exists {
+		if existing.CreatedAt == "" {
+			comment.Body, comment.EditedAt, comment.Clock = existing.Body, existing.EditedAt, existing.Clock
+			p.Comments[commentUID] = comment
+			return
+		}
 		if existing.Author != comment.Author || existing.Teammate != comment.Teammate ||
-			existing.Body != comment.Body || existing.CreatedAt != comment.CreatedAt {
+			existing.Body != comment.Body || existing.CreatedAt != comment.CreatedAt || existing.ReplyToUID != comment.ReplyToUID || existing.ReplyKind != comment.ReplyKind {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("conflicting duplicate comment %s", commentUID))
 		}
 		return
@@ -461,7 +487,7 @@ func (p *FoldProjection) setComment(commentUID, issueUID, author, teammate, body
 	p.Comments[commentUID] = comment
 }
 
-func (p *FoldProjection) editCommentBody(commentUID, issueUID, body string, clock FoldClock) {
+func (p *FoldProjection) editCommentBody(commentUID, issueUID, body, editedAt string, clock FoldClock) {
 	if commentUID == "" {
 		return
 	}
@@ -473,6 +499,7 @@ func (p *FoldProjection) editCommentBody(commentUID, issueUID, body string, cloc
 		comment.IssueUID = issueUID
 	}
 	comment.Body = body
+	comment.EditedAt = editedAt
 	comment.Clock = clock
 	p.Comments[commentUID] = comment
 }
@@ -665,8 +692,22 @@ func advanceIssueUpdatedAt(issue *FoldIssue, updatedAt string) {
 }
 
 func issueUID(e FoldEvent, payload map[string]jsontext.Value) string {
-	if e.IssueUID != "" {
-		return e.IssueUID
+	return resolveIssueUID(e.IssueUID, payload)
+}
+
+// FederationEventIssueUID resolves the issue identity carried by a federated
+// event, using the same envelope and payload fields as the fold engine.
+func FederationEventIssueUID(issueUID *string, payload string) string {
+	envelope := ""
+	if issueUID != nil {
+		envelope = *issueUID
+	}
+	return resolveIssueUID(envelope, PayloadMap(jsontext.Value(payload)))
+}
+
+func resolveIssueUID(envelope string, payload map[string]jsontext.Value) string {
+	if envelope != "" {
+		return envelope
 	}
 	if v, ok := stringValue(payload["issue_uid"]); ok {
 		return v

@@ -44,8 +44,11 @@ var hostAccessRules = buildHostAccessRules()
 func buildHostAccessRules() map[string]hostAccessRule {
 	rules := make(map[string]hostAccessRule)
 	registerHostAccessRules(rules, hostAccessRule{
+		SelfAuthenticated: true, AcceptsFederationBearer: true, NoProjectData: true,
+	}, "disconnectRelayEnrollment")
+	registerHostAccessRules(rules, hostAccessRule{
 		SelfAuthenticated: true, AcceptsFederationBearer: true,
-	}, "getFederationProjectMetadata", "pollFederationProjectEvents",
+	}, "getRelayReset", "offerRelayDeliveries", "acceptRelayDeliveries", "ackRelayDeliveries", "getFederationProjectMetadata", "pollFederationProjectEvents",
 		"ingestFederationProjectEvents", "acquireIssueLease", "renewIssueLease",
 		"releaseIssueLease", "getIssueLeaseStatus", "claimIssue")
 	registerHostAccessRules(rules, hostAccessRule{SelfAuthenticated: true},
@@ -59,7 +62,7 @@ func buildHostAccessRules() map[string]hostAccessRule {
 		"importIssues", "pollProjectEvents", "streamEvents", "auditCloses",
 		"digestProject", "deleteLink", "rewriteAuthorIdentity")
 	registerHostAccessRules(rules, hostAccessRule{NoProjectData: true},
-		"ping", "health", "instance")
+		"ping", "health", "instance", "captureTelemetryEvent", "doctor")
 	return rules
 }
 

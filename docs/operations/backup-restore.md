@@ -1,7 +1,7 @@
 ---
 title: Backup and restore
 description: Back up, restore, and move Kata data safely with JSONL export and import workflows.
-last_edited: 2026-09-15
+last_edited: 2026-10-17
 ---
 
 # Backup and restore
@@ -49,6 +49,77 @@ For an online backup on the same host:
 kata export --allow-running-daemon --output backups/kata-$(date -u +%Y%m%d).jsonl
 ```
 
+Kata 0.19.0 (schema 34) preserves hub-local teams, memberships and project
+visibility policies in a full backup. Project-scoped exports omit those local
+access rules. Both forms retain signed attribution receipts, entity creation
+references and public root keys, including retired verification keys. Restore
+checks signatures before replacing target data. Legacy rows remain unattributed.
+Full backups also retain old-key-signed rotation records. Project-scoped exports
+retain only that project's rotation history. Restore validates those records
+before replacing target data.
+Full backups retain signed relay checkpoints, binding-local stream baselines and
+original inbox/outbox mappings. Restore verifies the checkpoints before replacing
+data and preserves their retry identities without generating new deliveries.
+Project exports omit these local checkpoint and delivery records. Signed
+snapshots retain original creation receipts across compaction; snapshot authors
+alone remain legacy attribution.
+
+Both backup forms retain complete portable embedding artifacts, including their
+original float32 bytes and chunk manifests. Project exports include only the
+selected project's artifacts. Restore validates them before replacing data and
+preserves vectors above the recipient's index limit without requesting new
+embeddings. Legacy index embeddings remain excluded. Temporary pre-content
+staging is excluded; unacknowledged sender deliveries retry those artifacts.
+
+Full backups retain local browser reset cursors for late creation receipts.
+Project exports omit those local cursors. Receiving a new creation receipt
+invalidates the browser snapshot; an idle event stream requests a refresh on
+its next heartbeat.
+Back up the hub's root signing key separately. It is the owner-only file
+`federation-root.key` in the daemon's namespace data directory,
+`<KATA_HOME>/runtime/<storage-id>/`, and JSONL backups never contain it. Restore
+it with `chmod 600` before you start the restored daemon. A daemon restored
+without it still starts, but signed writes to the hub projects pinned to it
+fail until you restore the file or repin each project with
+`kata federation root-key repin --project <project>`. Unless you supply the
+previous key file, repinning leaves downstream relays that pinned the old key
+unable to sync the project, and the command refuses while such relays are
+enrolled unless you pass `--strand-relays`. See [Root signing key](federation.md#root-signing-key) for the exact
+behavior and recovery commands. Foreign and retired public keys remain
+verification history; they do not require local signing secrets.
+
+## Scheduled backups
+
+Run an explicit foreground daemon service with `KATA_BACKUP_DIR=/data/backups`
+to take an immediate full JSONL snapshot and another every `24h`. Set
+`KATA_BACKUP_INTERVAL` and `KATA_BACKUP_RETAIN` to positive Go durations such as
+`6h` and `720h`. Retention defaults to `720h` (30 days). The equivalent config is:
+
+```toml
+[backup]
+dir = "/data/backups"
+interval = "24h"
+retain = "720h"
+```
+
+Environment settings override the corresponding config keys. Without `dir`,
+the section must be empty and scheduling is disabled. A partially configured
+schedule or invalid duration stops startup.
+
+Kata exports all projects and includes soft-deleted rows through the same
+consistent snapshot exporter as `kata export`. Exports run serially. Each file
+is published atomically with mode `0600` in an owner-only subdirectory named
+for the database's storage identity. Retention uses the UTC timestamp in Kata's
+backup filenames and removes only old regular backup files in that subdirectory.
+Unrelated files, symlinks, and other databases' subdirectories are preserved.
+A failed export preserves earlier backups, logs the error, and retries at the
+next interval. Shutdown cancels and joins the worker before closing storage.
+
+JSONL contains database state, including database-managed tokens. It does not
+include `config.toml`, mounted secrets, or the generated `auth-token` file.
+Preserve those separately with their original owner-only permissions. Copy
+snapshots off the data volume if you need protection against volume loss.
+
 ## Restore
 
 Restore into a fresh SQLite database file:
@@ -61,8 +132,20 @@ The target must not exist unless `--force` is set. To use the restored
 database, stop the daemon, point `KATA_DSN` or `KATA_DB` at the restored file,
 or move it into `KATA_HOME` as `kata.db`, then restart.
 
-Without `--merge`, `kata import` creates a target database from the input
+Without `--merge`, `kata import` replaces the target contents with the input
 snapshot. It does not add records to an existing database.
+
+For SQLite, `--force` replaces an existing current-schema database in one
+transaction while keeping its file identity. It refuses an existing target with
+an older or unknown schema version without upgrading or modifying it. Restore to a fresh path
+with the command above, or explicitly upgrade the existing target separately
+before retrying. Orphan `-wal` or `-shm` files also cause refusal: recover or
+remove that file set explicitly, or choose a fresh destination. A destination
+that appears after import starts is never overwritten, even with `--force`.
+
+Shared cron definitions and independent run observations are portable backup
+data. A run with `running` or `unknown` status does not prevent an explicitly
+requested replacement.
 
 For Postgres, pass a DSN as the target:
 
@@ -91,6 +174,67 @@ schema upgrades. JSONL is the portable logical backup; a managed snapshot or
 `pg_dump` archive is the exact-version rollback artifact. The split-role
 upgrade and restore ordering is documented in [PostgreSQL
 operations](postgres.md).
+
+## Make an independent copy of a federated hub
+
+`--as-standalone` requires Kata 0.19.0 or later.
+Use it to copy a hub's data for a rehearsal or a move to a different hub.
+Ordinary restore recreates the source's federation bindings, enrollments, and
+database-managed API tokens. `--new-instance` changes the instance identity
+but keeps that authority. Neither option detaches a federated hub.
+
+Start with a full JSONL export, including deleted rows. Keep the protected
+original export: it contains the source's credential hashes and token events.
+Run the copy on a machine with the export and a Kata build that supports
+`--as-standalone`. Select a fresh local home, with no daemon running in it.
+For example, in Bash, replace the export path below with its absolute path:
+
+```sh
+bash -euo pipefail <<'EOF'
+umask 077
+kata_binary=$(command -v kata)
+source_export=/absolute/path/to/hub-export.jsonl
+copy_home=$(mktemp -d)
+printf 'Copy home: %s\n' "$copy_home"
+cd "$copy_home"
+env -i PATH="$PATH" HOME="$HOME" KATA_HOME="$copy_home" \
+  KATA_DB="$copy_home/kata.db" KATA_TELEMETRY_ENABLED=0 \
+  "$kata_binary" import --as-standalone \
+  --input "$source_export" --target "$copy_home/kata.db"
+EOF
+```
+
+The destination is a new database. `--force` and `--merge` are refused with
+`--as-standalone`; use another fresh target to repeat the copy. A fresh Postgres
+schema is also supported through `--target` with its schema-owner DSN, under
+the same [Postgres restore rules](#restore).
+
+The copy preserves projects, task identities and short IDs, content, authors,
+comments, labels, and links whose two endpoints are in the export. Archived
+projects and deleted tasks stay archived or deleted. Task history retains its
+event identities and origins. The existing JSONL timestamp normalization
+still applies; task timestamps are stored at millisecond precision.
+
+The copy removes federation bindings, enrollments, root pins and signed
+provenance, root-key transitions, relay delivery and reset metadata, pending
+attribution state, sync status, quarantine, and live or pending claims. It also
+removes the API-token creation and revocation events that ordinary restore uses
+to rebuild token authority.
+Exporting the copy and restoring that export cannot bring back those source
+authorities or tokens. Task claim history remains, but its old claims cannot
+lock work in the copy. Issue-sync bindings stay disabled and external-root
+bindings stay paused, as in ordinary restore.
+
+Keep the new home separate. Do not copy the source's daemon configuration,
+credential files, or environment into it: those are outside the JSONL
+operation and could reconnect it to the source. The source hub and its
+clients remain unchanged. Configure any new federation connection explicitly
+with credentials issued for the destination. Archived projects must first be
+restored explicitly if you intend to adopt them into a new hub.
+
+An error can arrive while closing an import that already committed. Keep the
+printed copy home for inspection and do not retry against it with `--force`.
+The original export remains your recovery artifact.
 
 ## Versioned backups
 
@@ -171,6 +315,11 @@ already exists. As a result, re-importing the same snapshot is not an
 incremental refresh. Run one merge per scoped snapshot when restoring several
 projects; use a full-database export when cross-project links must also be
 restored.
+
+Merge refuses snapshots containing hub-local teams, memberships or visibility
+policies. It also refuses root pins and verified provenance: a project merge
+cannot establish a federation authority. Restore a proof-bearing archive into a
+fresh target or use a full backup restore.
 
 Imported issue-sync bindings remain disabled until re-enabled locally. Imported
 federation state is discarded so the project must join federation again with

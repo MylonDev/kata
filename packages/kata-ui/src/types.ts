@@ -4,13 +4,30 @@ export interface KataChecklistItem {
   done: boolean
 }
 
-export interface KataIssueWire {
+/** Server-derived creation projection; source labels alone are not proof. */
+export interface KataCreationAttributionWire {
+  verification?: string | undefined
+  accountable_actor?: string | undefined
+  source_actor?: string | undefined
+  teammate?: string | undefined
+  authority_uid?: string | undefined
+}
+
+export interface KataCreationAttributionModel {
+  verification: 'verified' | 'pending' | 'legacy'
+  sourceActor: string
+  teammate?: string
+  accountableActor?: string
+}
+
+export interface KataIssueWire extends KataCreationAttributionWire {
   uid: string
   project_uid?: string | undefined
   project_name?: string | undefined
   short_id?: string | undefined
   qualified_id?: string | undefined
   title: string
+  author?: string | undefined
   body?: string | undefined
   status: string
   owner?: string | undefined
@@ -34,16 +51,42 @@ export interface KataIssueReferenceWire {
   status?: string | undefined
 }
 
+export type KataReplyKind = 'reply' | 'confirm' | 'refute' | 'supersede'
+export interface KataCommentLink {
+  uid?: string | undefined
+  handle?: string | undefined
+  kind: string
+  author?: string | undefined
+  teammate?: string | undefined
+  issue_uid?: string | undefined
+  issue_short_id?: string | undefined
+  project_uid?: string | undefined
+  project_id?: number | undefined
+  status?: string | undefined
+  target_edited?: boolean | undefined
+  body?: string | undefined
+  created_at?: string | undefined
+  edited_at?: string | undefined
+}
+
 export interface KataIssueDetailWire {
   issue: KataIssueWire
   comments?:
-    | Array<{
-        id: number
-        author: string
-        teammate?: string | undefined
-        body: string
-        created_at: string
-      }>
+    | Array<
+        KataCreationAttributionWire & {
+          id: number
+          uid?: string | undefined
+          handle?: string | undefined
+          reply?: KataCommentLink | undefined
+          backlinks?: KataCommentLink[] | undefined
+          backlinks_truncated?: boolean | undefined
+          edited_at?: string | undefined
+          author: string
+          teammate?: string | undefined
+          body: string
+          created_at: string
+        }
+      >
     | null
     | undefined
   labels?: Array<{ label: string }> | null | undefined
@@ -99,13 +142,21 @@ export interface KataIssueDetailModel {
     checklist: KataChecklistItem[]
     labels: string[]
     updatedAt?: string
+    creation?: KataCreationAttributionModel
   }
   comments: Array<{
     id: string
+    uid?: string
+    handle?: string
+    reply?: KataCommentLink
+    backlinksPartial?: boolean
+    backlinks?: KataCommentLink[]
+    editedAt?: string
     author: string
     teammate?: string
     body: string
     createdAt: string
+    creation?: KataCreationAttributionModel
   }>
   links: Array<{
     id: string
@@ -133,4 +184,13 @@ export interface KataIssueDetailProps {
   actions?: readonly KataIssueHostAction[]
   /** Host navigation for parent, child, and linked issue references. */
   onOpenIssue?: (uid: string) => void
+  onOpenComment?: (
+    issueUID: string,
+    commentUID: string,
+    source?: { issueUID: string; commentUID: string },
+  ) => void
+  returnComment?: { issueUID: string; commentUID: string } | undefined
+  onReplyComment?: (commentUID: string, kind: KataReplyKind) => void
+  commentActionsDisabled?: boolean
+  selectedCommentUID?: string | undefined
 }

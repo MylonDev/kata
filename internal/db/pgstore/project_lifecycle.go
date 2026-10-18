@@ -36,6 +36,9 @@ func (s *Store) RemoveProject(ctx context.Context, params db.RemoveProjectParams
 		if project.DeletedAt != nil {
 			return db.ErrProjectAlreadyArchived
 		}
+		if err := s.validateRelayLifecycleTx(ctx, tx, project.ID); err != nil {
+			return err
+		}
 		var openIssues, aliasCount int64
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues
           WHERE project_id = $1 AND status = 'open' AND deleted_at IS NULL`, project.ID).Scan(&openIssues); err != nil {
@@ -55,6 +58,9 @@ func (s *Store) RemoveProject(ctx context.Context, params db.RemoveProjectParams
 		archivedAt := nowStoredTimestamp()
 		if _, err := tx.ExecContext(ctx, `UPDATE projects SET deleted_at = $1 WHERE id = $2`, archivedAt, project.ID); err != nil {
 			return mapSQLError(err, nil)
+		}
+		if err := bumpProjectAccess(ctx, tx); err != nil {
+			return fmt.Errorf("advance project access revision after project archive: %w", err)
 		}
 		binding, bindingErr := scanIssueSyncBinding(tx.QueryRowContext(ctx, issueSyncBindingSelect+` WHERE b.project_id=$1 FOR UPDATE`, project.ID))
 		if bindingErr != nil && !errors.Is(bindingErr, db.ErrNotFound) {
@@ -87,7 +93,7 @@ func (s *Store) RemoveProject(ctx context.Context, params db.RemoveProjectParams
 		}
 		event, err = s.insertEventTx(ctx, tx, eventInsert{
 			ProjectID: project.ID, ProjectUID: project.UID, ProjectName: project.Name,
-			Type: "project.removed", Actor: params.Actor, Payload: string(payload),
+			Type: "project.removed", Actor: params.Actor, Payload: string(payload), SkipRelay: params.SkipFederationRelay,
 		})
 		if err != nil {
 			return err
@@ -137,6 +143,9 @@ func (s *Store) restoreProject(
 		})
 		if err != nil {
 			return err
+		}
+		if err := bumpProjectAccess(ctx, tx); err != nil {
+			return fmt.Errorf("advance project access revision after project restore: %w", err)
 		}
 		event = &created
 		changed = true
@@ -268,20 +277,21 @@ func (s *Store) PurgeProject(ctx context.Context, params db.PurgeProjectParams) 
 		if err != nil {
 			return err
 		}
-		if err := deleteProjectScopedTx(ctx, tx, project.ID); err != nil {
+		if err := s.insertProjectIssuePurgeLogsTx(ctx, tx, project, params.Actor, params.Reason); err != nil {
+			return err
+		}
+		if err := deleteProjectScopedTx(ctx, tx, project); err != nil {
 			return err
 		}
 		var resetCursor sql.NullInt64
-		if counts.minEventID.Valid {
-			if err := lockEventSequenceTx(ctx, tx); err != nil {
-				return err
-			}
-			value, err := s.reserveIdentityValue(ctx, tx, "events", "id")
-			if err != nil {
-				return err
-			}
-			resetCursor = sql.NullInt64{Int64: value, Valid: true}
+		if err := lockEventSequenceTx(ctx, tx); err != nil {
+			return err
 		}
+		value, err := s.reserveIdentityValue(ctx, tx, "events", "id")
+		if err != nil {
+			return err
+		}
+		resetCursor = sql.NullInt64{Int64: value, Valid: true}
 		purgeID, err := s.insertProjectPurgeLogTx(ctx, tx, project, counts, resetCursor,
 			params.Actor, params.Reason)
 		if err != nil {
@@ -323,6 +333,67 @@ func (s *Store) insertProjectPurgeLogTx(ctx context.Context, tx *sql.Tx, project
 	return purgeID, nil
 }
 
+type projectIssuePurgeSnapshot struct {
+	id                          int64
+	uid, shortID, title, author string
+	comments, links, labels     int64
+	events                      int64
+	minEventID, maxEventID      sql.NullInt64
+}
+
+// insertProjectIssuePurgeLogsTx retains per-issue identity for references that
+// survive the aggregate project purge. The existing purge_log record kind is
+// already portable through JSONL, so project purge needs no new schema.
+func (s *Store) insertProjectIssuePurgeLogsTx(ctx context.Context, tx *sql.Tx, project db.Project,
+	actor string, reason *string,
+) error {
+	rows, err := tx.QueryContext(ctx, `SELECT i.id, i.uid, i.short_id, i.title, i.author,
+       (SELECT COUNT(*) FROM comments c WHERE c.issue_id = i.id),
+       (SELECT COUNT(*) FROM links l WHERE l.from_issue_id = i.id OR l.to_issue_id = i.id),
+       (SELECT COUNT(*) FROM issue_labels l WHERE l.issue_id = i.id),
+       (SELECT COUNT(*) FROM events e WHERE e.project_id = i.project_id AND (e.issue_id = i.id OR e.related_issue_id = i.id)),
+       (SELECT MIN(e.id) FROM events e WHERE e.project_id = i.project_id AND (e.issue_id = i.id OR e.related_issue_id = i.id)),
+       (SELECT MAX(e.id) FROM events e WHERE e.project_id = i.project_id AND (e.issue_id = i.id OR e.related_issue_id = i.id))
+  FROM issues i WHERE i.project_id = $1 ORDER BY i.id`, project.ID)
+	if err != nil {
+		return mapSQLError(err, nil)
+	}
+	snapshots := make([]projectIssuePurgeSnapshot, 0)
+	for rows.Next() {
+		var snapshot projectIssuePurgeSnapshot
+		if err := rows.Scan(&snapshot.id, &snapshot.uid, &snapshot.shortID, &snapshot.title, &snapshot.author,
+			&snapshot.comments, &snapshot.links, &snapshot.labels, &snapshot.events,
+			&snapshot.minEventID, &snapshot.maxEventID); err != nil {
+			_ = rows.Close()
+			return mapSQLError(err, nil)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return mapSQLError(err, nil)
+	}
+	for _, snapshot := range snapshots {
+		purgeUID, err := katauid.New()
+		if err != nil {
+			return fmt.Errorf("generate project issue purge uid: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO purge_log(
+      uid, origin_instance_uid, project_id, purged_issue_id, issue_uid, project_uid,
+      project_name, short_id, issue_title, issue_author, comment_count, link_count, label_count,
+      event_count, events_deleted_min_id, events_deleted_max_id, actor, reason
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+			purgeUID, s.instanceUID, project.ID, snapshot.id, snapshot.uid, project.UID,
+			project.Name, snapshot.shortID, snapshot.title, snapshot.author, snapshot.comments,
+			snapshot.links, snapshot.labels, snapshot.events, snapshot.minEventID, snapshot.maxEventID,
+			actor, reason); err != nil {
+			return mapSQLError(err, nil)
+		}
+	}
+	return nil
+}
+
 func (s *Store) hardDeleteProject(ctx context.Context, projectID int64) (int64, error) {
 	var resetID int64
 	err := s.withSerializableTx(ctx, func(tx *sql.Tx) error {
@@ -341,6 +412,9 @@ func (s *Store) hardDeleteProject(ctx context.Context, projectID int64) (int64, 
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE project_id = $1`, project.ID); err != nil {
 			return mapSQLError(err, nil)
+		}
+		if err := deleteProjectRelayMetadataTx(ctx, tx, project.UID); err != nil {
+			return err
 		}
 		var resetCursor sql.NullInt64
 		if counts.minEventID.Valid {
@@ -391,27 +465,24 @@ func countProjectPurgeTx(ctx context.Context, tx *sql.Tx, projectID int64) (proj
 	return counts, nil
 }
 
-func deleteProjectScopedTx(ctx context.Context, tx *sql.Tx, projectID int64) error {
+func deleteProjectScopedTx(ctx context.Context, tx *sql.Tx, project db.Project) error {
+	if err := deleteProjectRelayMetadataTx(ctx, tx, project.UID); err != nil {
+		return err
+	}
+	projectID := project.ID
+	if err := db.DeleteCronProject(ctx, tx, projectID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE project_id = $1`, projectID); err != nil {
 		return mapSQLError(err, nil)
 	}
-	var detachedEventIDs []int64
 	for _, statement := range []string{
-		`UPDATE events SET issue_id = NULL, issue_uid = NULL WHERE issue_id IN (SELECT id FROM issues WHERE project_id = $1) RETURNING id`,
-		`UPDATE events SET related_issue_id = NULL, related_issue_uid = NULL WHERE related_issue_id IN (SELECT id FROM issues WHERE project_id = $1) RETURNING id`,
+		`UPDATE events SET issue_id = NULL WHERE issue_id IN (SELECT id FROM issues WHERE project_id = $1)`,
+		`UPDATE events SET related_issue_id = NULL WHERE related_issue_id IN (SELECT id FROM issues WHERE project_id = $1)`,
 	} {
-		rows, err := tx.QueryContext(ctx, statement, projectID)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, statement, projectID); err != nil {
 			return mapSQLError(err, nil)
 		}
-		ids, err := collectEventIDs(rows)
-		if err != nil {
-			return err
-		}
-		detachedEventIDs = append(detachedEventIDs, ids...)
-	}
-	if err := recomputeEventContentHashesTx(ctx, tx, detachedEventIDs); err != nil {
-		return err
 	}
 	statements := []string{
 		`DELETE FROM comments WHERE issue_id IN (SELECT id FROM issues WHERE project_id = $1)`,

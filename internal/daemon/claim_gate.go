@@ -12,6 +12,10 @@ import (
 	"go.kenn.io/kata/internal/db"
 )
 
+// Leave the local lease check and mutation time inside the CLI request budget.
+// Explicit lease actions retain the hub client's longer timeout.
+const mutationClaimStatusRefreshTimeout = 500 * time.Millisecond
+
 func requireFederatedIssueClaim(
 	ctx context.Context,
 	cfg ServerConfig,
@@ -61,7 +65,7 @@ func requireFederatedIssueClaimForPrincipal(
 		return federationReadOnlyError(db.ErrFederatedReadOnly)
 	}
 
-	principal = boundSpokeClaimPrincipal(binding, principal)
+	principal = boundSpokeClaimPrincipal(binding, principal, cfg.DB.InstanceUID())
 
 	if binding.Role == db.FederationRoleSpoke {
 		if err := refreshSpokeClaimStatusForGate(ctx, cfg, binding, issue); err != nil {
@@ -107,16 +111,18 @@ func refreshSpokeClaimStatusForGate(
 	binding db.FederationBinding,
 	issue db.Issue,
 ) error {
-	remote, cred, err := claimForwardClient(ctx, cfg, binding)
+	remoteCtx, cancelRemote := context.WithTimeout(ctx, mutationClaimStatusRefreshTimeout)
+	defer cancelRemote()
+	remote, cred, err := claimForwardClient(remoteCtx, cfg, binding)
 	if err != nil {
-		if isOfflineClaimRefreshError(err) {
+		if remoteCtx.Err() != nil || isOfflineClaimRefreshError(err) {
 			return nil
 		}
 		return err
 	}
-	resp, err := remote.ClaimStatus(ctx, cred.HubProjectID, issue.ShortID)
+	resp, err := remote.ClaimStatus(remoteCtx, cred.HubProjectID, issue.ShortID)
 	if err != nil {
-		if isTransportClaimError(err) {
+		if isTransportClaimError(err) || isOfflineClaimHubStatusError(err) {
 			return nil
 		}
 		pending, pendingErr := isPendingSpokePushClaimStatusMiss(ctx, cfg, binding, issue, err)
@@ -127,6 +133,10 @@ func refreshSpokeClaimStatusForGate(
 			return nil
 		}
 		return claimForwardError(err)
+	}
+	resp, err = remapCachedClaimStatus(ctx, cfg.DB, binding.ProjectID, issue.UID, resp)
+	if err != nil {
+		return claimAPIError(err)
 	}
 	if err := cfg.DB.ApplyClaimStatus(ctx, binding.ProjectID, issue.UID, claimStatusFromAPI(resp)); err != nil {
 		return claimAPIError(err)
@@ -211,6 +221,14 @@ func isOfflineClaimRefreshError(err error) bool {
 	}
 	return apiErr.Status == http.StatusServiceUnavailable &&
 		apiErr.Code == "federation_offline"
+}
+
+func isOfflineClaimHubStatusError(err error) bool {
+	var statusErr *claimHubStatusError
+	if !errors.As(err, &statusErr) || statusErr == nil || statusErr.StatusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	return hubStatusErrorCode(statusErr) == "federation_offline"
 }
 
 func claimGateAPIError(err error) error {

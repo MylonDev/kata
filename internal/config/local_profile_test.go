@@ -390,3 +390,111 @@ func TestLocalProfileEnvironmentTrustsConfiguredCertificateAuthority(t *testing.
 		})
 	}
 }
+
+// Contract: a local-profile daemon receives the signing secrets named by its
+// own home's hub keys and saved spoke credentials, not the invoking home's.
+func TestLocalProfileEnvironmentIncludesFederationSigningKeyEnvs(t *testing.T) {
+	t.Setenv("KATA_HOME", t.TempDir())
+	t.Setenv("EXAMPLE_HUB_SIGNING_KEY", "hub-signing-secret")
+	t.Setenv("EXAMPLE_SPOKE_SIGNING_KEY", "spoke-signing-secret")
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte(`
+[federation.signing]
+external_url = "https://daemon.example/federation"
+[[federation.signing.key]]
+key_id = "hub-key"
+key_env = "EXAMPLE_HUB_SIGNING_KEY"
+enrollment_id = 1
+`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "credentials.toml"), []byte(`
+[projects.01HZNQ7VFPK1XGD8R5MABCD4EX]
+hub_url = "https://daemon.example/federation"
+hub_project_id = 1
+token = "enrollment"
+[projects.01HZNQ7VFPK1XGD8R5MABCD4EX.signing]
+key_id = "spoke-key"
+key_env = "EXAMPLE_SPOKE_SIGNING_KEY"
+`), 0o600))
+	profile, err := config.ResolveLocalProfile(config.CatalogDaemonConfig{
+		Name: "example-profile", Local: true, Home: home, InstanceUID: "01HZZZZZZZZZZZZZZZZZZZZZ01",
+	})
+	require.NoError(t, err)
+
+	env, err := config.LocalProfileEnvironment(profile, true)
+
+	require.NoError(t, err)
+	assert.Contains(t, env, "EXAMPLE_HUB_SIGNING_KEY=hub-signing-secret")
+	assert.Contains(t, env, "EXAMPLE_SPOKE_SIGNING_KEY=spoke-signing-secret")
+}
+
+// Contract: credential references that share one environment variable are
+// copied once instead of being mistaken for reserved OS variables.
+func TestLocalProfileEnvironmentAllowsSharedCredentialReferences(t *testing.T) {
+	t.Setenv("EXAMPLE_SHARED_SIGNING_KEY", "shared-signing-secret")
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "credentials.toml"), []byte(`
+[projects.01HZNQ7VFPK1XGD8R5MABCD4EX]
+hub_url = "https://daemon.example"
+[projects.01HZNQ7VFPK1XGD8R5MABCD4EX.signing]
+key_id = "key-a"
+key_env = "EXAMPLE_SHARED_SIGNING_KEY"
+[projects.01HZNQ7VFPK1XGD8R5MABCD4EY]
+hub_url = "https://daemon.example"
+[projects.01HZNQ7VFPK1XGD8R5MABCD4EY.signing]
+key_id = "key-b"
+key_env = "EXAMPLE_SHARED_SIGNING_KEY"
+`), 0o600))
+	profile := config.LocalProfileConfig{Home: home, Config: &config.DaemonConfig{}}
+
+	env, err := config.LocalProfileEnvironment(profile, true)
+
+	require.NoError(t, err)
+	assert.Contains(t, env, "EXAMPLE_SHARED_SIGNING_KEY=shared-signing-secret")
+	_, err = config.LocalProfileEnvironment(config.LocalProfileConfig{Home: t.TempDir(), Config: &config.DaemonConfig{
+		Search: config.SearchConfig{Embeddings: config.EmbeddingsConfig{APIKeyEnv: "PATH"}},
+	}}, true)
+	require.Error(t, err, "an OS allowlist variable remains reserved")
+}
+
+func TestLocalProfileEnvironmentIncludesLinearToken(t *testing.T) {
+	t.Setenv("KATA_LINEAR_TOKEN", "default-linear-credential")
+	t.Setenv("EXAMPLE_LINEAR_TOKEN", "custom-linear-credential")
+	for _, tc := range []struct {
+		name, config, want, excluded string
+	}{
+		{"default", "", "KATA_LINEAR_TOKEN=default-linear-credential", "EXAMPLE_LINEAR_TOKEN=custom-linear-credential"},
+		{"custom", "[linear_sync]\ntoken_env = \"EXAMPLE_LINEAR_TOKEN\"\n", "EXAMPLE_LINEAR_TOKEN=custom-linear-credential", "KATA_LINEAR_TOKEN=default-linear-credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.config != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte(tc.config), 0o600))
+			}
+			profile, err := config.ResolveLocalProfile(config.CatalogDaemonConfig{
+				Name: "example-profile", Local: true, Home: home, InstanceUID: "01HZZZZZZZZZZZZZZZZZZZZZ01",
+			})
+			require.NoError(t, err)
+
+			env, err := config.LocalProfileEnvironment(profile, true)
+
+			require.NoError(t, err)
+			assert.True(t, slices.Contains(env, tc.want), "child environment must include the selected Linear token")
+			assert.False(t, slices.Contains(env, tc.excluded), "unselected Linear credentials must remain outside the child environment")
+		})
+	}
+}
+
+// Contract: selected profiles forward only their configured Todoist credential reference.
+func TestLocalProfileEnvironmentIncludesTodoistTokenEnv(t *testing.T) {
+	for _, key := range []string{"", "EXAMPLE_TODOIST_TOKEN"} {
+		home := t.TempDir()
+		cfg, err := config.ReadDaemonConfigForHome(home)
+		require.NoError(t, err)
+		cfg.TodoistSync, err = config.NormalizeTodoistSyncConfig(config.TodoistSyncConfig{TokenEnv: key})
+		require.NoError(t, err)
+		t.Setenv(cfg.TodoistSync.TokenEnv, "example-todoist-token")
+		env, err := config.LocalProfileEnvironment(config.LocalProfileConfig{Home: home, Config: cfg}, true)
+		require.NoError(t, err)
+		assert.Contains(t, env, cfg.TodoistSync.TokenEnv+"=example-todoist-token")
+	}
+}

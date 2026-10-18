@@ -250,6 +250,7 @@ func TestDaemonLogs_Hooks_Tail_RotatedOnlyWaitsForActive(t *testing.T) {
 // `read` by len(line)+1, which over-counted the unflushed mid-line by
 // 1 byte and caused later ticks to miss content.
 func TestEmitNewLines_PartialTrailingLine_NotConsumed(t *testing.T) {
+	resetFlags(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "runs.jsonl")
 	first := `{"event_id":1,"result":"ok"}` + "\n"
@@ -308,11 +309,13 @@ func TestFollowActive_NoMark_EmitsExistingContent(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	f := &hookLogFilter{hookIndex: -1}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	if err := followActive(ctx, &buf, io.Discard, path, activeMark{}, f); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		if err := followActive(ctx, &buf, io.Discard, path, activeMark{}, f); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if !strings.Contains(buf.String(), `"event_id":42`) {
 		t.Fatalf("unset mark should emit existing content: %q", buf.String())
 	}
@@ -334,12 +337,14 @@ func TestFollowActive_MarkAtSize_DoesNotReEmit(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	f := &hookLogFilter{hookIndex: -1}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
 	mark := activeMark{set: true, info: info, size: info.Size()}
-	if err := followActive(ctx, &buf, io.Discard, path, mark, f); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		if err := followActive(ctx, &buf, io.Discard, path, mark, f); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if strings.Contains(buf.String(), `"event_id":1`) {
 		t.Fatalf("mark at size should suppress re-emission: %q", buf.String())
 	}

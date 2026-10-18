@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.kenn.io/kata/internal/activity"
@@ -11,15 +12,20 @@ import (
 
 const defaultDueNotificationSweepInterval = 30 * time.Second
 
-// DueNotificationSweeper surfaces reached scheduled and deadline dates in the
-// same notify.* inbox slots written by kata notify.
+// maxRecurringBatchesPerSweep bounds one job's work per sweep so a huge
+// backlog cannot starve other jobs; the next sweep continues from progress.
+const maxRecurringBatchesPerSweep = 20
+
+// DueNotificationSweeper surfaces reached planning dates and native recurring
+// child issues through the same notify.* inbox slots written by kata notify.
 type DueNotificationSweeper struct {
-	DB              db.Storage
-	Publish         EventPublisher
-	DefaultTimezone string
-	Interval        time.Duration
-	OnError         func(error)
-	IdleAdmission   activity.WaitableAdmission
+	DB                db.Storage
+	Publish           EventPublisher
+	DefaultTimezone   string
+	Interval          time.Duration
+	OnError           func(error)
+	IdleAdmission     activity.WaitableAdmission
+	recurringAfterUID string
 }
 
 // NewDueNotificationSweeper constructs a sweeper for the provided store and event publisher.
@@ -49,11 +55,11 @@ func (s *DueNotificationSweeper) runOnce(ctx context.Context, now time.Time) (<-
 	if idleLease != nil {
 		fork = idleLease.Fork
 	}
+	var errs []error
 	ids, err := s.DB.ListDueNotificationIssueIDs(ctx)
 	if err != nil {
-		return nil, false, err
+		errs = append(errs, err)
 	}
-	var errs []error
 	for _, issueID := range ids {
 		result, err := s.DB.ReconcileDueNotification(ctx, db.ReconcileDueNotificationIn{
 			IssueID: issueID, Now: now, DefaultTimezone: s.DefaultTimezone,
@@ -66,7 +72,40 @@ func (s *DueNotificationSweeper) runOnce(ctx context.Context, now time.Time) (<-
 			s.Publish.EventFrom(result.Event.ProjectID, *result.Event, fork)
 		}
 	}
+	candidates, err := s.DB.ListRecurringCronJobs(ctx, s.recurringAfterUID, 100)
+	if err != nil {
+		errs = append(errs, err)
+	} else {
+		for _, candidate := range candidates {
+			s.recurringAfterUID = candidate.JobUID
+			if err := s.dispatchRecurring(ctx, candidate, now, fork); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if len(candidates) < 100 {
+			s.recurringAfterUID = ""
+		}
+	}
 	return nil, false, errors.Join(errs...)
+}
+
+// dispatchRecurring drains a job's backlog in bounded batches so a long
+// pause catches up within one sweep instead of one batch per interval.
+func (s *DueNotificationSweeper) dispatchRecurring(ctx context.Context, candidate db.RecurringCronCandidate, now time.Time, fork activity.Admission) error {
+	in := db.DispatchRecurringCronIn{ProjectID: candidate.ProjectID, JobUID: candidate.JobUID, ExpectedEventUID: candidate.ExpectedEventUID, Now: now}
+	for range maxRecurringBatchesPerSweep {
+		out, err := s.DB.DispatchRecurringCron(ctx, in)
+		if err != nil {
+			return fmt.Errorf("dispatch recurring job %s in project %d: %w", candidate.JobUID, candidate.ProjectID, err)
+		}
+		for _, event := range out.Events {
+			s.Publish.EventFrom(event.ProjectID, event, fork)
+		}
+		if !out.More {
+			return nil
+		}
+	}
+	return nil
 }
 
 // Run performs one startup pass, then reconciles every interval until the

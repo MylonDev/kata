@@ -1,25 +1,32 @@
 ---
 title: CLI reference
 description: Reference Kata's command-line flags, issue relationships, output modes, and administration workflows.
-last_edited: 2026-10-02
+last_edited: 2026-10-18
 ---
 
 # CLI reference
 
 This page summarizes the command surface. Run `kata <command> --help` for the
-current flag list in your installed binary.
+current flag list in your installed binary. Root help includes the agent workflow,
+ref syntax, output modes, environment variables, and exit codes.
+
+## Command groups
+
+Root help groups commands into find/read, issue changes, agent coordination,
+setup/diagnosis, and administration. Subcommand help lists global flag names
+compactly; `kata --help` has their full descriptions.
 
 ## Global flags
 
 | Flag | Meaning |
 | --- | --- |
 | `--workspace <path>` | Resolve project context from a specific workspace. |
-| `--project <name>` | Select a project explicitly for project-scoped commands. |
-| `--daemon <name>` | Target a named daemon catalog entry for this command. |
+| `--project <name>` | Select a project explicitly; otherwise resolve `.kata.toml` at or above `--workspace`. |
+| `--daemon <name>` | Target a named daemon catalog entry. Without it, select `KATA_SERVER`, workspace config, `active_daemon`, then local. |
 | `--as <actor>` | Override the actor for this command. |
-| `--teammate <handle>` | Attribute supported comments and new issues to one teammate under the accountable actor. An explicit empty value suppresses `KATA_TEAMMATE`. |
-| `--agent` | Emit concise agent-readable text. |
-| `--json` | Emit machine-readable JSON. |
+| `--teammate <handle>` | Attribute supported comments, new issues, and cron run observations to one teammate under the accountable actor. An explicit empty value suppresses `KATA_TEAMMATE`. |
+| `--agent` | Emit an `OK` or `ERR` status line, then command-specific details. Use in agent sessions. |
+| `--json` | Emit the full JSON envelope for scripts. |
 | `--format <mode>` | Select an output mode explicitly. General commands accept `human`, `json`, or `agent`; `quickstart` also accepts `contract`. |
 | `--quiet` | Suppress non-essential output. |
 
@@ -32,6 +39,22 @@ pass `--all` to select projects across the chosen daemon. These commands
 remain project-scoped by default. `--all` cannot be combined with explicit
 `--project` or `--workspace`. Update scripts and MCP launch configurations
 that use `--all-projects` to use `--all`; the old spelling is no longer accepted.
+
+## Exit codes
+
+Errors go to stderr in the selected output mode.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success, including an empty `next` result. |
+| 1 | Internal error. |
+| 2 | Usage error. |
+| 3 | Validation error. |
+| 4 | Not found. |
+| 5 | Conflict. |
+| 6 | Confirmation required. |
+| 7 | Daemon unavailable. |
+| 8 | Wait timeout. |
 
 ## Workspace initialization
 
@@ -64,39 +87,75 @@ file before using `--with-agents`.
 Pass `--with-hooks` to install the `work.attention` lifecycle hooks from the
 [agent orchestration recipe](../operations/agent-orchestration.md#keep-attention-truthful-with-hooks)
 into the workspace's Claude Code config. It additively installs two command-hook
-entries in `.claude/settings.json`: `SessionStart` runs `kata agent-hooks attention
-start` for new, resumed, and cleared sessions (but not context compaction), and
-`SessionEnd` runs `kata agent-hooks attention end` only for terminal exits rather
+entries in `.claude/settings.json`: `SessionStart` runs `kata attention-hook start` for new, resumed, and cleared sessions (but not context compaction), and
+`SessionEnd` runs `kata attention-hook end` only for terminal exits rather
 than clear/resume transitions. Both use the
 launcher-provided `KATA_REF` and intentionally do nothing when it is absent.
 Everything else in `settings.json` is preserved, re-running is a no-op, and a
 symlinked `settings.json` or `.claude` directory is refused. Hook ownership and
 config mutation use kit's shared agent-hook manager.
 
-Pass `--with-codex-hooks` to install additive `SessionStart` hooks in the
+Pass `--agent-hooks=codex,pi` for a project contract and every available native
+attention direction. Add `--contract-only` to install only contracts. Names are
+comma-separated and duplicates are installed once. Invalid selections and
+OpenCode version detection failures are rejected before daemon contact or writes;
+the detected API choice remains fixed through publication. New CSV setup adds an
+`agent_hooks` array to init JSON, with per-target mutation fields (`harness`,
+`config_path`, `changed`, `state`, `reason`, and `warnings`). Agent output includes
+`agent_hooks_harness` and `agent_hooks_state` lines. Muse project attention is
+reported as `partial` unless `--contract-only` was selected.
+
+Repeatable `--with-agent-hooks <harness>` also selects full project bundles;
+its output does not include the per-target `agent_hooks` array.
+`--with-agent-hooks opencode` detects and pins the installed runtime API before
+daemon contact. The older
+`--with-hooks` and `--with-codex-hooks` also preserve their commands and trust
+identities. Combining another hook selector with `--agent-hooks` or
+`--contract-only` is rejected before writes; `--with-agents` may accompany
+either setup flow.
+
+If publication fails after `--agent-hooks` or `--with-agent-hooks` creates or
+binds the project, init exits nonzero and reports that completed outcome.
+JSON errors use `error.code: init_agent_hooks_failed`; `error.data` preserves
+the daemon's project result and adds `bound`, `workspace_root`,
+`agent_hooks_error`, and `agent_hooks_changed`. The last field reports whether
+hook writes remain after the failed publication. Fix the reported error and
+rerun init to complete hook setup.
+
+Pass `--with-codex-hooks` to install additive `SessionStart` and `SessionEnd` hooks in the
 workspace's `.codex/hooks.json`. The contract hook injects the same canonical
 briefing as `kata quickstart --format contract` through
-`kata agent-hooks contract codex` on startup, resume, clear, and context
+`kata agent-contract-hook` on startup, resume, clear, and context
 compaction. The
 [attention harness](../operations/agent-orchestration.md#keep-attention-truthful-with-hooks)
-runs `kata agent-hooks attention start` on startup, resume, and clear, but not
+runs `kata attention-hook start` on startup, resume, and clear, but not
 compaction; it uses the launcher-provided `KATA_REF` and does nothing when the
-variable is absent. Codex has no stable session-end hook event yet, so pair the
-attention hook with a launcher wrapper that runs `kata agent-hooks attention end`
-after Codex exits. Everything else in `hooks.json` is preserved, re-running is
+variable is absent. Genuine native `SessionEnd` runs `kata attention-hook end`.
+Older Codex runtimes without SessionEnd need launcher cleanup. Everything else in `hooks.json` is preserved, re-running is
 a no-op, a symlinked `hooks.json` or `.codex` directory is refused, and a
 pre-existing `[hooks]` table in `.codex/config.toml` produces a non-fatal
 warning because Codex loads both files' hooks together.
 
 If the selected user's Codex config already has a `SessionStart` contract hook
-whose `command` contains the `--source kata-agent-contract-hook` marker, init
-can use it instead of a workspace contract hook. Its matcher must be absent,
+that invokes a built-in Kata contract command directly, init can use it instead
+of a workspace contract hook. This applies to `--agent-hooks=codex`,
+`--with-agent-hooks codex`, and `--with-codex-hooks`.
+Custom `--source` files, shell wrappers, conditional
+registrations and extra handler arguments do not qualify. Its matcher must be absent,
 empty, `*`, or a regex matching all four sources: startup, resume, clear, and
-compact. A `commandWindows` override alone does not qualify.
+compact. A `commandWindows` override alone does not qualify. An explicit
+timeout below the workspace contract's 10 seconds also does not qualify.
 
-For an untracked `.codex/hooks.json`, init installs the attention hook, removes
+Single-platform defaults, such as a native `command` without
+`commandWindows`, also do not qualify. Init keeps the workspace contract in
+that case, so the user hook can inject a second copy on the platform where it
+runs. Normalize the user config with `kata agent-hook install codex`, then
+rerun `kata init --with-codex-hooks`; init removes an untracked duplicate and
+keeps a tracked workspace hook for teammates.
+
+For an untracked `.codex/hooks.json`, init installs the selected attention hooks, removes
 the workspace contract hook, and reports the user config path supplying it.
-For a tracked file, init installs or updates both hooks and reports that it
+For a tracked file, init installs or updates the selected hooks and reports that it
 kept the workspace contract for teammates who may lack a user hook. Paths that
 identify the same config file count as one installation and do not trigger
 removal.
@@ -105,8 +164,10 @@ Init checks only the config selected by the current `CODEX_HOME`, or the default
 `~/.codex/hooks.json` when that variable is absent. A workspace shared across
 several Codex homes therefore deduplicates against whichever home runs init.
 Malformed JSON or an invalid hook layout in the selected user config aborts
-hook setup before changing workspace hooks. Init continues and reports a warning
-in human output mode. When a qualifying user contract exists in a git workspace,
+hook setup before changing workspace hooks. The `--agent-hooks` and
+`--with-agent-hooks` selectors reject it before project creation;
+`--with-codex-hooks` continues init and reports a warning in human output mode.
+When a qualifying user contract exists in a git workspace,
 init also requires a working `git` executable to check whether the workspace hook
 file is tracked. If you remove the user contract hook, re-run
 `kata init --with-codex-hooks` to restore the workspace contract hook.
@@ -130,38 +191,69 @@ not mutate workspace files, and comes from the same canonical text that
 its `agent-instructions` alias; it conflicts with `--json` and `--agent` like
 the other output modes.
 
-[`kata agent-hooks contract <harness>`](#contract-injection) injects exactly
-this text in a harness-native response. To load it in every session, see
+[`kata agent-hook contract <harness>`](#contract-injection) injects this text in a harness-native response by default. To load it in every session, see
 [Contract in every session](../workflows/agents.md#contract-in-every-session).
 
-## Agent hooks
+## Agent hook
 
-These commands are available on `main`; they are not included in 0.18.0.
+These commands require Kata 0.19.0 or later.
+
+The command group has been renamed from `kata agent-hooks` to
+`kata agent-hook`. This is a breaking change: the plural spelling fails as an
+unknown command. Update scripts and hook configurations to use the singular
+name. Reinstall user hooks with `kata agent-hook install`. For workspace hooks,
+re-run `kata agent-hook install <harness> --local` or the `kata init` hook
+option that installed them. Reinstalling replaces hooks that still call the
+plural command.
 
 Run Kata's contract and attention hooks from coding-agent configurations:
 
 ```text
-kata agent-hooks
+kata agent-hook
   contract <harness>          Read stdin and emit a harness-native contract response
   attention start            Establish the attention baseline at session start
   attention end              Raise attention if the session ended without a hand-off
-  install (<harness>... | --all)  Install the contract in user configs
+  install (<harness>... | --all)  Install contract hooks; add tracking with --attention
   uninstall (<harness>... | --all)  Remove user contract hooks
-  status [<harness>]          Inspect user hooks and the current workspace
+  status [<harness>]          Inspect configured hooks and capability coverage
+  instructions install muse --home <path>  Install a hookless instruction bundle
+  instructions uninstall muse --home <path>  Remove the hookless managed blocks
+  instructions status muse --home <path>  Inspect hookless artifacts without a daemon
 ```
 
 These commands are coding-agent hooks. Daemon event hooks configured in
 `hooks.toml` are a
 [separate feature](../design/architecture.md#hooks-local-automation-with-a-hard-boundary).
 
+### Hookless instructions
+
+`kata agent-hook instructions install muse --home <path> --actor <actor>
+[--dry]` generates consumer Muse's instruction block, skill, and scheduled
+poll specification. `--home` and `--actor` are required; `--actor` may name an
+exact actor/teammate inbox. With `--dry --json`, the response
+includes the exact proposed file contents; no files or directories are created.
+The install response lists artifact paths and whether each would change.
+
+`instructions uninstall muse --home <path> [--dry]` removes only managed
+blocks. `instructions status muse --home <path>` reads files without contacting
+a daemon. All three commands support human, `--agent`, and `--json` output.
+`native_attention` is always false; file presence does not prove runtime loading.
+These instructions do not appear in native `install --all` selection.
+
+See [Hookless harnesses](../workflows/agents.md#hookless-harnesses) for file
+ownership, scheduled polling, cleanup, and the required explicit authentication
+choice.
+
 ### Contract injection
 
 Use `contract` with `claude`, `codex`, `copilot`, `cursor`, `gemini`, `hermes`,
-or `qwen`. Factory Droid has no SessionStart hook and is refused. The harness
-name is positional. For example, a Codex SessionStart hook can run:
+or `qwen`, plus native `droid`, `antigravity`, `kimi-code`, `muse` and `zcode`.
+Pi, Amp, OpenCode and OpenClaw use installed code extensions instead of this
+stdin command. Kimi CLI and Grok support attention only. The harness name is
+positional. For example, a Codex SessionStart hook can run:
 
 ```sh
-kata agent-hooks contract codex --source kata-agent-contract-hook
+kata agent-hook contract codex
 ```
 
 The command reads one finite native JSON payload from stdin through EOF and
@@ -180,51 +272,131 @@ a fix in Kit. For accepted messages, later turns and payloads without the flag
 receive an empty native response. Hermes's `on_session_start` is an observer
 event and does not inject context.
 
-The optional `--source kata-agent-contract-hook` marks hook ownership and
-does not change runtime behavior. A different marker, an unknown harness,
-or terminal stdin returns usage exit code `2`. At a terminal, use
-`kata quickstart --format contract` for plain text. Payload or encoding errors
-exit nonzero with one stderr line and no partial response on stdout.
+For a Codex response without a stdin payload, run the bare command:
+
+```sh
+kata agent-contract-hook
+kata agent-contract-hook --source ./agent-prompt.txt
+```
+
+Both contract command forms accept optional `--source <path>` to replace the
+entire prompt with a local UTF-8 text file. Relative paths resolve from the
+invocation cwd and stay within it; parent traversal and symlink targets that
+escape are rejected. Absolute paths use the specified file. Omitting the option
+or selecting a nonexistent file uses the built-in contract. An existing empty
+file deliberately supplies an empty prompt; native harnesses may encode that
+as a neutral response. Directories, unreadable files, invalid UTF-8, an empty
+option value and malformed arguments return an error before emitting a
+response. Paths are used literally, without URL fetching, shell expansion or
+template processing. The shipped ownership marker
+`--source kata-agent-contract-hook` keeps the built-in contract even when a file
+has that name. Use `--source ./kata-agent-contract-hook` to select that file.
+
+An unknown harness or terminal stdin on the native form returns usage exit code
+`2`. At a terminal, use `kata quickstart --format contract` for plain text.
+Payload or encoding errors exit nonzero with one stderr line and no partial
+response on stdout.
 
 ### User installation and removal
 
 ```sh
-kata agent-hooks install claude codex
-kata agent-hooks install --all
-kata agent-hooks install codex --config /path/to/second-codex-home/hooks.json
-kata agent-hooks install claude --executable /path/to/stable/bin/kata
-kata agent-hooks uninstall codex
-kata agent-hooks uninstall --all
+kata agent-hook install
+kata agent-hook install codex pi
+kata agent-hook install codex --config /path/to/second-codex-home/hooks.json
+kata agent-hook install claude --executable /path/to/stable/bin/kata
+kata agent-hook uninstall codex
+kata agent-hook uninstall --all
 ```
 
-User scope is the only installation scope. Harness names are positional;
-shell completion offers `claude`, `codex`, `copilot`, `cursor`, `gemini`, `hermes`, and `qwen`. An explicitly
-named harness creates its config file if needed. Factory Droid is rejected
-before any config is written because it has no SessionStart event.
+User scope is the default; `--local` or `--scope project` selects the workspace.
+Bare install discovers configured native agents; `--all` uses the same rule.
+Dedicated provider configuration directories count as signals, while generic
+`.github/` or `.agents/` directories alone do not. Automatic project setup can
+use user configuration signals but selects only project-capable agents. Named
+targets are deterministic and may create configuration for an agent not detected.
+Contradictory explicit scope selections fail before writes. See the
+[18-target coverage matrix](../workflows/agents.md#hook-target-coverage) for
+contract, attention and project-discovery capabilities. Installation and status
+completion offer canonical target names; documented aliases remain accepted.
 
-`--all` installs only where the harness's config root already exists. Missing
-roots are reported as `skipped (not installed)`; Droid is reported as
-`skipped (no SessionStart)`. Copilot's root may exist without its `hooks/`
-subdirectory. With `GEMINI_CLI_HOME`, Gemini's root is the `.gemini/`
-subdirectory under that override. Config paths come from Kit and honor
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `GEMINI_CLI_HOME`,
-`HERMES_HOME`, and `QWEN_HOME`.
+```sh
+kata agent-hook install codex --local
+kata agent-hook install opencode
+kata agent-hook install muse --managed-attention
+kata agent-hook install codex --contract-only
+kata init --agent-hooks=codex,pi
+kata agent-hook uninstall pi --contract-only
+```
 
-`--config <path>` selects one explicit file and requires exactly one harness.
-It cannot be combined with `--all`. It changes only that selected config;
-other Codex homes and other workspaces are not scanned or edited.
+Installation requests contracts plus every available native attention
+direction by default. Use
+`--contract-only` or `--attention=false` for contract-only setup. `--attention`
+remains accepted. Contract-only reinstall preserves existing attention; default
+uninstall removes the full owned bundle, while contract-only uninstall preserves
+independent attention. Contradictory explicit component flags fail before writes.
 
-The installed command is
-`<kata> agent-hooks contract <harness> --source kata-agent-contract-hook`.
-Kit quotes the executable and arguments for the harness's platform. Codex
-receives a SessionStart registration with matcher `startup|resume|clear|compact`.
-Claude, Copilot, Cursor, Gemini, and Qwen receive SessionStart with no matcher,
-so every source runs the hook. Hermes receives `pre_llm_call` with no matcher
-and injects the contract only on the first turn. Every registration has a
-10-second timeout, expressed in the harness's native units. User installs
-never add attention hooks.
+OpenClaw does not add an inbox to prompts on a fresh install. To share the inbox
+selected by `KATA_INBOX_USER` in the Gateway environment with every prompt handled
+by the Kata plugin, install one explicit target with
+`kata agent-hook install openclaw --share-inbox`. The command warns that all
+prompts handled by this plugin may receive that inbox; it does not select a
+recipient per conversation. The recipient stays in the Gateway environment and
+is not copied into OpenClaw config. Use
+`kata agent-hook install openclaw --share-inbox=false` to disable sharing while
+keeping the other hooks. Reinstalling without the option preserves a choice
+recorded by this option while the contract remains installed. Removing the
+contract clears the choice; a later contract install defaults sharing off.
+Bundles installed before this option existed have no recorded opt-in; status
+warns that their running code may still share the inbox until it is reinstalled,
+and reinstall turns sharing off. This option requires exactly one explicit
+OpenClaw target and cannot be used with discovery, `--all`, or multiple targets.
+Offline status repeats the scope warning while sharing is enabled; it cannot
+confirm runtime loading.
 
-Kata chooses an absolute executable path in this order:
+OpenCode setup resolves `opencode` on PATH and probes `--version` with bounded
+output and timeout. Supported stable v1 releases start at 1.0.154; stable v2
+releases start at 2.0.0. Prerelease, unsupported, or ambiguous version output
+cannot select an API. `--api v1|v2` is an advanced override for unavailable
+detection; known incompatible runtime evidence is still rejected. Existing
+owned API metadata and discovery paths are retained; reinstall can reuse that
+API when the version probe is unavailable. An API mismatch requires
+uninstalling the existing bundle before choosing another API. Automatic setup
+can skip a failed probe while configuring other agents. Amp supports user or
+project installations, with conflicts detected across recorded project scopes.
+
+Muse native attention requires user managed-hook environment forwarding.
+`--managed-attention` is an explicit grant and implies attention. Explicit
+single-Muse user setup at a terminal may request that grant once. A valid
+managed path with a sufficient allowlist is reused. Automatic, project, JSON,
+agent-output and noninteractive setup never prompt or expand user policy;
+without permission they install the contract and report `state: partial` with
+an attention-permission reason. Muse forwards these allowlisted variables to
+every managed hook, including hooks from other tools; the grant includes
+`KATA_AUTH_TOKEN` when it is set in Muse's launching environment. Review the
+complete managed-hook set before granting. Uninstall preserves this policy;
+remove the names from Muse settings to revoke it.
+
+`--config` requires one harness and cannot accompany `--all`; code adapters
+without a native config override reject it. Default roots honor the original
+Kit environment selectors plus native Pi, OpenClaw, Kimi Code, Grok and XDG
+selectors. Installer `--source` applies only to owned code adapters, as literal
+prompt-file data. Relative user-scope paths are saved as absolute paths from the
+install command's working directory; project-scope paths stay relative to the
+selected workspace. It is rejected for command codecs. Authored custom prompt
+commands remain foreign and are preserved.
+
+Command codecs register `<kata> agent-hook contract <harness>` on their native
+context event. Native code providers install owned extensions/plugins instead.
+Attention bundles use a session-aware bridge that captures native IDs and
+workspace routing, preserves handoffs on duplicate starts, and fences old
+session cleanup after replacement. Terminal events differ by harness; Hermes
+uses `on_session_finalize`, never per-turn `on_session_end`. Bare
+`attention-hook` entry points and the older init flags retain their compatible
+commands; bare hooks do not provide session-ownership fencing.
+
+Project setup uses the portable `kata` command by default so teammates do not
+inherit the installer's machine-specific path. `--executable` overrides it.
+User setup chooses an absolute executable path in this order:
 
 1. `--executable <path-or-command>`. Bare commands are resolved on `PATH`;
    relative paths are made absolute. The result must be an existing regular
@@ -235,14 +407,27 @@ Kata chooses an absolute executable path in this order:
 
 Repeating an install with exactly one complete canonical owned registration
 writes nothing and preserves hook indexes. All owned handler fields, including command, native matcher, timeout,
-platform commands and execution conditions, must match Kit's planned registration. Older paths, duplicate owned
-registrations or changed fields are replaced through Kit; Kata warns that the
-harness may ask to re-trust. Foreign hooks retain their relative order. Legacy
-and hand-written contract hooks are recognized by the same ownership marker.
+platform commands and execution conditions, must match the planned registration.
+Older paths, duplicate defaults and old generated source-marked commands are
+normalized; Kata warns that the harness may ask to re-trust. Ownership uses
+exact direct command recognition across all platform variants. A renamed Kata
+executable carries an explicit ownership marker so later updates can recognize
+it. Custom prompt
+commands and unrelated wrappers remain untouched, retaining their relative order.
+Generated Pi, Amp, OpenCode and OpenClaw artifacts record a digest of their
+installed code and metadata. Unedited artifacts can be inspected, upgraded or
+removed after Kata's generator changes. Edited code, metadata and package
+manifests are preserved; move them aside after saving your changes before
+rerunning setup.
 All flags, harnesses and config plans are validated before writes begin.
-Writes to several config files are not one transaction; a later filesystem
-write failure names any earlier configs that changed and retains their warnings,
-including Codex trust and restoration instructions.
+Artifacts are snapshot-checked, locked and staged before publication. A failed
+bundle rolls back its writes when their afterimages still match. External edits
+are preserved and retained artifacts are named when safe rollback is impossible.
+These checks serialize cooperating Kata writers; they do not prevent arbitrary
+external writes between the last check and rename. Lock files live in the OS
+temporary directory under `kata-agent-hook-locks-<uid>/`, outside agent configs
+and workspaces. Config symlinks are preserved; publication updates their resolved
+target.
 
 After installing or replacing a Codex hook, Kata prints:
 
@@ -257,20 +442,31 @@ duplicate`. If that file is tracked by Git, the hint instead explains that
 file untouched. If it cannot inspect the file, installation continues with a
 warning. See the [workspace hook rules](#workspace-initialization).
 
-`uninstall` removes only marker-owned contract hooks and preserves foreign and
-attention hooks. A missing config is a successful no-op. Removing a Codex user
-hook warns that workspaces initialized while it existed may have no contract
-hook; rerun `kata init --with-codex-hooks` in those workspaces to restore it.
+`uninstall` removes built-in contract hooks, including old source-marked
+defaults recognized by their direct commands. It preserves custom prompts,
+wrappers and unrelated handlers. Default uninstall removes the full selected
+bundle; `--contract-only` preserves attention. An attention-only extension may
+remain after contract-only removal. A missing config is a
+successful no-op. Removing a Codex user hook warns that workspaces initialized
+while it existed may have no contract hook; rerun
+`kata init --with-codex-hooks` in those workspaces to restore it.
 
 ### Hook status and output
 
 ```sh
-kata agent-hooks status
-kata agent-hooks status codex --config /path/to/second-codex-home/hooks.json --json
+kata agent-hook status
+kata agent-hook status codex --config /path/to/second-codex-home/hooks.json --json
 ```
 
 `status` needs no daemon or initialized Kata workspace and never writes files.
-It inspects all seven supported user profiles by default, or one named profile.
+Bare status inspects user and supported project scopes. A named target defaults
+to user scope; explicit `--scope` or `--local` selects one scope. In bare JSON
+status, top-level `harnesses` contains one user row per agent and
+`workspace.harnesses` contains project rows. User rows use `user` for config
+details; project rows use `config`. With a single selected scope, rows stay in
+top-level `harnesses`. Status and uninstall never execute OpenCode version probes.
+Capabilities and configured contract/start/end
+are separate, and offline state cannot prove runtime loading or native trust.
 It also reports contract and attention registrations in the current workspace's
 `.claude/settings.json` and `.codex/hooks.json`. `--workspace` selects that
 workspace; otherwise Kata discovers the nearest local Kata workspace or Git
@@ -280,8 +476,14 @@ neither exists. Discovery does not contact the daemon.
 An unreadable or malformed workspace hook file produces a warning while status
 continues to report user hooks. If Git is unavailable or cannot inspect the
 workspace, status reports no committed guidance and includes a warning. These
-warnings mean the corresponding workspace checks are incomplete. Invalid user
-configs still produce an error.
+warnings mean the corresponding workspace checks are incomplete. An unreadable,
+malformed or unsupported config in a selected scope produces `inspection_error`
+with the target, scope and file path. Status collects the other targets, then
+exits nonzero with `error.code: agent_hooks_inspection_failed`. JSON sends the
+report in `error.data` on stderr and leaves stdout empty. Human and agent output
+print the report before the error. The failed target's configured fields are
+unknown, and text output says inspection is unavailable. Invalid command
+arguments also return an error.
 
 For each user config, status shows its path, contract presence, commands and
 whether each command's executable exists. `duplicate` means a user contract
@@ -296,23 +498,29 @@ All three subcommands support human, `--agent`, and `--json` output. JSON is one
 complete object with `kata_api_version: 1`; diagnostics never mix with success
 JSON. Empty lists are `[]`. Mutation output contains `action` and `results`.
 Each result has `harness`, `config_path`, `changed`, `state`, `reason`, and
-`warnings`. States are `installed`, `unchanged`, `removed`, `absent`, or
-`skipped`.
+`warnings`. States are `installed`, `unchanged`, `removed`, `absent`,
+`skipped`, or `partial`. Automatic skips and Muse partial setup return success
+with structured reasons. Bare install and `--all` with no configured agents
+return a successful skipped report and make no changes. Explicit detection failures, runtime/API
+mismatches, and foreign or edited artifacts fail before publication.
 
 Status JSON has this shape:
 
 | Object | Fields |
 | --- | --- |
 | Top level | `kata_api_version`, `harnesses`, `workspace`, `warnings` |
-| Each harness | `harness`, `user`, `duplicate`, `overlap` |
+| Each harness | `harness`, `scope`, `capabilities`, `configured`, `user` (user scope) or `config` (project scope), `duplicate`, `overlap`, optional `inspection_error` |
+| Configured components | `contract`, `attention_start`, `attention_end` |
+| Capabilities | `name`, `contract`, `attention_start`, `attention_end`, `project_scope`, optional `note` |
 | User or workspace config | `config_path`, `present`, `entries` |
 | Each entry | `event`, `group_index`, `handler_index`, `matcher`, `command`, `executable`, `executable_exists`, `kind` |
-| Workspace | `path`, `claude`, `codex`, `committed_guidance` |
+| Workspace | `path`, `claude`, `codex`, `committed_guidance`, `harnesses` when both scopes are selected |
 
 `kind` is `contract` or `attention`. Native event names are preserved.
 `group_index` is `-1` for profiles with flat handler lists. `present` means a
-contract registration exists on the expected event; it does not assert that
-the harness has trusted or executed it. Harnesses follow Kit's profile order. Events sort by native name, and handlers
+contract registration covers the harness lifecycle sources on the expected
+event; it does not assert that the harness has trusted or executed it. Harnesses
+follow the coverage registry order. Events sort by native name, and handlers
 retain their order within each event. `--quiet` suppresses text output while retaining
 requested JSON.
 
@@ -322,8 +530,8 @@ Use `attention start` and `attention end` without a harness argument. The
 launcher sets `KATA_REF` to the tracked issue in the bound workspace. For example:
 
 ```sh
-KATA_REF=abc4 kata agent-hooks attention start --source kata-agent-hook-start
-KATA_REF=abc4 kata agent-hooks attention end --source kata-agent-hook-end
+KATA_REF=abc4 kata attention-hook start
+KATA_REF=abc4 kata attention-hook end
 ```
 
 Start sets `work.attention` to `ok` for an open issue. End changes an open issue
@@ -333,13 +541,19 @@ closed issues unchanged. Both commands ignore stdin, produce no stdout, and
 silently ignore missing refs or daemon failures. `CLAUDE_PROJECT_DIR`, when
 present, supplies the workspace used for project resolution.
 
-The optional source marker must match the mode: `kata-agent-hook-start` or
-`kata-agent-hook-end`. Malformed arguments return usage exit code `2`.
+The hidden `kata attention-hook` command accepts only `start` or `end`. Its
+visible forms are `kata agent-hook attention start` and
+`kata agent-hook attention end`; each also accepts its matching legacy
+ownership marker, `--source kata-agent-hook-start` or
+`--source kata-agent-hook-end`. New installs use the bare forms. Empty,
+foreign, or cross-mode markers return usage exit code `2`.
 
-`kata init --with-hooks` and `--with-codex-hooks` install these visible commands.
-Re-running init replaces managed entries using the same `--source` markers,
-without duplicating hooks or changing unrelated entries. The hidden
-`attention-hook` and `agent-contract-hook` commands remain for existing configs.
+`kata init --with-hooks` and `--with-codex-hooks` install the bare commands.
+Re-running init normalizes old generated source-marked entries and preserves
+custom or unrelated commands. Old generated visible attention commands remain
+valid with their matching marker until the matching init option rewrites them
+to the bare form. After normalization, repeating init is a no-op. Changed Codex
+commands may require re-trust through `/hooks`; Kata never edits trust state.
 
 Claude Code treats exit code `2` as non-blocking for `SessionStart` and
 `SessionEnd`. If you attach these commands to `UserPromptSubmit` or `Stop`, a
@@ -365,7 +579,7 @@ by default. `--workspace` or `--project` selects one explicit project.
 `--projects` fixes an allowlist of project names, pinned by immutable project
 UID. `--all` follows every project in the selected daemon catalog.
 The startup scope and actor apply to every tool call. The initial catalog
-contains 14 section loaders that progressively expose the detailed typed
+contains section loaders that progressively expose the detailed typed
 tools. Optional `--storage-root` and repeatable `--storage-target
 alias=path-or-DSN` enable the otherwise absent host-local JSONL tools. See the
 [MCP reference](mcp.md) for transport configuration, the complete catalog,
@@ -422,18 +636,20 @@ ULIDs collided.
 List and inspect:
 
 ```sh
-kata list [--status open|closed|all] [--sort oldest] [--limit N]
+kata list [--status open|closed|all] [--sort oldest|created] [--limit N]
 kata list [--label LABEL] [--no-label LABEL] [--owner NAME] [--unowned]
-kata list [--meta key[=value]] [--parent <ref>]
-kata list --all [--status open|closed|all] [--sort oldest] [--limit N]
-              [--priority N | --max-priority N]
+kata list [--meta key[=value]] [--parent <ref>] [--cursor CURSOR] [--include-total]
+kata list --all [--status open|closed|all] [--sort oldest|created] [--limit N]
+              [--priority N | --max-priority N | --priority-unset]
               [--owner NAME | --unowned]
               [--label LABEL] [--no-label LABEL] [--meta key[=value]]
               [--parent <ref>]
 kata show <issue-ref> [--render] [--no-comments]
+kata show <issue-ref> [--thread COMMENT | --inbound[=AUTHOR[/TEAMMATE]]]
+                     [--kind reply|confirm|refute|supersede] [--since COMMENT]
 kata status <issue-ref>
 kata search <query> [--limit N] [--include-deleted]
-kata search <query> [--lexical | --hybrid | --semantic]
+kata search <query> [--lexical [--cursor CURSOR] | --hybrid | --semantic]
 kata search <query> [--status open|closed] [--label LABEL] [--no-label LABEL]
 ```
 
@@ -464,14 +680,31 @@ response as-is, so `.issue.labels` requires daemon API `0.24.0` or newer; an
 older daemon omits the key. The top-level `.labels` array keeps each label's
 `author` and `created_at` on every daemon version.
 
+With daemon API `0.28.0` or newer, comments include copyable handles, typed
+reply lines, backlinks, and edit markers in human, `--agent`, and `--json`
+output. `--thread COMMENT` follows the root and all its transitive replies
+across the project. It returns at most 50 comments and reports truncation;
+the root is retained when the limit or `--kind` filter applies. `--inbound`
+returns replies to your comments on this issue. Use `--inbound=AUTHOR` or
+`--inbound=AUTHOR/TEAMMATE` to select another participant. Thread and inbound
+selectors cannot be combined. `--kind` requires one of those selectors.
+`--since COMMENT` keeps comments strictly after that comment in creation-time,
+then UID order. All selectors and backlinks respect the caller's read scope.
+Backlink evidence retains the newest 50 replies per kind and marks incomplete
+results with `backlinks_truncated` in JSON and agent output. Human output states
+that more replies may be available.
+
 `kata status` reports the issue status and revision, daemon identity, effective
 actor, issue owner, and federation lease. Its `hold` value is `active`,
 `expired`, `pending`, `assigned`, `unassigned`, or `closed`. `assigned` means
 the open issue has an owner without a live or pending lease, which is the
 state `kata claim` produces outside federation. A cached timed
-lease can report `expired` while its hub is unavailable; a successful hub read
-releases the expired lease before returning current state. JSON output is a
-flat projection of the same fields. Use `kata show` for the complete issue.
+lease can report `expired` while its hub is unavailable or before the hub's
+background sweeper persists expiry. Hub issue reads do not release expired
+leases; the lease-status API returns authoritative lease state.
+See [Federation](../operations/federation.md#leases-and-write-gates) for expiry
+behavior. JSON output is a flat projection of the same fields. Use `kata show`
+for the complete issue.
 The revision advances on ownership and open/closed status changes. A dispatcher
 can read `status --json`, then pass that revision to `meta set --if-match` to
 reject a stale attention update after another worker claims or closes the issue.
@@ -488,6 +721,22 @@ scoped default of `updated_at` descending and the cross-project default of
 `created_at` descending, with the existing human tree grouping. The option
 requires daemon API `0.21.0` or newer.
 
+`--sort created` orders newest creation first, with descending issue IDs for
+ties. With either explicit creation sort, JSON output returns `next_cursor`
+when another page exists. Pass it as `--cursor CURSOR` with the same filters
+and sort. `complete` is true at exhaustion. Agent output includes these fields;
+human output prints the next cursor to stderr. `--include-total` requests the
+matching count in JSON and agent output, independent of the cursor and limit.
+`--priority-unset` selects issues with no priority and cannot be combined with
+`--priority` or `--max-priority`. `--max-priority` excludes unset priorities.
+These new options require API 0.27.0 or newer.
+
+Pages are live reads, not snapshots. Ordinary edits preserve creation order;
+restart after changes to filter membership, project membership, deletion, or
+imported creation timestamps. Cursors reject changed filters or scope, while
+the limit and count request may change. See the
+[HTTP listing contract](http-api.md#listing-issues).
+
 `--parent <ref>` lists only the direct children of one issue, each with its
 status, so a parent's progress takes one call instead of one `kata show` per
 child. Grandchildren are not included. The ref is a `short_id`,
@@ -501,7 +750,7 @@ Parent links can cross projects, so use `kata list --all --parent <ref>` to
 include children elsewhere. A bare `short_id` resolves in the current
 project, so outside a bound workspace `--all --parent` needs a
 `project#short_id` or ULID ref. A ULID names the parent in any project. The
-option requires daemon API `0.25.0` or newer.
+option requires daemon API `0.30.0` or newer.
 
 `kata list --all` applies the same filters across every non-archived project.
 Its human and agent rows use qualified refs such as
@@ -520,10 +769,16 @@ By default `kata search` runs lexical (FTS) search. When the daemon has
 automatically fuses lexical and vector results. The mode flags are mutually
 exclusive and force a strategy:
 
-- `--lexical`: FTS only, exactly the default behavior on a daemon without
-  embeddings.
+- `--lexical`: FTS only, in oldest-creation order with continuation (API 0.27.0).
 - `--hybrid`: fuse the lexical and vector legs (reciprocal rank fusion).
 - `--semantic`: vector (embedding) results only.
+
+For an exhaustive lexical scan, use `--lexical --json`, then pass each
+`next_cursor` back with `--cursor` and the same query and filters until
+`complete` is true. Agent output also includes completeness and continuation;
+human output prints an incomplete-results hint to stderr. Other modes keep
+ranked, bounded results without continuation. Their `complete` field is false
+when retrieval is truncated, degraded, or cannot establish exhaustion.
 
 Search includes open and closed issues by default. Use `--status open` or
 `--status closed` to restrict results before the result limit. Status combines
@@ -626,13 +881,44 @@ cross-project ref syntax and rendering rules.
 Comment:
 
 ```sh
-kata comment <ref> [--body TEXT | --body-file PATH | --body-stdin]
-kata comment edit <ref> <comment-uid> \
+kata comment <ref> [--body TEXT | --body-file PATH | --body-stdin] \
+  [--idempotency-key KEY]
+kata comment <ref> --reply COMMENT [--idempotency-key KEY] [--force] --body TEXT
+kata comment <ref> --confirm COMMENT --body TEXT
+kata comment <ref> --refute COMMENT --body TEXT
+kata comment <ref> --supersede COMMENT --body TEXT
+kata comment edit <ref> <comment-uid-or-handle> \
   [--body TEXT | --body-file PATH | --body-stdin]
 ```
 
 `-m` and `--message` are aliases of `--body` on both comment commands, so
 the text flag from `kata close` works here too.
+
+For comment creation, retain the same `--idempotency-key` when retrying a lost
+response. It uses the existing comment API replay contract, including request
+fingerprint checks; it does not change comment editing.
+
+Typed replies require daemon API `0.28.0` or newer. Choose one of `--reply`,
+`--confirm`, `--refute`, or `--supersede`. Reply is a general response; confirm
+asserts verification or reproduction. Confirm and refute bodies need at
+least 40 Unicode characters after whitespace normalization. The target must
+be visible and in the same project. A comment cannot link to itself. You
+cannot post a reply from a closed issue; a target on a closed issue is allowed.
+
+Use the displayed `c:abcdef` handle for a comment on the current issue,
+`abcd:abcdef` for another issue in the project, or
+`example-project#abcd:abcdef` for an explicit project. Full comment ULIDs are
+also accepted. Suffixes contain at least six characters, grow until unique
+within the visible project, and match case-insensitively. Bare suffixes are
+not accepted. Handles are computed on read; the stored edge uses the full UID.
+Read views mark unavailable targets as pending, removed, or moved. A moved
+target's link uses its current project and issue handle.
+
+Kata rejects a second reply with the same author, teammate, target, and kind
+with HTTP 409 and the existing reply's visible handle. Use `--force` to post
+another. Supply `--idempotency-key` for a retryable write: identical requests
+return the original result, while changing the body, participant, target, or
+kind with that key is a conflict. Equivalent target spellings share a receipt.
 
 `KATA_TEAMMATE` supplies an optional default for comment creation;
 `--teammate` overrides it and `--teammate=''` suppresses it for one
@@ -642,7 +928,9 @@ create` writes the string to the new issue's initial `metadata.teammate`.
 Commenting on an existing issue never changes that issue metadata.
 
 `kata comment edit` replaces the current comment body while preserving the
-comment UID, author, teammate, creation time, and thread position. Use it for
+comment UID, author, teammate, creation time, reply edge, and thread position.
+Read views show when a comment was edited and when its target changed after
+the reply was posted. Use it for
 pre-federation content redaction; it does not rewrite historical events that
 have already been shared.
 
@@ -660,8 +948,12 @@ kata close <ref> --done --message <text> \
   [--reviewed <path>] \
   [--evidence <type:value>] \
   [--idempotency-key <key>] \
-  [--if-match <revision>]
+  [--if-match <revision>] \
+  [--dry]
 ```
+
+`--dry` validates the close without changing the issue and reports the close
+event it would record. Releases before 0.19.0 spelled this flag `--dry-run`.
 
 `-m` is short for `--message`, and `--body` is accepted as an alias, matching
 `kata comment`. `--comment` still posts a separate follow-up comment.
@@ -677,6 +969,10 @@ post the comment twice. Keep the comment text unchanged when retrying.
 close transaction and returns a revision conflict when it has changed. An
 exact retry with a matching idempotency key returns the committed receipt even
 after the original close advanced the issue state.
+
+An opt-in [closing-session transcript setting](configuration.md#closing-session-transcripts)
+attaches the current agent session and optional AgentsView link alongside the
+close evidence. It never supplies completion evidence on its own.
 
 Evidence is validated against the close reason:
 
@@ -1030,11 +1326,86 @@ groups close with `wontfix`, and other groups map to open. Explicit close/reopen
 other local fields stay in Kata. See [Plane sync](../operations/plane-sync.md) for permissions,
 self-hosting, timestamp ownership, polling limits, and recovery.
 
+### Linear
+
+```sh
+kata sync linear enable --linear-workspace UUID --linear-team UUID [--linear-project UUID]
+kata sync linear enable [--interval 5m] [--since 2026-01-01] [--title-prefix=false]
+kata sync linear enable --status-sync two-way [--closed-state UUID] [--open-state UUID]
+kata sync linear status
+kata sync linear once
+kata sync linear disable
+```
+
+Initial enable requires workspace and team UUIDs. The optional project restriction
+must be set initially; the source identity cannot change on re-enable. Omitted
+options preserve their saved values, and empty `--since` clears the cutoff.
+Credentials and authorization type belong to daemon `[linear_sync]` configuration.
+Two-way mode writes only completion/reopen state. See
+[Linear sync](../operations/linear-sync.md) for field ownership, permissions, and recovery.
+
+### Twenty
+
+```sh
+kata sync twenty enable [--interval 5m] [--since 2026-01-01] [--title-prefix=false]
+kata sync twenty enable --status-sync=two-way [--closed-status DONE] [--open-status TODO] [--open-statuses TODO,IN_PROGRESS]
+kata sync twenty status
+kata sync twenty once
+kata sync twenty disable
+```
+
+Enable discovers the workspace from the daemon's API key. Origins and the
+credential selector belong to `[twenty_sync]`; source identity is immutable.
+Omitted options preserve saved settings, and empty `--since` clears the cutoff.
+Status values are API option values. Every live option must be classified open
+or closed; null is open. New bindings use one-way status, `DONE` for closed, and
+`TODO,IN_PROGRESS` for open. Explicit close/reopen writes back in two-way mode,
+with `TODO` as the default reopen target. See [Twenty sync](../operations/twenty-sync.md)
+for self-hosting, schema compatibility, local edit ownership, and recovery.
+
+### Todoist
+
+```sh
+kata sync todoist enable --todoist-project project123 [--history-since 2026-09-01]
+kata sync todoist enable [--status-sync two-way] [--interval 5m] [--title-prefix=false]
+kata sync todoist status
+kata sync todoist once
+kata sync todoist disable
+```
+
+Initial enable requires a Todoist project ID. The daemon resolves and pins the
+credential account; account, project and completion-history floor are immutable.
+The floor defaults to thirty days before enable and accepts a UTC date or
+whole-second RFC3339 instant. Active tasks import regardless of the floor.
+Re-enable preserves omitted options. Tokens belong to the daemon environment.
+Two-way mode sends explicit close/reopen changes only when fresh reads prove
+that the operation is safe. Recurring completion and cascade operations are
+blocked. Other fields remain incoming-only. See
+[Todoist sync](../operations/todoist-sync.md) for ownership, setup and recovery.
+
+### TickTick
+
+```sh
+kata sync ticktick enable --ticktick-project project-1
+kata sync ticktick enable [--interval 5m] [--title-prefix=false] [--status-sync=one-way|two-way]
+kata sync ticktick status
+kata sync ticktick once
+kata sync ticktick disable
+```
+
+Initial enable requires a task-project ID. Re-enable preserves omitted options.
+Global `--project` selects the native Kata project. The daemon owns the token
+selector in `[ticktick_sync]`; binding requests cannot supply credentials or
+API origins. Two-way mode sends ordinary task completion and receives source
+status. Outbound reopen and recurring completion require manual action in
+TickTick. See [TickTick sync](../operations/ticktick-sync.md) for field ownership,
+permissions, pending intent, and recovery.
+
 ### GitHub
 
 ```sh
 kata sync github enable [--repo example-org/example-repo] [--host github.com] [--interval 5m]
-    [--title-prefix=false] [--status-sync=one-way|two-way]
+    [--since YYYY-MM-DD] [--title-prefix=false] [--status-sync=one-way|two-way]
 kata sync github disable
 kata sync github status
 kata sync github once
@@ -1054,6 +1425,10 @@ prefixed as `[GitHub #123] Original title` by default; pass
 label. Omission on re-enable preserves the saved choice; explicit true restores
 prefixing. Presentation refreshes preserve local title edits and local labels,
 retain upstream labels, and deduplicate matching normalized `github` labels.
+`--since` imports only issues updated after a UTC date or an RFC 3339 time
+with whole seconds. Omission on re-enable keeps the saved cutoff, and
+`--since=` clears it. See
+[Limit imported history](../operations/github-sync.md#limit-imported-history).
 
 GitHub sync is daemon-side. The daemon resolves credentials from a matching
 `[[github_sync.app]]` entry, then `[github_sync].token_env` (default
@@ -1076,8 +1451,9 @@ can be overwritten by newer GitHub state. Only the first GitHub assignee maps
 to the kata owner.
 
 `disable` stops polling but preserves the binding and import mappings.
-`status` reports the current binding and last sync outcome. `once` runs an
-immediate sync through the daemon and requires an enabled binding.
+`status` reports the current binding, import cutoff, live progress, and last
+sync outcome; see [Run and inspect](../operations/github-sync.md#run-and-inspect).
+`once` runs an immediate sync through the daemon and requires an enabled binding.
 
 Two-way mode writes only explicit close/reopen status changes to existing
 GitHub issues. Kata does not create GitHub issues, import timeline events or
@@ -1092,6 +1468,11 @@ configured connector process. The daemon reads connector instances from
 [configuration reference](configuration.md)); connector authors implement the
 [connector protocol](connector-protocol.md).
 
+The built-in [Forgejo connector](../operations/forgejo-connector.md) runs with
+`kata connector serve forgejo`. This RPC entry point consumes one protocol
+request from standard input and responds on standard output without contacting
+a Kata daemon.
+
 ```sh
 kata connector list
 kata connector status <instance>
@@ -1103,7 +1484,10 @@ kata connector field unmap <instance> <kata-field>
 `kata connector list` reports the configured instances, `status` shows one
 instance's safe status without credentials, and the `field` subcommands
 inspect and manage bidirectional field mappings. Kata planning-field mappings
-are limited to `scheduled_on` and `deadline_on`.
+are limited to `scheduled_on` and `deadline_on`. `field map` requires a
+connector that advertises `conditional_fields`; the Forgejo connector does not,
+so Kata refuses mappings for it. See
+[Forgejo field support](../operations/forgejo-connector.md#field-support-and-current-limits).
 
 ```sh
 kata bridge bind <issue> --connector <instance> --external <locator> [--publish-comments]
@@ -1116,7 +1500,8 @@ kata bridge resolve-comment <issue> --adopt <external-comment-id> | --retry | --
 kata bridge unbind <issue>
 ```
 
-Every command in this section requires daemon-wide connector administration.
+The administration commands in this section require daemon-wide connector
+administration.
 In token identity mode, DB-backed tokens have this authority only when
 `allow_identity_connector_administration` is enabled; see the
 [configuration reference](configuration.md#token-identity-mode).
@@ -1169,6 +1554,15 @@ for projects that are not tied one-to-one with a repository workspace. If the
 same name belongs to an archived project, restore it first or choose a
 different name.
 
+`projects merge` moves the issues, events, aliases and other project data of
+`<source>`, including portable embedding artifacts, into `<target>`, then
+deletes `<source>`. Moved issues take the target's access policy. If the source
+is restricted to teams, the target must have the same teams-only policy with
+exactly the same teams; otherwise the merge fails with
+`project_merge_access_policy` and changes nothing. A source open to all users
+can merge into any target. Projects with a federation binding or an issue sync
+binding cannot be merged.
+
 `projects remove` archives a project (reversible with `restore`). The name
 stays reserved while archived.
 
@@ -1187,6 +1581,7 @@ idempotent, and intended for current-state identity hygiene before exporting,
 sharing, or enrolling a project in federation; it is not a historical event
 redaction tool. If `<project>` is omitted, kata resolves the project from
 `--project` or the current workspace.
+
 
 ## Web UI
 
@@ -1256,6 +1651,7 @@ kata daemon restart [--listen <host:port>] [--insecure-readonly]
 kata daemon reload
 kata daemon logs --hooks [--tail]
 kata health
+kata doctor [--json | --agent] [--workspace <path>] [--project <name>] [--daemon <name>]
 kata whoami
 kata quickstart
 kata version [--json]
@@ -1267,6 +1663,23 @@ kata tui [issue-ref]
 `kata tui` asks for confirmation when you press `q`. To quit immediately,
 set `[tui] confirm_quit = false`; see
 [TUI preferences](configuration.md#tui-preferences).
+
+### Diagnosing setup
+
+Start with `kata doctor` when commands cannot reach the daemon, a workspace
+points at the wrong project, or hooks and integrations stop working. It reports
+local configuration problems, the selected daemon's health and version, project
+visibility, active hook availability and retained failures, embeddings, and
+declarative federation mapping convergence. Each finding includes a suggested
+fix. See the [doctor troubleshooting guide](../operations/doctor.md).
+
+Doctor never starts or restarts a daemon, opens storage, runs hooks, repairs
+bindings, or edits configuration. Existing daemon authentication and access
+logging may still record the request. `--json` emits one report with stable
+check IDs, `ok`/`info`/`warn`/`fail` statuses, and summary counts. Failed checks
+exit **1** with error kind `checks_failed`; warnings alone exit **0**. `--quiet`
+hides successful and informational findings in text output; JSON always
+contains the full report.
 
 `kata version --json` is a local-only machine-readable version check. It does
 not require a workspace or a running daemon. The output is a single JSON object:
@@ -1368,6 +1781,17 @@ such as `kata tui abc4`, to open that issue's detail view directly. The ref
 accepts the same bare short ID, qualified short ID, and full UID forms as
 `kata show`.
 
+In the detail Comments tab, press `R` to reply to the selected comment.
+`Ctrl+r` changes the reply kind and `Ctrl+o` submits. After a duplicate-reply
+refusal, `Ctrl+f` enables a forced retry. Use `[` and `]` to select a reply
+target or backlink evidence kind, then Enter to open its issue and focus that
+comment. Back returns to the original selection. Originals show nonzero direct
+counts for Replies, Confirmations, Refutations, and Superseding replies. The
+selected kind shows each visible reply’s author, time, and evidence. Conflicting
+assertions stay visible; superseding replies never hide the original body.
+Typed replies require daemon API `0.28.0` or newer and follow the comment
+rules above.
+
 Press `I` to open the TUI Inbox. It shows open tasks from the project designated
 with `role=inbox`, regardless of that project's name. The project is chosen when
 you open Inbox; leave and reopen it to pick up a changed designation. Task updates
@@ -1461,6 +1885,7 @@ kata export [--project NAME] [--project-id N] [--output PATH]
 kata export --allow-running-daemon --output PATH
 
 kata import --input PATH --target PATH_OR_POSTGRES_DSN [--force]
+kata import --as-standalone --input PATH --target PATH_OR_POSTGRES_DSN
 kata import --merge --input PATH --target PATH_OR_POSTGRES_DSN
 kata import --source-format beads
 ```
@@ -1472,6 +1897,18 @@ database; run it on the daemon host with the intended storage configuration.
 Without `--merge`, the kata-format `import` creates a fresh SQLite database at a
 target path or a fresh Postgres `kata` schema at a Postgres DSN. An initialized
 target requires `--force`, which atomically replaces kata-owned state.
+Existing SQLite targets must already use the current schema; targets with an
+older or unknown schema version, and orphan sidecars, are refused without
+upgrade. Use a fresh destination or explicitly upgrade the existing target
+before retrying. A destination that appears during import is not overwritten.
+
+`--as-standalone` creates an independent copy with a new
+instance identity and no source federation or API-token authority. It keeps
+content and cross-project links from a full export. It requires a fresh target
+and cannot be combined with `--force` or `--merge`. Ordinary restore, including
+`--new-instance`, retains source authority. See
+[Make an independent copy](../operations/backup-restore.md#make-an-independent-copy-of-a-federated-hub)
+for the exact retained and omitted data and an isolated-home example.
 
 `--merge` instead adds exactly one non-system project snapshot to an existing
 SQLite or Postgres target. It remaps numeric database IDs while preserving
@@ -1485,10 +1922,32 @@ The `--source-format beads` form is different: it drives the `bd` CLI and
 merges into the current project. See [Migrating from
 Beads](../guide/migrating-from-beads.md).
 
+## Teams and project visibility
+
+Requires Kata 0.19.0 or later.
+
+```sh
+kata teams create <name>
+kata teams list
+kata teams show <team>
+kata teams members add <team> --actor <actor>
+kata teams members remove <team> --actor <actor>
+kata projects access show <project>
+kata projects access set <project> --visibility teams --team <team>
+kata projects access set <project> --visibility all
+```
+
+These commands require the selected daemon's owner authority. Team selectors
+accept names or UIDs. Repeat `--team` to select several teams; omit it with
+`--visibility teams` to deny ordinary access. Setting policy checks its current
+revision and returns a conflict if another administrator changed it meanwhile.
+See [team visibility](../operations/federation.md#team-visibility) for the
+membership and credential rules.
+
 ## Remote and identity tokens
 
 ```sh
-kata tokens create --actor <actor> [--name <name>]
+kata tokens create --actor <actor> [--name <name>] [--expires-in <duration>] [--team <team>]
 kata tokens create --actor <actor> --issue <project#ref> \
   --expires-in <duration> --token-file <new-private-path>
 kata tokens list
@@ -1506,8 +1965,17 @@ on a daemon with no shared token. The credential permits ordinary issue work
 and explicitly parented children. See the [scope guide](../design/issue-scoped-credentials.md)
 for allowed operations and membership changes.
 
-All three flags, `--issue`, `--expires-in`, and `--token-file`, are required
-together. `--expires-in` accepts a positive whole-second duration such as `4h`;
+Repeat `--team <name-or-uid>` to enroll the canonical actor in teams during
+token creation. Token issuance and initial membership commit together.
+The flag also works with issue-scoped credentials; project membership does not
+broaden their issue grant.
+
+An ordinary account credential may set `--expires-in 4h` without `--issue`.
+It keeps its normal account authority until it expires. Omit the flag for a
+non-expiring ordinary credential.
+
+For an issue-scoped credential, all three flags, `--issue`, `--expires-in`, and
+`--token-file`, are required together. `--expires-in` accepts a positive whole-second duration such as `4h`;
 zero, negative, fractional-second, and overflowing values are refused. `--issue`
 accepts a bare, qualified, or full UID ref on the selected daemon. A conflicting
 explicit `--project` fails with `conflicting_project_selector`.
@@ -1517,26 +1985,66 @@ means the coordinator must select the authoritative hub daemon and resolve the
 issue there. A daemon without the `issue_subtree_tokens` capability returns
 `issue_subtree_tokens_unsupported` before minting.
 
-Plaintext is written once to `--token-file` and is never printed. The destination
-must be new and its parent directory owner-only; the path belongs to the CLI
-host. Provisioning returns the absolute output path and redacted metadata. The
-file is issuance output, not a worker authentication input. Follow the
+For an issue-scoped credential, plaintext is written once to `--token-file` and is never
+printed. The destination must be new and its parent directory owner-only; the path belongs to
+the CLI host. Provisioning returns the absolute output path and redacted metadata. The file is
+issuance output, not a worker authentication input. Follow the
 [worker provisioning example](../operations/remote-daemon.md#identity-tokens)
 to inject its value into the consuming process. Revoke the token during teardown.
 
+## Native cron
+
+`kata cron` stores shared jobs, workflows and independent attributed run evidence.
+Commands return JSON; external adapters schedule and launch their own work.
+See [Native cron](cron.md) for bounded documents and retry semantics.
+
+```sh
+kata cron job create --uid <job-uid> --file job.json --json
+kata cron job list [--include-deleted] --json
+kata cron job show <job-uid> --json
+kata cron job update <job-uid> --expected-event-uid <event-uid> --file replacement.json --json
+kata cron job delete <job-uid> --expected-event-uid <event-uid> --json
+kata cron job restore <job-uid> --expected-event-uid <event-uid> --json
+kata cron capabilities --json
+kata cron run observe <run-uid> --json-input observation.json --json
+kata cron run list [--limit 100] [--before-uid <uid>] [--job-uid <job-uid>] --json
+kata cron run show <run-uid> --json
+kata show <issue-ref> --planning-dates --json
+```
+
+Recurring job create/update also accept `--parent <issue-ref>`; see
+[recurring child issues](cron.md#recurring-child-issues) for the request format.
+Workflow commands use the same definition actions and revision flags. Retain a
+generated or explicit definition UID after a lost create response; inspect it rather than
+assuming a create conflict is successful. Mutable definitions require the
+current expected event UID, from `--expected-event-uid` or the request body. Independent runs use a retained run UID, exact
+same-write retry idempotency, and ordinary revision CAS for changed evidence.
+The planning-date read returns native resolved dates without changing readiness.
+
 ## Federation
+
+Account-token bridges and root-key recovery require Kata 0.19.0 or later.
+Existing direct-spoke enrollment is a separate workflow. Start with
+[Share projects between hubs](../guide/project-relays.md) for relay setup.
 
 ```sh
 kata federation identity
+kata federation embedding-recipe
+kata federation bridge connect --project <local-project> --hub-daemon <catalog-name> \
+  --hub-project <hub-project> [--preflight] [--serve-downstream] \
+  [--signing-key-id <id> (--signing-key-env <var> | --signing-key-file <path>)]
+kata federation bridge status --project <local-project>
+kata federation bridge disconnect --project <local-project> [--preflight] [--local-only]
 kata federation enable --project <project>
 kata federation enroll --project <project> --spoke-instance <uid> --hub-url <url> \
-  --actor <actor> [--allow-insecure]
+  --actor <actor> [--hub-token-env <env-name>] [--allow-insecure]
 kata federation join --project <project> --hub-url <url> --hub-project-id <id> \
   --token <token> --actor <actor> [--push]
 kata federation join --project <existing-project> --hub-url <url> \
   --hub-project-id <id> --token <token> --actor <actor> --push --adopt-existing
 kata federation rebind <spoke-project> --hub <catalog-name>
 kata federation rebind --all --hub <catalog-name>
+kata federation root-key repin --project <project> [--preflight] [--previous-key-file <path>] [--strand-relays]
 kata federation status
 kata federation enrollments list
 kata federation revoke <enrollment-id>
@@ -1549,14 +2057,82 @@ kata federation quarantine retry <id> --confirm "RETRY FEDERATION BATCH <id>" --
 kata federation quarantine skip <id> --confirm "SKIP FEDERATION BATCH <id>" --reason <text>
 ```
 
+`kata federation embedding-recipe` exports JSON for the exact document recipe
+in the selected local Kata home's configuration. It makes no daemon or provider
+request and does not expose credentials or endpoints. Use that complete recipe
+with the existing root metadata API to
+[select a project producer](../operations/federation.md#select-an-embedding-producer).
+A remote server selection does not select a different local recipe.
+
+For bridge credentials, URL requirements and daemon-side credential sources,
+see [Bridge setup](../operations/federation.md#connect-a-project-through-the-daemon-catalog).
+`--daemon` selects the receiving daemon; `--hub-daemon` selects an entry in
+that daemon's catalog.
+
+`kata federation bridge connect` connects one project bidirectionally. The CLI sends the catalog
+name, project names and local actor; the hub credential stays in the daemon. `--preflight`
+previews the accounts, identity and project without issuing a grant. Add `--serve-downstream`
+only when this daemon will also relay the project to its own spokes; without it the bridge is a
+leaf. A hub that requires request signing needs `--signing-key-id` with `--signing-key-env` or
+an absolute `--signing-key-file` on the daemon; otherwise connect and preflight return
+`hub_signing_required`. Retry the same command after a lost response to reuse the retained
+narrow enrollment token. See the
+[federation guide](../operations/federation.md#connect-a-project-through-the-daemon-catalog)
+and [Bridges](../operations/federation-signing.md#bridges).
+
+`kata federation bridge status --project <local-project>` reads the selected
+bridge's locally recorded state without contacting its hub. It also shows a
+retained pending enrollment before the local replica exists. JSON output
+includes the negotiated path and existing sync diagnostics; no token values
+are returned. Check sync timestamps when assessing an observed connection state.
+The `signing_rejected` state means the hub refused this bridge's request
+signature; the grant is intact.
+
+`kata federation bridge disconnect --project <local-project>` revokes the
+retained narrow grant and detaches the bridge while preserving local data.
+`--preflight` checks the local credential and pending deliveries or downstream
+enrollments without contacting the hub or changing state. Interrupted cleanup
+can be retried; a completed retry needs no further upstream request. Resolve
+pending deliveries and downstream enrollments before disconnecting. See the
+[federation guide](../operations/federation.md#connect-a-project-through-the-daemon-catalog).
+
+`kata federation root-key repin --project <project>` pins a hub project that
+this daemon roots to the daemon's loaded `federation-root.key`, creating the
+key file when it is missing. It restores signed writes after the key was lost
+or replaced. Without `--previous-key-file`, it retires the old pin, and
+downstream relays that pinned the old key can no longer sync the project; the
+command refuses while the project has active relay enrollments unless you pass
+`--strand-relays`. With `--previous-key-file <path>`, an absolute path on the
+daemon host that the daemon reads itself, the previous key signs a rotation
+that downstream relays accept.
+`--preflight` reports the method, whether a key file would be created, the
+active relay enrollment count, and the consequence without changing state. See [Root signing key](../operations/federation.md#root-signing-key).
+
+`--local-only` detaches a bridge whose hub is gone for good without contacting
+it. It discards undelivered relay work, removes the binding and any saved
+credential, and keeps the local project and issues. It resolves the bridge from
+the database binding, so it also works when the credential file is missing. It
+prints a warning to stderr that the hub grant was not revoked; the hub operator
+must revoke it. Active downstream enrollments block it. Combine it with
+`--preflight` to check first. See
+[Detach a bridge whose hub is gone](../operations/federation.md#detach-a-bridge-whose-hub-is-gone).
+
 `kata federation enroll --project <project> --hub-url <url>` sends the
-enrollment API call to `<url>` using normal daemon API auth
-(`KATA_AUTH_TOKEN` or `[auth].token`). It creates `<project>` on that hub if it
-does not already exist, then enables federation and creates the enrollment. The
-CLI should otherwise remain pointed at the spoke daemon so the printed join
+enrollment API call to `<url>` using `--hub-token-env` or a daemon catalog
+credential whose URL matches the hub origin. When entries share an origin,
+the matching URL path takes precedence. A selected `--daemon` entry chooses
+the hub credential only when its full base URL matches `--hub-url`.
+It never forwards the local
+daemon's global `KATA_AUTH_TOKEN` to the hub; callers that used that variable
+for enrollment must pass the hub credential through `--hub-token-env` or a matching
+catalog entry. It creates `<project>` on that hub if it does
+not already exist, then enables federation and creates the enrollment. The CLI
+should otherwise remain pointed at the spoke daemon so the printed join
 command can include `--adopt-existing` when the spoke project already exists.
 Use `kata federation enroll --adopt-existing` when adopting a differently named
-spoke project, then edit the printed join command's `--project` value.
+spoke project, then edit the printed join command's `--project` value. Join
+fetches the current hub metadata when run. CLI and TUI output call the coordination
+capability `lease`; JSON and API fields use `claim`.
 
 `--adopt-existing` is a current-state cutover. It removes the spoke project's
 pre-adoption event history from the live event stream and queues fresh snapshots
@@ -1593,6 +2169,27 @@ project, direction, event range, creation time, and retained error. Use
 retrying or skipping. Retry preserves the push cursor and resends the same
 events; skip advances past the range and means those events will not reach the
 hub. Do not repair quarantine state by editing SQLite directly.
+
+### Signing source references
+
+`kata federation join` accepts `--signing-key-id` and exactly one of
+`--signing-key-env` or `--signing-key-file`. These select an independent
+secret source for native outbound federation, including metadata, replication
+and leases. The source must be available to both the CLI and spoke daemon.
+
+`kata federation signing configure --project-uid <uid> --key-id <id>` selects
+`--key-env <variable>` or `--key-file <absolute-path>` for an existing credential
+on the selected daemon. It requires daemon-owner authority; the daemon
+validates its own environment variable or file and retains the enrollment
+bearer through an exact replacement. Optional `--hub-url <https-base>`
+explicitly authorizes a new signing target for native rebind.
+
+`kata federation signing init-replay [--state-file <absolute-path>]` creates
+new hub replay state on the local host without overwriting an existing file.
+Run it on the hub host; it does not use `KATA_SERVER`. See
+[Federation request signing](../operations/federation-signing.md) for required
+hub policy, private ingress, restart warmup, rotation and loss recovery.
+
 
 ## Ref forms
 

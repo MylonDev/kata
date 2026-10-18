@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"slices"
 	"sort"
@@ -11,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"go.kenn.io/kata/internal/uid"
 	"go.kenn.io/kit/tui/splitlayout"
 )
 
@@ -44,6 +46,9 @@ const (
 // toastNow is a clock injection point: production uses time.Now, tests
 // replace it to drive deterministic toast expiry.
 type Model struct {
+	telemetryScreen     string
+	telemetryConnGen    uint64
+	telemetryDay        string
 	opts                Options
 	api                 KataAPI
 	scope               scope
@@ -192,6 +197,9 @@ type Model struct {
 	authCapabilitiesReady    bool
 	authCapabilitiesRequired bool
 	tokenAuditRead           bool
+	activeAuth               AuthInfo
+	activeAuthError          string
+	activeAuthRejected       bool
 	undoHistory              undoHistory
 	undoInFlight             bool
 	undoCloseEntryID         uint64
@@ -266,7 +274,8 @@ func (m Model) Init() tea.Cmd {
 	// tea.BackgroundColorMsg answer lands.
 	cmds := []tea.Cmd{m.waitForSSE()}
 	if m.api != nil {
-		cmds = append(cmds, m.fetchAuthCapabilities())
+		// Init runs once per launch; daemon switches and reconnects never reach it.
+		cmds = append(cmds, m.fetchAuthCapabilities(), m.reportAppOpened())
 	}
 	if activeColorMode == colorAuto {
 		cmds = append(cmds, tea.RequestBackgroundColor)
@@ -394,10 +403,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.pendingDetailFollow && m.input.kind == inputNone && m.layout == splitlayout.Split {
 		m.pendingDetailFollow = false
 		if len(m.detail.navStack) == 0 {
-			return m.followSearchResultIfNeeded(cmd)
+			m, cmd = m.followSearchResultIfNeeded(cmd)
 		}
 	}
-	return m, cmd
+	visit := false
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.FocusMsg:
+		visit = true
+	}
+	screenCmd := m.screenViewCommand(visit)
+	return m, tea.Batch(cmd, screenCmd)
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -545,6 +560,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if capabilities, ok := msg.(authCapabilitiesMsg); ok {
 		return m.handleAuthCapabilities(capabilities)
+	}
+	if expired, ok := msg.(activeCredentialExpiredMsg); ok {
+		if expired.connGen == m.connGen && m.activeAuth.ExpiresAt != nil &&
+			m.activeAuth.ExpiresAt.Equal(expired.expiresAt) && !m.toastNow().Before(expired.expiresAt) {
+			m.authCapabilitiesReady = false
+			m.input = inputState{}
+		}
+		return m, nil
 	}
 	if loaded, ok := msg.(credentialsLoadedMsg); ok {
 		return m.handleCredentialsLoaded(loaded)
@@ -935,7 +958,7 @@ func (m Model) mutationForKey(msg tea.KeyPressMsg) (withinSubtree, mutation bool
 		return false, true
 	default:
 		return true, m.keymap.NewChild.matches(msg) || m.keymap.EditBody.matches(msg) ||
-			m.keymap.NewComment.matches(msg) || m.keymap.AddLabel.matches(msg) ||
+			m.keymap.NewComment.matches(msg) || m.keymap.ReplyComment.matches(msg) || m.keymap.AddLabel.matches(msg) ||
 			m.keymap.RemoveLabel.matches(msg) || m.keymap.AssignOwner.matches(msg) ||
 			m.keymap.ClearOwner.matches(msg) || m.keymap.TimedAssignment.matches(msg) ||
 			m.keymap.AddBlocker.matches(msg) ||
@@ -1130,6 +1153,23 @@ func (m Model) openCommentForm() Model {
 	return m
 }
 
+// openTypedReplyForm captures canonical identity before the selection changes.
+func (m Model) openTypedReplyForm(kind string) Model {
+	if m.detail.issue == nil || m.detail.issue.Status != "open" || m.detail.activeTab != tabComments || m.detail.tabCursor < 0 || m.detail.tabCursor >= len(m.detail.comments) {
+		return m
+	}
+	c := m.detail.comments[m.detail.tabCursor]
+	if c.UID == "" {
+		return m
+	}
+	m = m.openCommentForm()
+	m.input.target.issueUID = m.detail.issue.UID
+	m.input.target.replyUID = c.UID
+	m.input.target.replyKind = kind
+	m.input.title = kind + " " + c.Handle + " (Ctrl+r changes kind)"
+	return m
+}
+
 // routeInputKey delivers a key into the active input shell and
 // applies the resulting action. Bars apply their buffer to lm.filter
 // live on every keystroke (no debounce — filters are client-side).
@@ -1143,6 +1183,22 @@ func (m Model) openCommentForm() Model {
 // highlighted suggestion's label (suggestion source is computed at
 // the Model level — see suggestionsForPrompt).
 func (m Model) routeInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	if m.input.kind == inputCommentForm && m.input.target.replyUID != "" && !m.input.saving {
+		if msg.String() == "ctrl+r" {
+			kinds := []string{"reply", "confirm", "refute", "supersede"}
+			index := slices.Index(kinds, m.input.target.replyKind)
+			m.input.target.replyKind = kinds[(index+1)%len(kinds)]
+			m.input.target.forceReply = false
+			m.input.err = ""
+			m.input.title = m.input.target.replyKind + " reply (Ctrl+r changes kind)"
+			return m, nil
+		}
+		if msg.String() == "ctrl+f" && strings.Contains(m.input.err, "duplicate_reply") {
+			m.input.target.forceReply = true
+			return m.commitFormInput(inputCommentForm)
+		}
+	}
+
 	if m.input.kind.isPanelPrompt() {
 		if m.input.saving {
 			return m, nil
@@ -1157,6 +1213,9 @@ func (m Model) routeInputKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	prevKind := m.input.kind
 	next, action := m.input.Update(msg)
 	m.input = next
+	if prevKind == inputCommentForm && m.input.fieldValue(fieldComment) != m.input.target.submittedBody {
+		m.input.target.forceReply = false
+	}
 	switch action {
 	case actionCommit:
 		return m.commitInput()
@@ -1506,6 +1565,8 @@ func (m Model) routeDetailFormKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	switch {
+	case m.keymap.ReplyComment.matches(msg):
+		return m.openTypedReplyForm("reply"), nil, true
 	case m.keymap.EditBody.matches(msg):
 		return m.openBodyEditForm(), nil, true
 	case m.keymap.NewComment.matches(msg):
@@ -1844,6 +1905,26 @@ func (m Model) commitFormInput(kind inputKind) (Model, tea.Cmd) {
 	if f := m.input.activeField(); f != nil {
 		rawBuf = f.value()
 	}
+	if kind == inputCommentForm {
+		rawBuf = m.input.fieldValue(fieldComment)
+		if rawBuf != m.input.target.submittedBody || m.input.target.replyKind != m.input.target.submittedKind {
+			m.input.target.forceReply = false
+		}
+		if (m.input.target.replyKind == "confirm" || m.input.target.replyKind == "refute") && utf8.RuneCountInString(strings.Join(strings.Fields(rawBuf), " ")) < 40 {
+			m.input.err = "confirm/refute need at least 40 evidence characters"
+			return m, nil
+		}
+		if m.input.target.idempotencyKey == "" || rawBuf != m.input.target.submittedBody || m.input.target.replyKind != m.input.target.submittedKind {
+			key, err := uid.New()
+			if err != nil {
+				m.input.err = err.Error()
+				return m, nil
+			}
+			m.input.target.idempotencyKey = key
+			m.input.target.submittedBody = rawBuf
+			m.input.target.submittedKind = m.input.target.replyKind
+		}
+	}
 	if kind == inputCommentForm && strings.TrimSpace(rawBuf) == "" {
 		m.input.err = "comment cannot be empty"
 		return m, nil
@@ -1996,7 +2077,25 @@ func dispatchFormAddComment(
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := api.AddComment(ctx, pid, ref, body, actor)
+		var resp *MutationResp
+		var err error
+		if target.replyUID != "" {
+			client, ok := api.(typedCommentAPI)
+			if !ok {
+				err = fmt.Errorf("this client does not support typed comment replies")
+			} else {
+				source := target.issueUID
+				if source == "" {
+					source = ref
+				}
+				resp, err = client.AddCommentReply(ctx, pid, source, body, actor, target.replyUID, target.replyKind, target.forceReply, target.idempotencyKey)
+			}
+		} else {
+			resp, err = api.AddComment(ctx, pid, ref, body, actor)
+		}
+		if err != nil && strings.Contains(err.Error(), "duplicate_reply") {
+			err = fmt.Errorf("%w; Ctrl+f sends another reply with force", err)
+		}
 		return mutationDoneMsg{
 			origin: "form", kind: "form.comment.add", formGen: formGen,
 			resp: resp, err: err,
@@ -2465,11 +2564,22 @@ func (m Model) eventAffectsView(msg eventReceivedMsg) bool {
 // touches the body header. Refetching all four is cheap (the daemon
 // has these in cache) and keeps every tab fresh without a kind switch.
 //
-// The match requires both projectID and the watched issue's UID to
+// The match normally requires projectID and the watched issue's UID to
 // align with the event's subject — UID is canonical and the
-// authoritative key across short_id cutovers. Each fetch is tagged
-// with the current detail-open gen so applyFetched drops the result
-// if the user navigates away before the response lands.
+// authoritative key across short_id cutovers. Comment creation and edit events also
+// refresh when commentUID matches a rendered comment, reply endpoint, or
+// backlink in the open pane. Snapshots refresh open detail in their project
+// because baseline comments can resolve a pending target on another issue.
+// A snapshot in another project also refreshes when it contains a displayed
+// endpoint, such as a pending target that moved before its baseline arrived.
+// An issue-scoped session also refreshes on any comment creation in the
+// displayed project, because its projection drops
+// unresolved reply edges and keeps no endpoint to match a late target against.
+// Moves and soft-deletes match displayed endpoint
+// UIDs; moves into the displayed project and restores refresh even after the
+// prior projection dropped that endpoint. Project lifecycle events match the
+// endpoint's displayed project ID when available. Each fetch is tagged with
+// the current detail-open gen so applyFetched drops it if the user navigates.
 func (m Model) maybeRefetchOpenDetail(msg eventReceivedMsg) tea.Cmd {
 	if m.api == nil {
 		return nil
@@ -2484,13 +2594,16 @@ func (m Model) maybeRefetchOpenDetail(msg eventReceivedMsg) tea.Cmd {
 	if m.detail.issue == nil {
 		return nil
 	}
-	if msg.projectID != m.detail.scopePID {
+	commentMatch := msg.matchesCommentInDetail(m.detail.comments)
+	relationLifecycleMatch := msg.matchesRelationLifecycleInDetail(m.detail.comments, m.detail.scopePID)
+	if msg.projectID != m.detail.scopePID && !commentMatch && !relationLifecycleMatch {
 		return nil
 	}
+	projectCommentArrival := msg.eventType == "issue.snapshot" || (m.issueScoped && msg.eventType == "issue.commented")
 	pid := m.detail.scopePID
 	ref := m.detail.issue.ShortID
 	uid := m.detail.issue.UID
-	if !msg.matchesIssue(ref, uid) {
+	if !msg.matchesIssue(ref, uid) && !commentMatch && !relationLifecycleMatch && !projectCommentArrival {
 		return nil
 	}
 	gen := m.detail.gen
@@ -2519,6 +2632,10 @@ func (msg eventReceivedMsg) matchesIssue(ref, uid string) bool {
 	if msg.issueUID != "" && uid != "" && msg.issueUID == uid {
 		return true
 	}
+	if msg.eventType == "issue.commented" &&
+		msg.relatedIssueUID != "" && uid != "" && msg.relatedIssueUID == uid {
+		return true
+	}
 	if msg.issueShortID != "" && msg.issueShortID == ref && msg.issueUID == "" {
 		return true
 	}
@@ -2529,6 +2646,80 @@ func (msg eventReceivedMsg) matchesIssue(ref, uid string) bool {
 	}
 	if msg.linksChanged != nil && msg.linksChangedMatches(ref, uid) {
 		return true
+	}
+	return false
+}
+
+func (msg eventReceivedMsg) matchesCommentInDetail(comments []CommentEntry) bool {
+	switch msg.eventType {
+	case "issue.commented", "issue.comment_edited", "issue.snapshot":
+	default:
+		return false
+	}
+	matches := func(uid string) bool {
+		return uid != "" && (uid == msg.commentUID || slices.Contains(msg.snapshotCommentUIDs, uid))
+	}
+	for _, comment := range comments {
+		if matches(comment.UID) {
+			return true
+		}
+		if comment.Reply != nil && matches(comment.Reply.UID) {
+			return true
+		}
+		for _, backlink := range comment.Backlinks {
+			if matches(backlink.UID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (msg eventReceivedMsg) matchesRelationLifecycleInDetail(comments []CommentEntry, detailProjectID int64) bool {
+	switch msg.eventType {
+	case "issue.restored", "project.restored":
+		// The restore may make an endpoint visible again after a prior detail
+		// refresh removed its backlink or stripped IssueUID from a removed
+		// reply projection, so no current endpoint can identify what was restored.
+		return true
+	case "project.removed", "project.renamed":
+		if msg.projectID <= 0 {
+			return false
+		}
+		for _, comment := range comments {
+			if comment.Reply != nil && comment.Reply.ProjectID == msg.projectID {
+				return true
+			}
+			for _, backlink := range comment.Backlinks {
+				if backlink.ProjectID == msg.projectID {
+					return true
+				}
+			}
+		}
+		return false
+	case "issue.moved":
+		// The move event is recorded in its destination project. A backlink
+		// source moving into this detail's project can reappear even when the
+		// previous projection no longer carried the source UID.
+		if msg.projectID > 0 && msg.projectID == detailProjectID {
+			return true
+		}
+	case "issue.soft_deleted":
+	default:
+		return false
+	}
+	if msg.issueUID == "" {
+		return false
+	}
+	for _, comment := range comments {
+		if comment.Reply != nil && comment.Reply.IssueUID == msg.issueUID {
+			return true
+		}
+		for _, backlink := range comment.Backlinks {
+			if backlink.IssueUID == msg.issueUID {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -2882,18 +3073,19 @@ func (m Model) handleJumpDetail(msg jumpDetailMsg) (tea.Model, tea.Cmd) {
 	// tab without marking it explicit silently undid the user's
 	// context when the new issue's first non-empty tab differed.
 	next := detailModel{
-		loading:         true,
-		gen:             gen,
-		activeTab:       m.detail.activeTab,
-		tabExplicit:     true,
-		navStack:        append(m.detail.navStack, prior),
-		scopePID:        pid,
-		allProjects:     m.detail.allProjects,
-		actor:           m.detail.actor,
-		uidFormat:       m.detail.uidFormat,
-		commentsLoading: true,
-		eventsLoading:   true,
-		linksLoading:    true,
+		selectedCommentUID: msg.commentUID,
+		loading:            true,
+		gen:                gen,
+		activeTab:          m.detail.activeTab,
+		tabExplicit:        true,
+		navStack:           append(m.detail.navStack, prior),
+		scopePID:           pid,
+		allProjects:        m.detail.allProjects,
+		actor:              m.detail.actor,
+		uidFormat:          m.detail.uidFormat,
+		commentsLoading:    true,
+		eventsLoading:      true,
+		linksLoading:       true,
 	}
 	m.detail = m.applyDetailViewportCache(next)
 	cmds := []tea.Cmd{
@@ -3155,6 +3347,7 @@ func (m Model) handleDetailFollowTick(msg detailFollowTickMsg) (Model, tea.Cmd) 
 func (m Model) View() tea.View {
 	v := tea.NewView(m.viewContent())
 	v.AltScreen = true
+	v.ReportFocus = true
 	if m.opts.Mouse {
 		// Opt-in only: mouse tracking blocks native text selection in
 		// many terminals. CellMotion captures clicks/releases/wheel
@@ -3206,11 +3399,11 @@ func (m Model) viewContent() string {
 		default:
 			body = renderTooNarrow(m.width, m.height)
 		}
-		body = m.appendNonListDetailExtras(body)
+		body = m.withActiveConnectionHeader(m.appendNonListDetailExtras(body))
 		return m.overlayInputAndModal(body)
 	}
 	body := m.viewBody()
-	body = m.appendNonListDetailExtras(body)
+	body = m.withActiveConnectionHeader(m.appendNonListDetailExtras(body))
 	if m.input.kind.isCenteredForm() || m.modal != modalNone {
 		return m.overlayInputAndModal(body)
 	}
@@ -3375,4 +3568,8 @@ func activeDaemonDisplay(target daemonTarget) string {
 		return ""
 	}
 	return daemonTargetDisplay(target)
+}
+
+type typedCommentAPI interface {
+	AddCommentReply(context.Context, int64, string, string, string, string, string, bool, string) (*MutationResp, error)
 }

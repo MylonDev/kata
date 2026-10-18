@@ -28,6 +28,11 @@
   product persisted state is exempt. After approval, follow
   `docs/development/postgres-migrations.md` for PostgreSQL migration history
   and verification rules.
+- No CHECK Constraints: Do not add CHECK constraints to the SQLite or
+  PostgreSQL schema or to migrations. Validate values in Go before the store
+  writes them, and share that validation with import and federation ingest.
+  CHECK constraints that already exist stay until a separately approved
+  migration removes them.
 - No Private Project Data: Do not use private project, workspace, customer,
   host, or repository names in tests, docs, examples, planning documents,
   design notes, issue or bug reports, review responses, PR text, or generated
@@ -36,6 +41,8 @@
   to preserve a real name in a user-facing operational command.
 - No Testing/Verification Sections in PRs: Do not include a testing plan, test plan, verification,
   or verified section in pull request descriptions.
+- User or Developer Benefit: Pull requests must have a user-facing benefit or improve the developer
+  experience, and the body must say which one.
 - No Unrequested GitHub Comments: Do not comment on GitHub issues or pull
   requests unless the user explicitly instructs you to post a comment.
 - No Bash Content-Assertion Tests: Do not add bash tests that assert shell
@@ -132,8 +139,7 @@ Closing an issue asserts that the work is complete. This is a stronger
 claim than a comment. If the work is not actually done, DO NOT close.
 Instead:
 
-    kata label add <ref> needs-review
-    kata comment <ref> --body "what was attempted, what remains"
+    kata label add <ref> needs-review --comment "<what remains>"
 
 Close each issue as soon as its work is verified, not at the end of a
 batch. By default the daemon allows sibling close bursts when each close
@@ -164,7 +170,8 @@ closes with `kata reopen <ref>`.
 
 ## CI runners
 
-Public CI profiles use Namespace's
+Windows tests use GitHub-hosted runners. Linux tests use Namespace profiles for
+trusted runs and GitHub-hosted runners for forks. Namespace profiles use the
 [Restricted access level](https://namespace.so/docs/solutions/github-actions/runner-controls/access-levels),
 which disables workload access to Namespace features and APIs. GitHub fork
 approvals, token permissions, and secrets are separate controls.
@@ -203,7 +210,7 @@ Triage security findings against that model:
 - **Real, fix them: credential misrouting and partial/stranded state.**
   A bearer token must only reach the origin it was configured for: the
   local daemon's global token never goes to a hub, and a catalog entry's
-  admin token never goes to a different hub origin (`--hub-token` is the
+  admin token never goes to a different hub origin (`--hub-token-env` is the
   only deliberate cross-origin path). Teardown/retry paths must not
   strand state (archive-before-detach; leave's idempotent resume still
   runs daemon-side credential cleanup).

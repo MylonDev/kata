@@ -6,6 +6,7 @@ import (
 
 // ImportOptions controls optional ImportReplay behaviors.
 type ImportOptions struct {
+
 	// RequireFreshTarget rejects replay unless the target still contains only
 	// its bootstrap metadata and hidden system project. CLI restores use this
 	// after observing an uninitialized target so a concurrent writer cannot be
@@ -66,7 +67,11 @@ type ImportRecord interface {
 // so the contract is the shared NDJSON kind string, asserted by the roundtrip
 // tests.
 const (
-	ImportKindMeta                 = "meta"
+	ImportKindMeta         = "meta"
+	ImportKindCronJob      = "cron_job"
+	ImportKindCronWorkflow = "cron_workflow"
+	ImportKindCronRun      = "cron_run"
+
 	ImportKindProject              = "project"
 	ImportKindProjectAlias         = "project_alias"
 	ImportKindIssueSyncBinding     = "issue_sync_binding"
@@ -118,6 +123,10 @@ type ImportBatchParams struct {
 	// to refresh only when observation, mapping, and issue timestamps match.
 	// Newer local edits remain authoritative. The public import API omits it.
 	ReconcileStatusForUnchanged bool
+	// ImportStatusObservations atomically acknowledges source status observations
+	// with their issue import so retries cannot replay them over a later local
+	// status change.
+	ImportStatusObservations map[string]IssueStatusObservation
 	// PreserveLocalParentConflicts leaves an existing local parent in place when
 	// a source-managed parent insert would create a second parent. Generic
 	// imports report ErrParentAlreadySet by default.

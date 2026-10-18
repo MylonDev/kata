@@ -1,7 +1,7 @@
 ---
 title: HTTP API schema
 description: Generate clients and inspect Kata's versioned OpenAPI schema, compatibility rules, and authentication.
-last_edited: 2026-10-02
+last_edited: 2026-10-18
 ---
 
 # HTTP API schema
@@ -13,7 +13,7 @@ generate typed clients instead of hand-copying wire structs.
 Use [`kata daemon locate`](daemon-discovery.md) to discover the endpoint and
 transport for those requests with the same selection rules as the CLI. Go
 programs can use the generated [Go client](go-client.md), which includes
-discovery.
+discovery. [Native cron](cron.md) documents job and workflow resources.
 
 ## Getting the schema
 
@@ -29,6 +29,22 @@ definitions, so it needs neither a running daemon nor a database. The runtime
 `/openapi.json` route stays disabled; the committed artifact and this command
 are the supported way to obtain the schema.
 
+## Errors
+
+Daemon API errors use an `error` object with a stable `code` and a readable
+`message`. Optional `hint` text suggests a next step; optional `data` contains
+structured details. When a `kata` command can produce the error, its hint names
+CLI commands and flags, such as `--force`, rather than request fields. Hints for
+errors that only direct API calls can produce may name request fields. Use the
+code to branch in scripts, rather than matching the message or hint.
+
+```json
+{"error":{"code":"project_not_initialized","message":"no .kata.toml ancestor and no git ancestor","hint":"run \"kata init --project <name>\" in the workspace root, or pass --project <name>"}}
+```
+
+The CLI preserves the hint in human, agent, and JSON errors. See
+[agent output](agent-output.md#errors) for its stderr format.
+
 ## What the schema is
 
 A **per-release snapshot** of the daemon's current HTTP API: a faithful
@@ -43,13 +59,13 @@ daemon will accept the same calls.
 
 The schema carries a version in its `info.version` field
 (`APISchemaVersion`). The same value is reported at runtime by
-[`GET /api/v1/health`](#) as `api_schema_version`:
+[`GET /api/v1/health`](#health-diagnostics) as `api_schema_version`:
 
 ```json
 {
   "ok": true,
   "schema_version": 29,
-  "api_schema_version": "0.25.0",
+  "api_schema_version": "0.23.0",
   "version": "1.4.2",
   "uptime": "5m0s",
   "idle_shutdown": {
@@ -97,7 +113,33 @@ upgrade when the daemon is too old. `kata mcp serve` performs the same check
 once at startup and requires API `0.11.0`, because its relationship tools
 always send the pinned-target fields and its close-audit paging relies on
 `event_id`. Status-filtered `kata.search` calls additionally check for
-API `0.20.0` before project fanout.
+API `0.20.0` before project fanout. Paginated `kata.list` and explicit
+single-project lexical `kata.search` require API `0.27.0`. The CLI checks the
+same version before new list options and explicit lexical pagination.
+
+Close requests may explicitly supply `transcript` (HTTP API `0.26.0`):
+
+```json
+{
+  "actor": "agent-one",
+  "reason": "done",
+  "message": "Implemented the requested behavior and ran the focused tests.",
+  "evidence": [{"type": "test", "command": "go test ./internal/example"}],
+  "transcript": {
+    "agent": "codex",
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "url": "https://agentsview.example/sessions/codex/00000000-0000-4000-8000-000000000001"
+  }
+}
+```
+
+The agent is `codex` or `claude`, `session_id` is its native UUID, and `url` is
+optional absolute HTTP(S) without credentials, query, or fragment. Supply a
+verified locator for namespaced imported archives. The daemon stores this
+separately from evidence in the close event; it does not fetch or verify the
+chat. Its `agent` and `session_id` participate in retry identity; `url` does
+not. The object is preserved in scoped responses and history. Automatic capture is a [CLI client preference](configuration.md#closing-session-transcripts),
+not daemon-side session discovery.
 
 Guarded close requests use a request-local compatibility check instead of a
 separate health probe. A request that sends `Idempotency-Key` or `If-Match`
@@ -113,10 +155,17 @@ Embedding hosts using `@kenn-io/kata-ui` must treat that state as incompatible
 and decline to render issue detail.
 
 API contract versions advance independently of Kata release versions.
-The current contract is API `0.25.0`. Kata 0.18.0 includes the changes from
-`0.18.0` through `0.21.0` below. Teammate comments require API `0.18.0`, issue-scoped
-credentials use `0.19.0`, status-filtered search requires `0.20.0`,
-oldest-first lists require `0.21.0`, and parent-filtered lists require `0.25.0`.
+The current contract is API `0.30.0`. Parent-filtered lists require `0.30.0`.
+
+Kata 0.19.0 includes API `0.28.0`, the changes from `0.22.0` through `0.28.0`
+below. Timed claims require API `0.22.0`, move previews `0.23.0`, close session
+references `0.26.0`, paginated issue lists `0.27.0`, and comment replies
+`0.28.0`.
+
+Kata 0.18.0 included the changes from `0.18.0` through `0.21.0`. Teammate
+comments require API `0.18.0`, issue-scoped credentials use `0.19.0`,
+status-filtered search requires `0.20.0`, and oldest-first lists require
+`0.21.0`.
 
 Kata 0.17.0 included API changes `0.15.0` through `0.17.0`. Custom clients
 upgrading from earlier releases must send array fields as `[]` (or omit
@@ -127,7 +176,11 @@ collections as `[]` or `{}`.
 
 | Version | Change |
 | --- | --- |
-| `0.25.0` | Added optional `parent_uid` to both issue-list routes. It returns only the direct children of the issue with that UID, before `limit`; a malformed UID returns `400`. |
+| `0.30.0` | Added optional `parent_uid` to both issue-list routes. It returns only the direct children of the issue with that UID, before `limit`; a malformed UID returns `400`. |
+| `0.29.0` | Create and close accept an optional `X-Kata-Surface` header for daemon-recorded action counts. Missing or unsupported surfaces leave the mutation unchanged and drop the count. Older daemons ignore the header. |
+| `0.28.0` | Comments accept typed replies through `reply_to`, `kind`, and `force`. Issue detail supports `thread`, `inbound`, `kind`, and `since` selectors and includes comment handles, reply targets, backlinks, and edit timestamps. |
+| `0.27.0` | Adds filter-bound creation cursors, `complete`, optional filtered `total`, `priority=none`, and repeatable `project_ids` to issue listing. Explicit lexical search with `sort=oldest` supports continuation beyond the ranked candidate cap. |
+| `0.26.0` | Close requests accept optional transcript provenance, stored alongside evidence in close events and retained in scoped history and retry receipts. |
 | `0.23.0` | Added transactional move previews with the optional `dry_run` request field. Preview responses omit `new_short_id` until a move allocates the target ID. Generated clients now type `new_short_id` as optional; read `issue.short_id` for the issue's current short ID. |
 | `0.22.0` | Added temporary assignments: claim requests accept `ttl_seconds`, claim responses return ordered `events`, issue projections include `assignment_expires_on`, and assignment renewal and expiry have distinct event types. |
 | `0.21.0` | Added optional `sort=oldest` to both issue-list routes. Matching rows are ordered by `created_at` ascending and `id` ascending before `limit`; omission preserves each route's default. |
@@ -161,12 +214,153 @@ request schema and are rejected for strict request objects.
 ## Health diagnostics
 
 `GET /api/v1/health` without credentials provides liveness and version fields.
-`db_path`, `embeddings`, and `federation_config` are optional diagnostics:
-authenticated unscoped principals and the owner-local transport receive them
+`db_path`, `embeddings`, `federation_config`, and `root_signing` are optional
+diagnostics:
+daemon-owner credentials and genuine owner-local transport receive them
 when configured. Public remote probes and scoped credentials do not. An
 explicit scoped bearer remains scoped over loopback; an invalid bearer returns
 an authentication error. Clients must handle the public response without these
 fields. `idle_shutdown` keeps its availability rules described above.
+
+`root_signing` appears only when this daemon cannot sign root receipts for a
+hub project it roots:
+
+| Field | Meaning |
+| --- | --- |
+| `key_file` | Path of `federation-root.key` on the daemon host. |
+| `key_loaded` | Whether the daemon holds a usable signing key. |
+| `key_problem` | Why no key is loaded, such as `key file is missing`. |
+| `projects` | Hub projects whose pin the loaded key cannot satisfy. Signed writes to them return `409 root_signing_key_unavailable`. |
+
+`GET /api/v1/federation/status` adds `root_signing_key` (`available` or
+`unavailable`) to each hub project this daemon roots, and
+`relay_checkpoint_bytes` and `relay_checkpoint_capacity_bytes` to each such
+project that has a live relay enrollment. The checkpoint fields are the
+estimated size of the signed reset checkpoint the root would build now and
+the capacity that refuses new relay enrollments and resets once exceeded.
+When the measurement fails, the project carries `relay_checkpoint_error`
+instead of the size fields and the rest of the response is unaffected.
+
+`POST /api/v1/federation/root-keys/{project_name}/repin` is owner-only. It pins
+that hub project to the daemon's loaded root signing key and creates the key
+file when it is missing. The body accepts `preflight`, `previous_key_file`,
+an absolute path on the daemon host that requires daemon-owner transport or
+token, and `strand_relays`. The response reports `status` (`ready`,
+`current`, `pinned`, `repinned`, or `rotated`), `method` (`none`, `pin`,
+`signed_rotation`, or `unsigned_repin`), `key_file`, `creates_key_file`,
+`key_id`, `previous_key_id`, `active_relay_enrollments`, and `consequence`. A
+project this daemon does not root returns `409 root_key_not_local`; a previous
+key that does not match the pin returns `409 root_signing_key_mismatch`. An
+`unsigned_repin` while `active_relay_enrollments` is above zero returns
+`409 root_repin_strands_relays` unless `strand_relays` is true. See
+[Root signing key](../operations/federation.md#root-signing-key).
+
+## Project access
+
+Team visibility and credential-bound relay enrollment require Kata 0.19.0 or
+later.
+
+### Project visibility
+
+Ordinary identity credentials can read, write and administer a project when
+its visibility is `all`, or when their authenticated actor belongs to any team
+assigned to a project with visibility `teams`. This includes archived projects:
+`GET /api/v1/projects?include=archived` lists the archived projects the
+credential can access. A project restricted to teams with no assigned teams is
+inaccessible to ordinary credentials. The system project is administrative
+state. Missing proxy identity and anonymous clients receive only unrestricted
+projects; a request-supplied actor grants no team membership. Explicit
+tokenless private-network writes remain limited to unrestricted projects.
+
+Project access applies to direct references, collections, search candidates,
+counts, graphs, relationships, audit events and browser snapshots. Unauthorized
+references return a generic `404`, including references supplied in request
+bodies. Project access intersects issue-subtree and hosted grants. Writes,
+including purge and merge, recheck the issue's or projects' current state
+inside their transaction.
+
+### Requests during access changes
+
+Before releasing a read or write response, the daemon rechecks project access.
+It withholds the response with `404`
+when the caller lost one of the projects admitted for the request, or when an
+issue the request read, whether for a list, a preview, a reload after a
+commit or a plain show, now sits in a project the caller does not hold. An
+event page, digest or issue history counts every issue its events name: the
+subject, the related issue and the issues in the payload. A
+write that committed stays committed even when its response is withheld. Check
+current state before retrying: a `404` after an access change does not prove
+the write failed.
+Unrelated changes, such as a new team, a new project, an issue move elsewhere,
+the deletion of an issue the request read, or a project the request itself
+merged or purged away, do not affect a request in flight. Archiving a project
+does not withdraw it from its access holders, so an issue linked to a peer in
+an archived project stays readable.
+
+An open event stream picks up projects created or restored after it
+connected, including one created while the stream was being admitted. It
+closes when the caller loses an admitted project or gains a project whose
+creation or restore the stream has already passed or is inside the batch it
+is delivering; the client reconnects and reloads. Before each frame the stream
+rechecks that frame's event under the caller's current projects. When its
+issue, or an issue it references, now sits in a project the caller does not
+hold, the stream sends `sync.reset_required` at that event's ID in place of
+the frame and closes, whatever the credential's issue scope. Browser cache
+validators include the principal and policy revision.
+
+### Administration
+
+Project administration follows project access. A credential that can access a
+project can rename it, archive it (`DELETE /api/v1/projects/{project_id}`),
+restore it, purge it, detach its aliases, purge its issues, rewrite its author
+identities, and enable, disable, inspect or run its issue sync. Merge requires
+access to both the source and the target project. Each operation rechecks
+access to every project it names inside its transaction.
+
+Daemon-owner credentials keep the administration that reaches beyond one
+project: token list, create and revoke; team and project-visibility
+administration; diagnostics; federation status, replica creation, bridges and
+the enrollment catalog; and root signing key configuration. Token
+administration stays with the owner because a credential that could mint a
+token for another actor would inherit that actor's team access.
+
+### Relay enrollment
+
+Ordinary user credentials may create a credential-bound relay enrollment
+(`relay` in the request) for an authorized project. `relay.rebind_parent`
+re-attaches an existing relay grant to a live same-account credential and
+keeps its transport token; the enrollment rotation route refuses account
+tokens, so a relay grant is never rotated. A legacy project grant from an
+account token is refused with `403 federation_enrollment_requires_relay`
+regardless of `[auth].require_token_identity`, because it would outlive that
+token. An all-project grant requires owner authority and returns
+`404 not_found` to anyone else. A relay enrollment whose handshake advertised
+a root key that was replaced before the grant committed returns
+`409 relay_root_changed`; the peer enrolls again and receives the current key.
+A relay enrollment for a project whose signed reset checkpoint would exceed
+the 64 MiB relay checkpoint capacity returns `409 relay_project_too_large`
+with the measured size in the message and no grant. Purging unused issues can
+reduce the checkpoint, but permanent receipts set a floor that purge cannot
+remove; see
+[Relay checkpoint capacity](../operations/federation.md#relay-checkpoint-capacity).
+Enrollment transport checks the actor bound to its authenticated credential
+against current project access. It cannot claim team authority from an event's
+source labels.
+
+The browser gateway hides configured daemon targets from a principal when
+project policy hides at least one project from it, or when its token is limited
+to an issue subtree. For that principal, the daemon roster omits targets that
+are not local, and proxied requests return `403` with code
+`project_authority_not_delegated` before the gateway contacts the target. A
+principal that can see every project keeps the configured targets under the
+ordinary gateway rules, and daemon-owner credentials are never limited this
+way. Project delegation across the browser gateway requires a separate
+protocol.
+
+An ordinary account token may also supply `expires_in_seconds` without `scope`.
+The lifetime must be positive and fit the server's duration range. The token
+keeps its account authority until expiration; omitted or zero lifetime retains
+the existing non-expiring ordinary credential.
 
 ## Issue-scoped credentials
 
@@ -291,14 +485,47 @@ can continue using numeric IDs.
 ## Listing issues
 
 Both `GET /api/v1/projects/{project_id}/issues` and `GET /api/v1/issues`
-accept the optional `sort` query with the value `oldest`. It orders matching
-issues by `created_at` ascending, then `id` ascending for equal timestamps.
-The daemon applies the order before `limit`.
+accept `sort=oldest` (creation ascending) and `sort=created` (creation descending).
+Both break equal `created_at` timestamps by `id` in the same direction and
+apply the order before `limit`. `sort=oldest` requires API 0.21.0; the following
+pagination contract and `sort=created` require API 0.27.0.
 
-Omitting `sort`, or sending it as an empty value, preserves the route's
-current default. The project route keeps `updated_at` descending and the
-cross-project route keeps `created_at` descending. The query is available in
-API `0.21.0` and newer.
+Responses include `issues`, `complete`, `truncated`, and `next_cursor` when
+another page exists. Pass the opaque `next_cursor` as `cursor` with the same
+explicit sort and filters. `limit=0` returns all remaining matches. Optional
+`include_total=true` adds `total`, a SQL count with the same filters and
+permissions, independent of the cursor and page size.
+
+Use `priority=none` for issues with unset priority. It is mutually exclusive
+with `max_priority`; numeric `priority` accepts 0 through 4. `max_priority`
+excludes unset priorities. The global route also accepts repeated positive
+`project_ids` values for one filtered page across selected projects. An empty
+or invalid selection is rejected. `project_ids` and `project_id` are mutually
+exclusive, and every selected project requires authorization.
+
+Omitting `sort`, or sending an empty value, keeps the project route's
+`updated_at` descending default and the global route's `created_at` descending
+default. The project default cannot continue with a cursor; use an explicit
+creation sort for exhaustive scans.
+
+Ordinary edits preserve creation order. Cursors validate the daemon instance,
+project selection, authorization scope, sort, and filters; changing these
+returns HTTP 400. The page size and count request may change between pages.
+These are live reads rather than snapshots. Restart after changes to filter
+membership, project membership, deletion, or imported creation timestamps.
+
+### Search continuation
+
+`GET /api/v1/projects/{project_id}/search` accepts `cursor` only with explicit
+`mode=lexical&sort=oldest`. It returns oldest-creation pages using the same
+`next_cursor`, `complete`, and `truncated` fields, without the ranked search's
+200-candidate ceiling. Query, filters, daemon, and authorization scope must
+stay the same. Search does not provide `total`.
+
+Other searches retain ranked ordering and bounded candidate retrieval.
+They have no continuation cursor. `complete` is false for truncated or
+degraded results and whenever ranked retrieval cannot establish exhaustion;
+a full candidate window must not be treated as the whole matching set.
 
 Both routes also accept the optional `parent_uid` query, the `uid` of a parent
 issue. It returns only that issue's direct children; grandchildren are not
@@ -308,7 +535,7 @@ children returns an empty list.
 
 Parent links can cross projects. The project route returns the children that
 live in that project. The cross-project route returns the children in every
-non-archived project. The query is available in API `0.25.0` and newer; older
+non-archived project. The query is available in API `0.30.0` and newer; older
 daemons ignore it, so check the API version before sending it.
 
 ## Compatibility expectations
@@ -342,6 +569,31 @@ These are the current intentions, not a contractual guarantee:
 If you build against this schema and hit a gap, please open an issue. The
 contract is meant to be useful to external clients, and feedback shapes how far
 the compatibility guarantees are taken.
+
+## Operator diagnostics
+
+`GET /api/v1/doctor` supplies the daemon-side hook findings used by
+[`kata doctor`](../operations/doctor.md). Its `hooks` block includes current
+executable/working-directory availability, queue capacity and occupancy,
+process-lifetime dropped events, and counts of runs and failures from the last
+seven days found in scanned history. `history_truncated` marks a scan limited
+by the eight-MiB or 64-rotated-file budget; counts may omit recent runs.
+`history_incomplete` marks missing, unreadable, or malformed history. These
+flags are independent: a capped scan can also encounter a read error.
+Arguments, environment, hook output and raw errors are
+never returned. `available: false` means the hook sink does not supply
+diagnostics.
+
+The endpoint requires owner-local or configured static/bootstrap-token
+authority. Mounted hosts authorize it as a non-mutating
+`integration_administration` operation with the `manage` capability. Ordinary
+identity tokens, browser sessions, trusted-proxy principals and unauthenticated
+private-network modes cannot access these process diagnostics. A 404 can mean
+the endpoint is unsupported or hidden from this principal.
+
+The optional `/health` embeddings block also includes `error_present` when the
+reconciler has an error, including failures without a provider HTTP status.
+This boolean does not disclose the provider's raw diagnostic text.
 
 ## Browser UI endpoints
 
@@ -389,7 +641,20 @@ boundary.
 The URL reported by `kata daemon status` and local `kata ui` both open that
 loopback origin directly. Configured origins exchange a bearer or identity
 token at `POST /api/v1/ui/session/login`. Logout is
-`DELETE /api/v1/ui/session`; there is no browser-session refresh endpoint.
+`DELETE /api/v1/ui/session`; send the issued cookie, `X-Kata-Web-Session`,
+`X-Kata-CSRF`, and the exact configured `Origin`. A successful logout returns
+204 and revokes that tab's session immediately, including its event stream;
+other tabs remain valid. `/api/v1/ui/session/logout` is not a route, and there
+is no browser-session refresh endpoint.
+
+CLI federation enrollment can use the hub's admin bearer token, even when the
+web UI uses `login` mode. The CLI reads the variable named by
+`--hub-token-env <env-name>` or uses a daemon catalog entry whose URL matches
+the hub origin; it never forwards the
+local daemon's global token to the hub. Ordinary API requests without browser
+credentials use daemon bearer authentication on both browser and shared TCP
+listeners. Host validation still applies; requests carrying browser credentials
+or Fetch Metadata follow browser session and Origin checks.
 Session-authentication errors advertise the canonical browser origin in
 `X-Kata-Web-Origin` and its `loopback` or `login` mode in
 `X-Kata-Web-Authentication`, allowing `kata ui` to distinguish a configured
@@ -419,6 +684,29 @@ different attributes, or after its enrollment was revoked, returns `409` with
 `federation_enrollment_token_conflict`. Token-auth identity resolution happens
 before this comparison, so a DB-backed identity token's actor overrides the
 request body's `actor`.
+
+Enrollment creation accepts both `lease` and `claim`; the API returns sorted,
+de-duplicated capabilities using the canonical `claim` name. A project-scoped
+grant with a supplied hub URL requires enabled hub federation. Once federation
+is enabled, creation returns a `join` object containing
+its hub project ID/UID, local project name, baseline and replay cursors, actor,
+capabilities, token, transport options, and `join_command`. Supply `hub_url`
+as an HTTP(S) base URL reachable by the spoke, optionally with a federation
+API reverse-proxy prefix. The server does not infer a federation address
+from its browser origin; dedicated browser listeners and authentication proxies
+may not serve federation transport. Non-loopback HTTP URLs, including private
+IP addresses, require `allow_insecure: true`. Without it, enrollment returns
+`400` before issuing a token. The returned join command carries
+`--allow-insecure`; HTTPS still verifies certificates.
+
+The returned command includes `--project` and the hub project ID, plus any
+push/adoption options. Join fetches the current UID and cursors from the hub
+when it runs, so a purge after enrollment does not leave it using an old baseline.
+Treat the response and command as secrets. Wildcard grants have no project join object; grants without `pull`, or servers without a
+supplied hub URL, have no runnable join command. Legacy API callers
+omitting `hub_url` may issue a grant before enabling federation; those responses
+omit `join` until hub metadata exists. Listing grants
+never returns plaintext tokens or join commands.
 
 `POST /api/v1/federation/enrollments/actions/rotate` repairs a project-scoped
 spoke whose local binding exists but whose enrollment credential was lost. It
@@ -696,3 +984,40 @@ and unstarted groups. Empty strings clear overrides. Intervals accept one of
 `interval` or `interval_seconds`. Origins and tokens are daemon-owned and rejected
 as request config. Source identity is immutable; validation reads project and
 states before a guarded upsert. See [Plane sync](../operations/plane-sync.md).
+
+Linear uses the issue-sync routes with provider `linear`. Initial enable config
+requires string `workspace_id` and `team_id` UUIDs. Optional string `project_id`
+restricts the team to a project. Scope is immutable. Optional `since`,
+`closed_state_id`, and `open_state_id` are strings; `title_prefix` is a boolean.
+Top-level `status_sync` and interval use the existing issue-sync contract.
+Re-enable preserves omitted options. Credentials and endpoint selection are
+not accepted in binding requests. See [Linear sync](../operations/linear-sync.md).
+
+Twenty uses the same issue-sync routes with provider `twenty`. Enable discovers
+and verifies workspace identity from the daemon-owned credential. Optional config
+keys are string `since`, boolean `title_prefix`, string `closed_status`, string
+`open_status`, and string array `open_statuses`. Top-level `status_sync` selects
+`one-way` or `two-way`; interval accepts `interval` or `interval_seconds`.
+Omitted settings preserve saved values. Origins, credential selectors, keys,
+and workspace IDs are rejected as request config. Status classification is
+validated against live metadata before a guarded upsert. Empty or
+whitespace-only `closed_status` and `open_status` values are rejected; omit a
+key to preserve its saved value. See [Twenty sync](../operations/twenty-sync.md).
+
+Todoist uses the issue-sync routes with provider `todoist`. Initial enable config
+requires opaque string `project_id`. Optional string `history_since` selects a
+UTC date or whole-second RFC3339 completion floor; omission initially chooses
+thirty days ago. Boolean `title_prefix`, top-level `status_sync`, and interval
+preserve omission on re-enable. The daemon resolves `account_id`. Account,
+origin, project and history floor are immutable. Requests cannot supply tokens
+or origins. Two-way delivery uses completion/reopen endpoints after fresh
+safety checks. See [Todoist sync](../operations/todoist-sync.md).
+
+TickTick uses the same issue-sync routes with provider `ticktick`. Initial
+enable config requires string `project_id`; optional boolean `title_prefix`
+preserves omission on re-enable. The project ID is immutable. Top-level
+`status_sync` selects `one-way` or `two-way`; interval accepts `interval` or
+`interval_seconds`. Tokens and the API origin are daemon-owned and rejected as
+request config. Enable reads the project to validate its kind, archive state,
+and permission before a guarded upsert. See
+[TickTick sync](../operations/ticktick-sync.md).

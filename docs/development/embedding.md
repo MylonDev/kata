@@ -142,14 +142,35 @@ use `server.ListenAndServeTLS(certFile, keyFile)` with a valid certificate or
 mount the handler behind a TLS-terminating reverse proxy. Never send the bearer
 token over plaintext non-loopback HTTP.
 
-## Mount below a URL path
+## Serve the browser application
 
-To include the bundled browser application, import `go.kenn.io/kata/webui`,
-call `webui.NewEmbeddedHandler()`, and pass the returned handler in
-`kata.Config.WebHandler`. The standalone `kata daemon` includes this handler
-automatically. Existing embedding hosts that serve the browser application
-must now select it explicitly. A custom `WebHandler` must serve public, data-free
-assets: Kata's bearer check protects API requests, not the static shell.
+The standalone `kata daemon` serves the bundled browser application
+automatically. An embedded service is API-only unless the host passes a
+handler in `kata.Config.WebHandler`. Hosts that served the browser application
+before 0.19.0 must now select it explicitly:
+
+```go
+import (
+	"go.kenn.io/kata"
+	"go.kenn.io/kata/webui"
+)
+
+web, err := webui.NewEmbeddedHandler()
+if err != nil {
+	return err
+}
+service, err := kata.New(ctx, kata.Config{
+	DSN:        "/var/lib/example-app/kata.db",
+	Auth:       kata.AuthConfig{Token: os.Getenv("EXAMPLE_KATA_TOKEN")},
+	WebHandler: web,
+})
+```
+
+API-only hosts can leave `WebHandler` nil and avoid linking the browser assets.
+A custom `WebHandler` must serve public, data-free assets: Kata's bearer check
+protects API requests, not the static shell.
+
+## Mount below a URL path
 
 Keep the API and any configured browser application under one path with
 `service.HandlerAt("/tools/tasks")`. Handle its returned error, then mount the
@@ -681,3 +702,16 @@ Defaults match `[plane_sync]`; service construction validates origins without
 reading secrets. `Run` starts the Plane worker alongside Notion/GitHub workers.
 Manual routes and polling share the client, live progress, and committed-event
 publication. See [Plane sync](../operations/plane-sync.md).
+
+
+Twenty polling uses `Config.TwentySync` with `APIOrigin`, `WebOrigin`, and
+`TokenEnv`. Defaults match `[twenty_sync]`; construction validates origins
+without reading secrets. `Run` starts the Twenty worker, and manual routes and
+polling share its client, live progress, and committed-event publication.
+See [Twenty sync](../operations/twenty-sync.md).
+
+TickTick polling uses `Config.TickTickSync` with `TokenEnv`, which defaults to
+`KATA_TICKTICK_TOKEN` like `[ticktick_sync]`. The API origin is fixed. `Run`
+starts the TickTick worker, and manual routes and polling share its client,
+live progress, and committed-event publication. See
+[TickTick sync](../operations/ticktick-sync.md).

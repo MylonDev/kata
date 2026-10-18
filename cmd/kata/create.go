@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kata/internal/client"
 	"go.kenn.io/kata/internal/config"
 	"go.kenn.io/kata/internal/teammate"
 	"go.kenn.io/kata/internal/textsafe"
@@ -36,8 +37,20 @@ func newCreateCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "create <title>",
-		Short: "create a new issue",
-		Args:  cobra.ExactArgs(1),
+		Short: "create an issue (search first; use --idempotency-key)",
+		Long: `Create an issue in the bound project (or --project). Search first.
+--idempotency-key makes retries safe for seven days: the same key returns
+the original issue; the same key with different fields fails with conflict (exit 5). Use a
+key that is stable for this piece of work, such as "<task>-<date>".
+A title and body that look like an open or closed issue may be refused with
+the matching refs (conflict, exit 5); pass --force-new only after reading them.
+Relationship flags take refs. --parent groups work and does not gate
+readiness; --blocked-by does. --meta key=value stores a string.
+--agent prints "OK create <ref>"; --json has .issue.short_id.`,
+		Example: `  kata create "fix login race" --body "Safari double-submits the callback." --idempotency-key login-race-2026-10-09 --agent
+  kata create "write retry test" --parent abc4 --blocked-by d4ex --idempotency-key retry-test-abc4 --agent
+  kata create "audit tokens" --label security --priority 1 --meta work.branch=audit-tokens --agent`,
+		Args: cobra.ExactArgs(1),
 	}
 	var idempotencyKey string
 	var forceNew bool
@@ -181,9 +194,13 @@ func newCreateCmd() *cobra.Command {
 		}
 		options := &generated.CreateIssueRequestOptions{
 			PathParams: &generated.CreateIssuePath{ProjectID: project.selector}, Body: req,
+			Header: &generated.CreateIssueHeaders{},
 		}
 		if idempotencyKey != "" {
-			options.Header = &generated.CreateIssueHeaders{IdempotencyKey: &idempotencyKey}
+			options.Header.IdempotencyKey = &idempotencyKey
+		}
+		if reportsCLIUse(cmd) {
+			options.Header.XKataSurface = new("cli")
 		}
 		response, callErr := apiClient.CreateIssueWithResponse(ctx, options)
 		if err := externalCLITransportError(response, callErr); err != nil {
@@ -386,8 +403,8 @@ func resolveProjectID(ctx context.Context, baseURL, startPath string) (int64, er
 // qualified IDs ("<project>#<short_id>") for display or for the destructive
 // confirmation header.
 //
-// Wire shape is chosen client-side so the daemon never has to stat the
-// client's filesystem (issue #35). Priority order:
+// Wire shape is chosen client-side so configured remote daemons never have
+// to stat the client's filesystem (issues #35 and #521). Priority order:
 //
 //  1. --project X → {name: X}. Explicit target — alias-first repair
 //     would risk redirecting to a different project.
@@ -397,7 +414,8 @@ func resolveProjectID(ctx context.Context, baseURL, startPath string) (int64, er
 //  3. Git workspace, no .kata.toml → {alias}. Daemon does strict
 //     alias lookup; unknown alias is 404 (init owns create-by-
 //     convention from git remotes — resolve never creates).
-//  4. Neither → {start_path}. Legacy local-only fallback.
+//  4. Neither → project_not_initialized for configured remotes and hubs;
+//     {start_path} remains the legacy local-daemon fallback.
 func resolveProjectIDAndName(ctx context.Context, baseURL, startPath string) (int64, string, error) {
 	client, err := httpClientFor(ctx, baseURL)
 	if err != nil {
@@ -489,11 +507,18 @@ func buildResolveRequest(ctx context.Context, startPath string) (map[string]any,
 
 	disc, err := config.DiscoverPaths(startPath)
 	if err != nil {
-		// Tolerate "not exist" so a typo in --workspace still surfaces
-		// as a uniform daemon-side error instead of a divergent
-		// client-side stat error. Other stat failures (permission,
+		// Local clients retain daemon-side validation for a missing
+		// --workspace; remote clients report it here because the daemon
+		// cannot see client paths. Other stat failures (permission,
 		// etc.) propagate.
 		if errors.Is(err, os.ErrNotExist) {
+			if resolvesPathFree(ctx) {
+				return nil, nil, &cliError{
+					Message:  fmt.Sprintf("workspace path %q does not exist", startPath),
+					Kind:     kindValidation,
+					ExitCode: ExitValidation,
+				}
+			}
 			return map[string]any{"start_path": startPath}, nil, nil
 		}
 		return nil, nil, &cliError{
@@ -563,8 +588,30 @@ func buildResolveRequest(ctx context.Context, startPath string) (map[string]any,
 		return body, nil, nil
 	}
 
-	body["start_path"] = startPath
-	return body, nil, nil
+	return buildPathResolveRequest(ctx, startPath)
+}
+
+// resolvesPathFree reports whether the target daemon cannot see this
+// client's filesystem: a configured remote daemon or a federation hub.
+func resolvesPathFree(ctx context.Context) bool {
+	if pathFree, _ := ctx.Value(pathFreeProjectContextKey{}).(bool); pathFree {
+		return true
+	}
+	resolved, ok := ctx.Value(resolvedDaemonContextKey{}).(client.ResolvedDaemon)
+	return ok && resolved.ConfiguredRemote()
+}
+
+func buildPathResolveRequest(ctx context.Context, startPath string) (map[string]any, func(string) error, error) {
+	if resolvesPathFree(ctx) {
+		return nil, nil, &cliError{
+			Message:  "no .kata.toml ancestor and no git ancestor",
+			Hint:     `run "kata init --project <name>" in the workspace root, or pass --project <name>`,
+			Kind:     kindNotFound,
+			Code:     "project_not_initialized",
+			ExitCode: ExitNotFound,
+		}
+	}
+	return map[string]any{"start_path": startPath}, nil, nil
 }
 
 // aliasInputBody marshals an AliasInfo into the wire shape the daemon

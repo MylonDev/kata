@@ -35,6 +35,9 @@ func (d *Store) moveIssueProject(ctx context.Context, in db.MoveIssueProjectIn) 
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockProjectAccess(ctx, tx); err != nil {
+		return out, err
+	}
 
 	if err := ensureFederatedMoveAllowedTx(ctx, tx, in.FromProjectID, in.ToProjectID); err != nil {
 		return out, err
@@ -66,6 +69,9 @@ func (d *Store) moveIssueProject(ctx context.Context, in db.MoveIssueProjectIn) 
 	}
 	if recurrenceID != nil {
 		return out, &db.RecurrencePinnedError{}
+	}
+	if err := db.CheckNativeRecurringParentMove(ctx, tx, false, in.FromProjectID, issueUID); err != nil {
+		return out, err
 	}
 	if err := lockAndRejectFreshExternalRootClaimsForIssueTx(
 		ctx, tx, in.IssueID, time.Now().UTC().Add(-db.ExternalRootClaimStaleAfter),
@@ -135,6 +141,14 @@ func (d *Store) moveIssueProject(ctx context.Context, in db.MoveIssueProjectIn) 
 	); err != nil {
 		return out, err
 	}
+	// A moved issue changes who can see it, so in-flight requests recheck
+	// what they exposed exactly as they do after a policy change.
+	if err := bumpProjectAccess(ctx, tx); err != nil {
+		return out, fmt.Errorf("advance project access revision: %w", err)
+	}
+	if err := rebindIssueEmbeddingArtifactsTx(ctx, tx, issueUID, toProjectUID); err != nil {
+		return out, fmt.Errorf("rehome embedding artifacts: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE issue_claims SET project_id = ? WHERE issue_id = ?`, in.ToProjectID, in.IssueID); err != nil {
 		return out, fmt.Errorf("rehome issue claims: %w", err)
@@ -191,7 +205,9 @@ func (d *Store) moveIssueProject(ctx context.Context, in db.MoveIssueProjectIn) 
 	if err := tx.Commit(); err != nil {
 		return out, err
 	}
+	committedEvent := ev
 	out.Issue = issue
+	out.Event = &committedEvent
 	out.EventID = ev.ID
 	out.NewShortID = newShortID
 	out.NewRevision = newRev

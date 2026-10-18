@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/json/jsontext"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +16,7 @@ import (
 	"go.kenn.io/kata/internal/api"
 	clientpkg "go.kenn.io/kata/internal/client"
 	"go.kenn.io/kata/internal/db"
+	"go.kenn.io/kata/internal/federationsigning"
 )
 
 func TestFederationClientPollProjectEvents(t *testing.T) {
@@ -41,6 +44,49 @@ func TestFederationClientPollProjectEvents(t *testing.T) {
 	require.Len(t, body.Events, 1)
 	assert.Equal(t, int64(8), body.Events[0].EventID)
 	assert.Equal(t, int64(8), body.NextAfterID)
+}
+
+func TestFederationClientSignsRelayBatchAbovePreviousBodyLimit(t *testing.T) {
+	t.Setenv("TEST_RELAY_BATCH_SIGNING_KEY", strings.Repeat("k", 64))
+	var receivedBodyBytes int64
+	var receivedSignature bool
+	hub := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBodyBytes = r.ContentLength
+		receivedSignature = r.Header.Get("Signature") != "" && r.Header.Get("Signature-Input") != ""
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/api/v1/projects/42/federation/relay:accept", r.URL.Path)
+		_, _ = io.Copy(io.Discard, r.Body)
+		require.NoError(t, json.NewEncoder(w).Encode(db.RelayAcceptance{
+			Through: 1, Digest: strings.Repeat("a", 64),
+		}))
+	}))
+	t.Cleanup(hub.Close)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = hub.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	source := federationsigning.Source{
+		KeyID: "relay-batch-key", KeyEnv: "TEST_RELAY_BATCH_SIGNING_KEY", HubURL: hub.URL,
+	}
+	client, err := NewClient(context.Background(), hub.URL, "relay-enrollment-token", clientpkg.Opts{
+		FederationSigning: &source,
+	})
+	require.NoError(t, err)
+	_, err = client.AcceptRelayDeliveries(context.Background(), 42, db.RelayBatch{
+		Stream: db.RelayStreamEvent,
+		Envelopes: []db.RelayEnvelope{{
+			Version: 1, BindingUID: "01HZNQ7VFPK1XGD8R5MABCD4EA",
+			ProjectUID: "01HZNQ7VFPK1XGD8R5MABCD4EB", AuthorityUID: "01HZNQ7VFPK1XGD8R5MABCD4EC",
+			SenderInstanceUID: "01HZNQ7VFPK1XGD8R5MABCD4ED", ReceiverInstanceUID: "01HZNQ7VFPK1XGD8R5MABCD4EE",
+			Epoch: 1, Sequence: 1, Stream: db.RelayStreamEvent,
+			Path:      []string{"01HZNQ7VFPK1XGD8R5MABCD4ED"},
+			SourceUID: "01HZNQ7VFPK1XGD8R5MABCD4EF", SourceHash: strings.Repeat("b", 64),
+			Body: bytes.Repeat([]byte("x"), 50<<20), Digest: strings.Repeat("c", 64),
+		}},
+	})
+	require.NoError(t, err)
+	require.Greater(t, receivedBodyBytes, int64(64<<20), "base64 JSON metadata pushes this valid raw envelope over the previous request cap")
+	require.LessOrEqual(t, receivedBodyBytes, int64(federationsigning.MaxBodyBytes))
+	require.True(t, receivedSignature, "the oversized relay request still carries its exact-body signature")
 }
 
 func TestFederationClientIngestProjectEvents(t *testing.T) {
@@ -83,7 +129,7 @@ func TestFederationClientIngestProjectEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "Bearer hub-token", gotAuth)
-	assert.Equal(t, db.CurrentSchemaVersion(), gotBody.SchemaVersion)
+	assert.Equal(t, 30, gotBody.SchemaVersion, "legacy event contents retain schema30 wire compatibility")
 	assert.Equal(t, api.FederationAdoptionBaselineOpen, gotBody.AdoptionBaseline)
 	assert.Equal(t, int64(8), gotBody.AdoptionBaselineEndEventID)
 	require.Len(t, gotBody.Events, 1)
@@ -107,7 +153,7 @@ func TestFederationClientIngestProjectEventsError(t *testing.T) {
 	client, err := NewClient(context.Background(), srv.URL, "hub-token", clientpkg.Opts{})
 	require.NoError(t, err)
 	_, err = client.IngestProjectEvents(context.Background(), 42, []api.FederationIngestEventEnvelope{{
-		EventID: 1,
+		EventID: 1, Type: "issue.created",
 	}})
 
 	require.Error(t, err)
@@ -175,4 +221,38 @@ func TestFederationClientPostJSONRejectsNonJSONResponse(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode hub")
+}
+
+func TestFederationClientIngestDeclaresCommentReplyWireVersion(t *testing.T) {
+	const target = "01HZNQ7VFPK1XGD8R5MABCD4EZ"
+	cases := []struct {
+		name      string
+		eventType string
+		payload   string
+		want      int
+	}{
+		{name: "plain comment", eventType: "issue.commented", payload: `{"comment_uid":"01HZNQ7VFPK1XGD8R5MABCD4EC","body":"note"}`, want: 30},
+		{name: "reply comment", eventType: "issue.commented", payload: `{"comment_uid":"01HZNQ7VFPK1XGD8R5MABCD4EC","body":"note","reply_to_uid":"` + target + `","reply_kind":"reply"}`, want: 32},
+		{name: "snapshot without replies", eventType: "issue.snapshot", payload: `{"title":"t","comments":[{"comment_uid":"01HZNQ7VFPK1XGD8R5MABCD4EC","body":"note"}]}`, want: 30},
+		{name: "snapshot with reply", eventType: "issue.snapshot", payload: `{"title":"t","comments":[{"comment_uid":"01HZNQ7VFPK1XGD8R5MABCD4EC","body":"note","reply_to_uid":"` + target + `","reply_kind":"confirm"}]}`, want: 32},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody api.FederationIngestEventsRequestBody
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+				require.NoError(t, json.NewEncoder(w).Encode(api.FederationIngestEventsBody{Accepted: 1, PushCursorEventID: 8}))
+			}))
+			t.Cleanup(srv.Close)
+			issueUID := "01HZNQ7VFPK1XGD8R5MABCD4EY"
+			client, err := NewClient(context.Background(), srv.URL, "hub-token", clientpkg.Opts{})
+			require.NoError(t, err)
+			_, err = client.IngestProjectEvents(context.Background(), 42, []api.FederationIngestEventEnvelope{{
+				EventID: 8, EventUID: "01HZNQ7VFPK1XGD8R5MABCD4EX", IssueUID: &issueUID,
+				Type: tc.eventType, Actor: "spoke", Payload: jsontext.Value(tc.payload),
+			}})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, gotBody.SchemaVersion)
+		})
+	}
 }

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # "|" falls back to the source repo on any proxy error, including HTTP/2 stream resets mid-download.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
   web-static:
     name: Web static checks
@@ -114,7 +118,7 @@ jobs:
         run: make web-install
 
       - name: Check Huma API conventions
-        run: go run go.kenn.io/kit/cmd/huma-check@3e1f59e9011e878ec595aa04aebc8a77c5292c4d ./...
+        run: go run go.kenn.io/kit/cmd/huma-check@b1f14b1ca30b680f023dff9467bde0eb70768c68 ./...
 
       - name: Run tests
         env:
@@ -125,6 +129,47 @@ jobs:
         run: |
           env -u KATA_AUTH_TOKEN go test $(go list ./... | grep -v '/e2e$')
           env -u KATA_AUTH_TOKEN go test -p 1 ./e2e
+
+  native-agent-plugins:
+    name: Native agent plugins
+    runs-on: ${{ github.repository == 'kenn-io/kata' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'namespace-profile-linux-4cpu' || 'ubuntu-latest' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.repository == 'kenn-io/kata' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
+
+      - name: Set up Node
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f  # v6.1.0
+        with:
+          node-version: 26.5.1
+
+      # Exercise the declared minimum native APIs without running package scripts.
+      - name: Install published native APIs
+        env:
+          KATA_NATIVE_PLUGIN_SDK_ROOT: ${{ runner.temp }}/native-agent-sdk
+        run: |
+          npm install --prefix "$KATA_NATIVE_PLUGIN_SDK_ROOT" --ignore-scripts --no-audit --no-fund \
+            typescript@7.0.2 @types/node@26.6.4 \
+            @earendil-works/pi-coding-agent@0.99.1 \
+            @ampcode/plugin@0.0.0-20260526003443-g9106a62 \
+            @opencode-ai/plugin@1.0.154 @opencode/plugin@2.0.0 \
+            openclaw@2026.9.7
+
+      - name: Run native loaders and SDK checks
+        env:
+          KATA_NATIVE_PLUGIN_SDK_ROOT: ${{ runner.temp }}/native-agent-sdk
+          KATA_PI_TEST_RUNTIME: ${{ runner.temp }}/native-agent-sdk/node_modules/@earendil-works/pi-coding-agent/dist
+          KATA_OPENCLAW_TEST_RUNTIME: ${{ runner.temp }}/native-agent-sdk/node_modules/openclaw
+        run: >-
+          go test ./cmd/kata -count=1 -v
+          -run '^Test(PiNative(InstalledRunner|RealKataTransport|InstalledRuntimeReplacement)|NativePlugins(Runtime|PublishedDeclarations)|OpenClawPublishedNativeLoader)$'
 
   api-breaking:
     name: OpenAPI breaking changes
@@ -183,9 +228,12 @@ jobs:
           POSTGRES_DB: kata_test
           POSTGRES_USER: kata
           POSTGRES_PASSWORD: kata
+          # Test databases are disposable, so keep the data directory in memory.
+          PGDATA: /pgdata/data
         ports:
           - 5432:5432
         options: >-
+          --tmpfs /pgdata
           --health-cmd "pg_isready -U kata -d kata_test"
           --health-interval 5s
           --health-timeout 5s
@@ -216,6 +264,19 @@ jobs:
       - name: Install frozen web dependencies
         run: make web-install
 
+      # Service containers cannot take server flags, so turn off durability
+      # with ALTER SYSTEM; all three settings apply on reload. TCP skips the
+      # socket-only server the image runs during initialization.
+      - name: Turn off PostgreSQL durability
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: >-
+          docker exec "$POSTGRES_CONTAINER" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U kata -d kata_test
+          -c "ALTER SYSTEM SET fsync = off"
+          -c "ALTER SYSTEM SET synchronous_commit = off"
+          -c "ALTER SYSTEM SET full_page_writes = off"
+          -c "SELECT pg_reload_conf()"
+
       - name: Run PostgreSQL backend and operator tests
         env:
           KATA_TEST_FAST_SQLITE: "1"
@@ -235,7 +296,7 @@ jobs:
 
   windows:
     name: Windows
-    runs-on: ${{ github.repository == 'kenn-io/kata' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'namespace-profile-windows-8cpu' || 'windows-latest' }}
+    runs-on: windows-2025
 
     steps:
       - name: Check out repository
@@ -243,11 +304,20 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Windows Go directories
+        shell: pwsh
+        run: |
+          foreach ($name in @('GOCACHE', 'GOMODCACHE', 'GOTMPDIR', 'TMP', 'TEMP')) {
+            $path = Join-Path $env:RUNNER_TEMP $name
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            "$name=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.repository == 'kenn-io/kata' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
+          cache: true
 
       - name: Build
         run: go build ./...
@@ -260,7 +330,7 @@ jobs:
         env:
           KATA_TEST_FAST_SQLITE: "1"
           KATA_SKIP_OPENAPI_CLIENT_CHECK: "1"
-        run: env -u KATA_AUTH_TOKEN go test -p 4 -vet=off ./...
+        run: env -u KATA_AUTH_TOKEN go test -timeout 15m -p 4 -vet=off ./...
 
   lint:
     name: golangci-lint

@@ -1,13 +1,101 @@
 ---
 title: Configuration
 description: Reference Kata environment variables, workspace files, daemon settings, authentication, and integrations.
-last_edited: 2026-09-28
+last_edited: 2026-10-17
 ---
 
 # Configuration
 
 kata configuration is split between environment variables, committed workspace
 bindings, local per-machine overrides, and daemon config.
+
+## Closing-session transcripts
+
+To help readers find the chat that completed an issue, enable transcript
+attachment in the **invoking CLI client's** `<KATA_HOME>/config.toml`:
+
+```toml
+[close.transcript]
+enabled = true
+agentsview_url = "https://agentsview.example" # optional; a base path is supported
+```
+
+This is off by default and needs no daemon restart. Attachment needs a daemon
+with HTTP API `0.26.0` or newer. Before attaching a transcript, `kata close`
+checks the daemon's API version; an older daemon gets a warning on stderr and
+the close proceeds without the transcript. With attachment disabled, close
+requests remain unchanged.
+
+When `kata close` supplies evidence, it attaches a separate `transcript` object
+to the same durable `issue.closed` event. Evidence and substantive-message
+requirements still apply: a chat identifier is provenance, not proof that work
+passed. No transcript body, local filename, token, or hook ownership hash is
+copied. The setting affects CLI closes, including remote-daemon calls; browser
+closes do not infer a session from the daemon's environment.
+
+Claude Code context comes from `CLAUDE_CODE_SESSION_ID`. Codex context comes
+from `CODEX_THREAD_ID`, falling back to `CODEX_SESSION_ID`; if both Codex
+variables are populated they must agree. A child agent inherits its parent's
+variables, so Claude Code and Codex context together is ambiguous and skipped.
+For a nested agent or an explicit harness handoff, pass the actual current
+native session UUID as a pair:
+
+```sh
+KATA_TRANSCRIPT_AGENT=claude \
+KATA_TRANSCRIPT_SESSION_ID=00000000-0000-4000-8000-000000000001 \
+kata close example-project#abc4 --done \
+  --message "Implemented the requested behavior and ran the focused tests." \
+  --test "go test ./internal/example"
+```
+
+Only Claude Code and Codex native UUID sessions are supported initially. Kata
+never scans recent chat files or reuses another issue's session. Missing,
+invalid, partially supplied, or ambiguous context warns on stderr and skips the
+attachment; the close can still succeed. An unconfigured AgentsView URL simply
+stores the identifier. An invalid URL warns and stores only the identifier.
+URLs must be absolute HTTP(S), with no embedded credentials, query, or fragment.
+
+AgentsView's native session IDs and routes are `codex:<UUID>` at
+`/sessions/codex/<UUID>` and Claude's bare `<UUID>` at `/sessions/<UUID>`. These
+routes are supported by the [AgentsView v0.44.0 router](https://github.com/kenn-io/agentsview/blob/v0.44.0/frontend/src/lib/stores/router.svelte.ts),
+including its PostgreSQL server.
+Set `agentsview_url` only for an installation indexing those native IDs.
+Imported archives can namespace IDs (for example, `workstation~codex:<UUID>`);
+for those installations omit the base URL and use AgentsView's [**Go to
+session** lookup](https://github.com/kenn-io/agentsview/blob/v0.44.0/frontend/src/lib/utils/go-to-session.ts)
+with the saved UUID, or supply its verified exact URL through the HTTP close
+API. If multiple archives contain that UUID, lookup reports ambiguity; use the
+archive's canonical ID or a verified locator. Kata does not infer an import
+namespace.
+
+Kata makes no AgentsView request during close. A generated URL is a locator,
+not an availability receipt: offline hosting, delayed indexing, authentication,
+or a session excluded from the archive can prevent it from opening. The
+identifier remains useful for lookup after indexing catches up. Retry the
+AgentsView lookup, not the close, when indexing lags.
+
+An unkeyed close of an already closed issue adds no event and cannot replace
+its provenance. Reopen/reclose records a new session on a new close event and
+retains the old event. Keyed retries return their original event; keep the
+original session, evidence, actor, and other request fields unchanged. The
+AgentsView link is not part of retry identity, so changing `agentsview_url`
+does not break a retry. Retrying from another chat with different automatic
+context conflicts; explicitly pass the original agent/session pair.
+`--dry` validates without writing an event or attaching persistent provenance.
+
+Readers can open the session link in the web issue's **Events** history, or
+retrieve provenance with the event API. For example, in a small project:
+
+```sh
+kata --project example-project events --after 0 --limit 100 --json |
+  jq '.events[] | select(.type == "issue.closed" and .issue_short_id == "abc4") |
+      .payload.transcript'
+```
+
+For a larger history, continue with `next_after_id` until the desired event is
+found. A saved close receipt also contains `event.payload`, encoded as a JSON
+string; on a keyed retry use `original_event.payload`. Both contain the same
+`transcript` object as the parsed event stream.
 
 ## Environment variables
 
@@ -22,17 +110,35 @@ bindings, local per-machine overrides, and daemon config.
 | `KATA_POSTGRES_ALLOW_INSECURE` | Set to `1` only to permit a non-loopback Postgres connection without server-identity-verified TLS. |
 | `KATA_AUTHOR` | Default actor for mutations. |
 | `KATA_TEAMMATE` | Optional teammate attribution for comments and newly created issues. A command-level `--teammate` overrides it; `--teammate=''` suppresses it. |
+| `KATA_TRANSCRIPT_AGENT`, `KATA_TRANSCRIPT_SESSION_ID` | Explicit current closing session (`codex` or `claude`, and its native UUID). Used only when close transcript attachment is enabled. Supply both; they override Claude Code and Codex environment context. |
 | `KATA_INBOX_USER` | Exact actor or `actor/teammate` inbox address for `kata inbox` when `--for` is omitted. It does not set attribution and is independent of `KATA_AUTHOR` and `KATA_TEAMMATE`. |
 | `KATA_SERVER` | Remote daemon URL. Skips local discovery and auto-start. |
 | `KATA_AUTH_TOKEN` | Bearer token for daemon API auth. |
+| `KATA_AUTH_TOKEN_FILE` | Overrides `[auth].token_file`. A nonempty `KATA_AUTH_TOKEN` continues to win. A selected file failure stops startup and client construction. |
+| `KATA_LISTEN` | Daemon API bind address. Overrides `listen` in the daemon config; `--listen` wins over both. |
+| `KATA_WEB_LISTEN` | Overrides `[web].listen`, the separate browser listener used with a Unix-socket API. |
+| `KATA_WEB_PUBLIC_ORIGIN` | Overrides `[web].public_origin`, the exact root browser origin. Non-loopback plain HTTP requires private-network trust. |
+| `KATA_SEARCH_EMBEDDINGS_BASE_URL` | Overrides `[search.embeddings].base_url`. |
+| `KATA_SEARCH_EMBEDDINGS_MODEL` | Overrides `[search.embeddings].model`. |
+| `KATA_SEARCH_EMBEDDINGS_DIMS` | Overrides `[search.embeddings].dims`. Must be a non-negative integer; `0` keeps the default dimensionality. |
+| `KATA_SEARCH_EMBEDDINGS_API_KEY_FILE` | Overrides `[search.embeddings].api_key_file`; the existing credential precedence and file restrictions apply. |
+| `KATA_SEARCH_EMBEDDINGS_DOCUMENT_PREFIX`, `KATA_SEARCH_EMBEDDINGS_DOCUMENT_SUFFIX`, `KATA_SEARCH_EMBEDDINGS_QUERY_PREFIX`, `KATA_SEARCH_EMBEDDINGS_QUERY_SUFFIX` | Override the matching `[search.embeddings]` affix. Kata keeps the value's leading and trailing spaces; a blank value leaves the file setting in place. |
+| `KATA_SEARCH_EMBEDDINGS_REQUEST_DIMENSIONS` | Overrides `[search.embeddings].request_dimensions`. Accepts `true` or `false` (also `1`/`0`); any other value stops startup. |
+| `KATA_BACKUP_DIR` | Destination for [scheduled full JSONL backups](../operations/backup-restore.md#scheduled-backups); overrides `[backup].dir`. |
+| `KATA_BACKUP_INTERVAL` | Overrides `[backup].interval`. Positive duration; defaults to `24h` when a backup directory is configured. |
+| `KATA_BACKUP_RETAIN` | Overrides `[backup].retain`. Positive duration; defaults to `720h`. |
 | `KATA_TRUST_PRIVATE_NETWORK` | Set to `1` to permit trusted plaintext bearer use on private non-loopback HTTP. Without it (or `allow_insecure`), a plaintext non-loopback target fails when the client is built, before any request is sent. |
 | `KATA_ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK_WRITES` | Set to `1` to permit tokenless writes and event streams on a literal private-IP daemon bind. |
 | `KATA_ALLOW_IDENTITY_CONNECTOR_ADMINISTRATION` | Set to `1` to let database-backed identity tokens administer connectors and external-root bridges. Off by default. |
 | `KATA_ALLOW_INSECURE` | Set to `1` or `true` to allow a configured remote daemon hostname over plain HTTP. Federation uses `kata federation enroll --allow-insecure` and `kata federation join --allow-insecure` instead because enrollment credentials are stored separately. |
-| `KATA_TELEMETRY_ENABLED` | Set to `0` to disable anonymous PostHog telemetry. |
+| `KATA_TELEMETRY_ENABLED` | Set to `0`, `false`, `no`, or `off` to disable anonymous PostHog telemetry. Values are case-insensitive and trimmed. |
 | `KATA_HTTP_TIMEOUT` | Timeout for configured-remote connectivity probes and non-streaming CLI requests, such as `30s` or `2m`. Defaults to `5s`; raise it for bulk imports. It also overrides the federation sync client's separate 60-second request budget. Larger values increase how long an unreachable remote can delay a command or sync attempt. |
 | `KATA_AUTOSTART_IDLE_TIMEOUT` | Overrides `autostart_idle_timeout`. Empty or `0` disables idle shutdown; positive values must be at least `10s`. |
+| `KATA_LINEAR_TOKEN` | Default daemon-owned Linear credential; `[linear_sync].token_env` selects another variable. |
+| `KATA_TWENTY_TOKEN` | Default daemon-side Twenty API key; `[twenty_sync].token_env` can select another environment variable. |
+| `KATA_TICKTICK_TOKEN` | Default daemon-side TickTick access token; `[ticktick_sync].token_env` can select another environment variable. |
 | `KATA_PLANE_TOKEN` | Default daemon-side Plane API key; `[plane_sync].token_env` can select another environment variable. |
+| `KATA_TODOIST_TOKEN` | Todoist daemon API token; `[todoist_sync].token_env` selects another variable. |
 | `KATA_NOTION_TOKEN` | Default daemon-side read-only Notion credential; `[notion_sync].token_env` can name another environment variable. Client workstations need no Notion token. |
 | `KATA_GITHUB_TOKEN` | Default explicit token source for GitHub sync when no matching `[[github_sync.app]]` credential is configured. It is scoped to `github.com` unless `[github_sync].token_host` names a different host. `[github_sync].token_env` can name a different env var. |
 | `KATA_GITHUB_SYNC_ALLOWED_HOSTS` | Comma-separated exact GitHub Enterprise hostnames trusted for GitHub sync and git-remote inference. `github.com` is always trusted. |
@@ -251,6 +357,14 @@ trust_private_network = true
 listen = "127.0.0.1:27777"
 public_origin = "https://daemon.example"
 
+[twenty_sync]
+api_origin = "https://api.twenty.com"
+web_origin = "https://app.twenty.com"
+token_env = "KATA_TWENTY_TOKEN"
+
+[ticktick_sync]
+token_env = "KATA_TICKTICK_TOKEN"
+
 [plane_sync]
 api_origin = "https://api.plane.so"
 web_origin = "https://app.plane.so"
@@ -278,7 +392,9 @@ shared-daemon configuration above. Its minimal configuration is:
 autostart_idle_timeout = "15m"
 ```
 
-The `kata daemon start --listen <host:port>` flag wins over the config file.
+The listener precedence is `--listen`, `KATA_LISTEN`, top-level `listen`,
+hosted-mode `PORT`, then the platform default. Environment overrides are trimmed;
+empty or whitespace-only values leave the corresponding config-file value unchanged.
 Plain `kata daemon start` starts the daemon in the background and returns after
 startup is confirmed; use `kata daemon start --foreground` for service-manager
 and hosted deployments. Auto-started daemons also read the config-file listener
@@ -286,11 +402,22 @@ value.
 An empty `[storage].dsn` means "no storage override"; env vars or the default
 database path still apply.
 
+Daemon bearer credentials use `[auth].token` > `[auth].token_file` >
+`[auth].token_env` (the name of a variable containing the token). A nonempty
+`KATA_AUTH_TOKEN` overrides the inline token. Token files follow the
+[embedding credential file restrictions](#semantic-search): absolute or `~/`
+paths, regular files owned by the daemon user, no Unix group/world permissions
+or Windows access for other users, and at most 64 KiB. Whitespace and a
+trailing newline are trimmed. An unusable
+selected file or named environment variable fails loudly without falling back.
+For example, mount a `0600` secret file owned by the daemon user and set
+`KATA_AUTH_TOKEN_FILE=/run/secrets/daemon-token`.
+
 `autostart_idle_timeout` lets an implicitly started, owner-local daemon exit
 after a period without client activity. It is off by default. The setting is
 ignored for explicit daemon starts and for daemons exposed through non-loopback
-listeners, a public web origin, trusted-proxy configuration, or shared-listener
-host aliases. `kata daemon start` replaces a running idle-eligible auto-started
+listeners, a public web origin, trusted-proxy configuration, shared-listener
+host aliases, or an enabled `[federation.ingress]` listener. `kata daemon start` replaces a running idle-eligible auto-started
 daemon with an explicit one so it stays resident, and `kata daemon restart`
 always starts an explicit daemon. The daemon writes one
 `kata daemon: idle shutdown after ...` line to its log when it exits for this
@@ -301,7 +428,7 @@ configured interval. Ordinary health probes do not renew the timeout. A running
 sends marked `GET /api/v1/ping` keepalives after applicable listener policy
 checks in both stdio and streamable-HTTP modes so the bridge remains usable for
 its full lifetime. Use an explicit daemon service when
-GitHub/Notion/Plane sync, federation, or timed-claim maintenance must remain continuously
+GitHub/Notion/Plane/Linear/Twenty/TickTick sync, federation, or timed-claim maintenance must remain continuously
 scheduled without a client present.
 
 The optional top-level `timezone` is the IANA timezone for date-only and local
@@ -438,6 +565,20 @@ until a connector call needs them; connector health is observed through
 durable bindings are still handled when their connector is removed from
 configuration.
 
+### Federation request signing and ingress
+
+`[federation.signing]` configures hub-controlled `required`, the fixed HTTPS
+`external_url` (including a prefix), `replay_state_file`, and `[[federation.signing.key]]`
+entries. Each entry binds `key_id`, `enrollment_id` and exactly one of `key_env`
+or `key_file`; an optional Unix `not_after` bounds retirement overlap.
+
+`[federation.ingress]` enables an independent allowlisted listener with `enabled`
+and a literal private `listen` address. It requires signing configuration and
+valid signatures regardless of `required` on ordinary listeners. It defaults to
+disabled, or `127.0.0.1:0` when enabled without an address. See
+[Federation request signing](../operations/federation-signing.md) for key setup,
+replay initialization, topology, limits and recovery.
+
 ### Declarative federation mappings
 
 A spoke daemon maps local projects to projects on remote daemon-catalog targets.
@@ -446,7 +587,11 @@ provider. It cannot mix them.
 
 #### Catalog administration credentials
 
-This form creates projects and enrolls or adopts replicas automatically at startup:
+This form creates projects and enrolls or adopts direct-spoke replicas at
+startup. It requires the hub owner's administration credential outside identity
+mode. To connect with an ordinary account token, configure a catalog entry and use
+[`kata federation bridge connect`](../guide/project-relays.md); do not add a
+`[[federation.project]]` mapping for that bridge.
 
 ```toml
 [[daemon]]
@@ -473,8 +618,8 @@ then creates the local `spoke_project` if it is missing or adopts the existing
 standalone project. Enrollment credentials are generated automatically and
 stored in the spoke's owner-only federation credential store. A generated
 credential is durably reserved once under the resolved hub project UID before
-enrollment. When the hub authenticates the catalog bearer as a DB-backed
-identity token, that token's actor overrides the mapping's requested `actor`.
+enrollment. A database-backed account token is refused on this legacy
+enrollment path with `federation_enrollment_requires_relay`.
 Credential-file updates use a same-directory, failure-atomic replacement so a
 failed write cannot truncate the last readable credential set.
 
@@ -604,13 +749,14 @@ the bootstrap token:
 
 ```sh
 export KATA_AUTH_TOKEN=bootstrap-admin-token
-kata tokens create --actor wesm --name laptop
+kata tokens create --actor member --name laptop
 kata tokens list
 kata tokens revoke 1
 ```
 
 Unscoped `tokens create` prints plaintext once. The daemon stores only a SHA-256 hash.
-Lost tokens must be revoked and recreated.
+Lost tokens must be revoked and recreated. Set `--expires-in 4h` to bound an
+ordinary token's lifetime; omitting it keeps the existing non-expiring lifetime.
 
 Kata refuses `tokens create` when a shared token is configured but
 `require_token_identity` is false. This prevents minting a credential that the
@@ -699,6 +845,11 @@ model    = "nomic-embed-text"
 # api_key_file = "~/.config/kata/embedding.key"
 # api_key_env  = "VOYAGE_API_KEY"
 # fingerprint_salt = ""         # bump to force re-embed when model weights change
+# document_prefix = ""          # literal affix applied to each indexed chunk
+# document_suffix = ""
+# query_prefix = ""             # literal affix applied to each search query
+# query_suffix = ""
+# request_dimensions = false    # send dims only if the provider supports it
 # dims                          # expected vector dimensionality (default 768)
 # batch_size                    # inputs per request (default 64)
 # model_context_tokens          # model's maximum tokens for one input
@@ -712,6 +863,58 @@ one is a startup error rather than a silent disable. With no credential source
 configured, requests omit the `Authorization` header. Keyless local providers
 such as Ollama need only `base_url` and `model`.
 
+Affixes preserve every space and newline. Kata applies document affixes once
+around each prepared issue chunk and query affixes once around the search
+query text, which Kata sends as entered. With empty affixes and
+`request_dimensions = false`, existing generation fingerprints stay unchanged
+and stored vectors are reused. Setting any affix or enabling dimension requests
+creates a separate generation. `dims` always validates response width;
+`request_dimensions` additionally sends that width as the request's
+`dimensions` field. Kata never slices vectors to fit.
+
+### Optional EmbeddingGemma 2 text endpoint
+
+For a conforming OpenAI-compatible text server, this optional configuration
+uses the [EmbeddingGemma 2 model card](https://ai.google.dev/gemma/docs/embeddinggemma/model_card_2)
+retrieval recipe and native 768 dimensions:
+
+```toml
+[search.embeddings]
+base_url = "http://127.0.0.1:8080/v1"
+model = "embeddinggemma-2-text-r914f7f8-bf16" # example server alias
+fingerprint_salt = "914f7f89142e33e77833254d9c9b90c3cef7303b"
+dims = 768
+document_prefix = "title: none | text: "
+query_prefix = "task: search result | query: "
+```
+
+The operator must bind that alias to `google/embeddinggemma-2` at the specified
+revision, tokenizer, pooling, precision and dimension policy. The alias and
+salt record that assertion; Kata does not verify the server's weights. Use
+mean pooling including prompts, L2 normalization, and bfloat16 or float32
+activations, rather than float16. Configure the server to accept literal client
+prompts without adding them again. Kata sends text only; this transport does
+not enable image, audio or video input.
+
+The model card recommends `title: {title}` when a title exists. Affixes are
+fixed text, so every chunk uses `title: none` and the issue title stays at the
+start of the first chunk's text.
+
+The server must enforce the shared 8192-token input window, including prompt
+overhead. Kata's `model_context_tokens` and `max_batch_tokens` only bound batch
+packing; they do not tokenize or enforce admission for an individual input.
+Character-based chunk limits also do not establish that token bound.
+
+Kata does not download weights or configure the serving runtime.
+
+For 512, 256 or 128 dimensions, set `dims` to that width and
+`request_dimensions = true` only if the server supports explicit truncation
+followed by L2 renormalization. Both queries and documents must use the same
+width. A server that returns the wrong width is rejected. Changing these
+settings requires restart and backfill before semantic search can resume.
+
+### Credentials and batching
+
 Credential resolution uses `api_key` > `api_key_file` > `api_key_env`. The first
 selected source wins. If its file is missing, unreadable, or empty, or its
 environment variable is unset or empty, Kata makes no provider requests and
@@ -721,10 +924,12 @@ back to a lower-priority source.
 Key files must use an absolute path or start with `~/`, which expands to the
 daemon user's home directory (not `KATA_HOME`). Other relative paths are
 rejected. Symlinks are accepted, and there is no parent-directory ownership or
-permission policy. Kata validates the opened file: it must be regular and, on
-Unix, owned by the daemon's effective user with no group/world permissions
-(`chmod 600`). Files larger than 64 KiB are refused, and reads are bounded to
-enforce that limit. File contents are trimmed, including a trailing newline.
+permission policy. Kata validates the opened file: it must be regular and
+owned by the daemon's effective user. On Unix, group/world permissions are
+rejected (`chmod 600`). On Windows, the file ACL must restrict access to the
+current user, SYSTEM, and Administrators. Files larger than 64 KiB are refused,
+and reads are bounded to enforce that limit. File contents are trimmed,
+including a trailing newline.
 
 Kata resolves the selected credential once at startup and once per
 `kata daemon reload`. Reload wakes the embedding backlog; changes to provider
@@ -764,6 +969,8 @@ example Ollama on loopback) so issue text never leaves the host. Embeddings are
 local derived state and **do not federate**: each daemon embeds only what it
 stores, and no vectors are sent to or pulled from federated hubs.
 
+### Index freshness
+
 The daemon keeps the index fresh on its own: a background reconciler embeds new
 and edited issues within seconds, and `kata` reports its state under
 `embeddings` in the `/health` response (`configured`, `last_success_at`,
@@ -796,13 +1003,14 @@ until they are embedded. Search degrades (labeled in `auto` mode, 503 for
 explicit `--hybrid`/`--semantic`) when the vector leg is unavailable or when
 bounded label filtering exhausts its candidate ceiling before filling the
 requested result limit. Unavailability includes the period before any index is
-activated (fresh vector storage before the first reconcile cycle) and model
-changes while the replacement index is still backfilling.
+activated (fresh vector storage before the first reconcile cycle) and embedding
+configuration changes while the replacement index is still backfilling.
 
-Changing `model`, `dims`, or `fingerprint_salt` builds a new index generation
+Changing `model`, `dims`, `fingerprint_salt`, any literal affix, or
+`request_dimensions` builds a new index generation
 in the background and cuts over automatically once it finishes filling.
 During that backfill the vector leg is unavailable (queries embedded under
-the new model cannot be scored against the old generation's vectors), so
+the new configuration cannot be scored against the old generation's vectors), so
 `auto` searches degrade to labeled lexical results and explicit
 `--hybrid`/`--semantic` requests return 503 until the cutover.
 
@@ -821,11 +1029,120 @@ collection is disabled and PostHog person-profile processing is explicitly
 turned off. Use distinct `daemon_active` counts for active-install reporting;
 `daemon_started` is only for startup-volume diagnostics.
 
+A new database records when it created its `instance_uid` in the `meta` key
+`instance_created_at`. Events from a database with this time carry
+`install_age_hours`, the whole hours since that time, so reports can tell new
+installs from established ones. Databases created before kata recorded this
+time send events without it.
+
+The web UI reports an anonymous `app_opened` event to the daemon serving it
+when the page loads, and again on the first window focus of each later UTC day.
+Background refreshes of an open tab do not count. The daemon sends the event to
+PostHog with the same fields, distinct ID, and opt-out as its own events; the
+browser never contacts PostHog. Only signed-in sessions with write access on the
+serving daemon are counted.
+
+Closing a tab, leaving it hidden for 30 minutes, or exiting `kata tui` reports
+`session_ended` with `surface` and `duration_bucket`: `under_1m`, `1_to_5m`,
+`5_to_30m`, or `over_30m`. A browser visit adds up visible time across tab
+switches and excludes hidden time. Terminal exit reporting uses the daemon that
+recorded the opening, including after switching the displayed daemon. Delivery
+is best effort and waits at most one second; a rejected authentication request
+drops the event.
+
+`app_opened` carries one property, `surface`, set to `web`, `tui` or `cli`; the
+daemon drops any other value. `kata tui` reports `app_opened` to the daemon it
+connects to, after connecting. Switching daemons inside the TUI sends nothing
+more.
+
+CLI commands such as `kata create` or `kata list` that a person runs in a
+terminal report `app_opened` with `surface: cli` to the daemon they used,
+after the command succeeds. Each `KATA_HOME` reports at most once per UTC day
+to each daemon: once the daemon accepts the report, kata records the day under
+`<KATA_HOME>/telemetry/` and later commands that day send nothing. A report
+that fails is retried by the next command. The report never starts a daemon,
+waits at most one second and prints nothing.
+
+Only a command whose standard output is a terminal counts, because agents and
+scripts read kata's output through a pipe. Probes and local commands such as
+`kata health` or `kata version` send nothing. Agent output mode (`--agent`,
+`--format agent`) and `kata mcp serve` startup send nothing either. An agent that
+runs commands in a terminal without `--agent` counts like a person.
+
+Each client's event goes through the daemon it used, so that daemon's install
+ID and its `KATA_TELEMETRY_ENABLED` setting apply, and a TUI or CLI pointed at
+a shared daemon counts that daemon's install. The daemon forwards one
+`app_opened` per surface per UTC day and forgets what it sent when it restarts,
+so a restart can send another the same day. Delivery is best effort and never
+shows in the terminal; count distinct installs rather than events.
+
+The daemon records completed issue creates and closes as `issue_created` and
+`issue_closed` with only `surface: web`, `tui`, or `cli`. Each committed mutation
+that changes the issue counts, including repeated actions in one day. Web issue
+removal counts as a close. Idempotent replays, reused creates, already-closed
+issues, failed writes, reopen operations, and TUI undo actions count nothing.
+
+Clients send their surface in the optional `X-Kata-Surface` mutation header.
+CLI actions follow the terminal and agent-mode rules above. Missing or
+unsupported surfaces drop the count and leave the mutation alone. Issue-scoped
+credentials count nothing. The daemon enqueues the event in memory after the
+write commits, so action telemetry adds no request or wait to a command, TUI
+exit, or web action. Delivery is best effort and follows the daemon's opt-out
+setting. Older daemons ignore the header and record no action count.
+
+Each admitted MCP tool call, including section loaders and tool errors, reports
+`agent_active` to its daemon. Initialization and tool listing send nothing.
+Successful contract hooks report the same event. Attention hooks and daemon hook
+children report only when their operation resolves a daemon target.
+Human-triggered hook children count as hook execution.
+Hook installation, status, and version/help probes without a resolved daemon target
+send nothing. Generic hook children report only to the daemon their command used;
+contract hooks may discover an existing daemon without starting one.
+Ordinary piped commands send nothing.
+
+MCP reporting uses one worker with a queue of 128 observations. Tool calls enqueue
+without waiting; overflow and queued work at shutdown are discarded. Each report
+has a separate one-second deadline. Shutdown cancels and joins the worker. CLI
+hook reports wait at most 100 ms after successful execution; slow remote transports
+may drop observations. Delivery is best
+effort and preserves command output, results, and exit status.
+
+The daemon counts these observations for each install and UTC day. It sends one
+`agent_active` with `call_count_bucket: 1-10`, then `agent_call_count` at calls 11
+and 101 with `11-100` and `over-100`. Later calls in the same bucket send nothing.
+Use distinct `agent_active` installs for daily hook and MCP activity, separately
+from human `app_opened` counts. The highest bucket across both agent event names
+gives the total observed daily volume.
+
+The daemon keeps the day, count capped at 101, and last queued threshold in a
+private instance-specific file under `<KATA_HOME>/telemetry/`, so ordinary restarts
+retain the count. Counts cover one serving daemon per install; daemons sharing a
+PostgreSQL database do not combine their local counters. A new UTC day resets the
+count on the next observation. Failed captures retry on the next observation.
+A delayed first capture still sends `agent_active` with `1-10`, followed by the
+currently reached companion bucket. Reports share the daemon's install ID and
+opt-out and send buckets rather than exact counts, paths, tool names, or actor
+names.
+
+The browser and TUI also report `screen_viewed` when a screen opens. The fixed
+names are `inbox`, `today`, `delegated`, `scheduled`, `issues`, `logbook`,
+`issue`, `graph`, `credentials`, `projects`, `daemons`, `federation`, `help`,
+and `empty`. Unknown names are dropped. `surface` is `web` or `tui`, whichever
+reaches that screen first that UTC day. One claim per screen in the database
+shares the daily count across interfaces, hosts, and daemon restarts. These `meta`
+rows appear in `kata export` output. A changed
+installation ID starts a fresh count. Later-day browser focus or terminal input
+counts another visit. Delivery is best effort; a rejected enqueue can retry.
+
 Disable telemetry with:
 
 ```sh
 export KATA_TELEMETRY_ENABLED=0
 ```
+
+`false`, `no`, and `off` also disable telemetry, ignoring surrounding
+whitespace and letter case. The global `TELEMETRY_ENABLED` switch and
+`kit_posthog_disabled` build tag retain their existing behavior.
 
 Release archives and package-manager builds use this same telemetry policy.
 Installing through Homebrew, a `.deb`, an `.rpm`, or another package manager
@@ -855,3 +1172,37 @@ are resolved once per run and sent only to the configured API origin through
 `X-API-Key`; redirects are rejected. Binding requests cannot choose origins or
 credentials. Workspace, project UUID, cutoff, interval, and title presentation
 are set with `kata sync plane enable`. See [Plane sync](../operations/plane-sync.md).
+
+## Linear credentials
+
+`[linear_sync]` selects daemon-owned `token_env` (default `KATA_LINEAR_TOKEN`)
+and `auth_type` (`api-key` by default, or `oauth` for an operator-managed Bearer
+token). All requests use `https://api.linear.app/graphql`; redirects are rejected.
+Kata does not refresh OAuth tokens. Workspace/team UUIDs and an optional project
+restriction belong to `kata sync linear enable`. See
+[Linear sync](../operations/linear-sync.md).
+
+## Twenty credentials
+
+`[twenty_sync]` selects daemon-owned `api_origin`, `web_origin`, and `token_env`.
+Defaults are `https://api.twenty.com`, `https://app.twenty.com`, and
+`KATA_TWENTY_TOKEN`. Self-hosted HTTPS root origins and literal-loopback HTTP are
+supported; an omitted web origin follows a custom API origin. Keys are captured
+once per run and used as bearer credentials only at the configured API origin;
+redirects are rejected. Enable discovers the key's workspace UUID. Bindings
+cannot choose origins, keys, or another workspace. See [Twenty sync](../operations/twenty-sync.md).
+
+## Todoist credentials
+
+`[todoist_sync]` selects daemon-owned `token_env` (default `KATA_TODOIST_TOKEN`).
+Requests use `https://api.todoist.com`; the only alternative `api_origin` is
+literal loopback HTTP for isolated fixture APIs. Tokens are captured once per
+run, redirects are rejected, and binding requests cannot select credentials or
+origins. Configure the selected project and history floor with
+`kata sync todoist enable`. See [Todoist sync](../operations/todoist-sync.md).
+
+`[ticktick_sync]` selects the daemon-owned token environment variable through
+`token_env`, initially `KATA_TICKTICK_TOKEN`. The API origin is fixed to
+`https://api.ticktick.com`. Project scope and status direction are selected with
+`kata sync ticktick enable`. See [TickTick sync](../operations/ticktick-sync.md)
+for access tokens, field ownership, completion writeback, and recovery limits.

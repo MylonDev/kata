@@ -16,6 +16,7 @@ import (
 	"go.kenn.io/kata/internal/db"
 	"go.kenn.io/kata/internal/metadata"
 	"go.kenn.io/kata/internal/teammate"
+	"go.kenn.io/kata/internal/transcript"
 	katauid "go.kenn.io/kata/internal/uid"
 )
 
@@ -123,6 +124,9 @@ func (d *Store) createProjectWithUID(ctx context.Context, name, projectUID, acto
 	})
 	if err != nil {
 		return db.Project{}, db.Event{}, err
+	}
+	if err := bumpProjectAccess(ctx, tx); err != nil {
+		return db.Project{}, db.Event{}, fmt.Errorf("advance project access revision after project creation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return db.Project{}, db.Event{}, err
@@ -275,8 +279,10 @@ func (d *Store) listProjects(ctx context.Context, includeArchived bool) ([]db.Pr
 	} else {
 		q += ` WHERE name <> ?`
 	}
+	args := []any{db.SystemProjectName}
+	q += " AND " + authorizedProjectPredicate(ctx, "uid", &args)
 	q += ` ORDER BY id ASC`
-	rows, err := d.QueryContext(ctx, q, db.SystemProjectName)
+	rows, err := d.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -511,31 +517,16 @@ func scanAlias(r rowScanner) (db.ProjectAlias, error) {
 	return a, nil
 }
 
-// readCreatedIssue is a package-local test seam for post-commit readback
-// failures; production uses IssueByID directly through this function.
-var readCreatedIssue = func(ctx context.Context, d *Store, issueID int64) (db.Issue, error) {
-	return d.IssueByID(ctx, issueID)
-}
-
 // CreateIssue inserts an issue, applies optional initial labels/links/owner,
 // and appends a single issue.created event whose payload describes the initial
-// state. All mutation steps run in one TX.
+// state. All mutation steps and the returned row's read run in one TX, so the
+// caller sees exactly what its authorized transaction committed.
 func (d *Store) CreateIssue(ctx context.Context, p db.CreateIssueParams) (db.Issue, db.Event, error) {
-	var issueID int64
+	var issue db.Issue
 	var evt db.Event
 	err := d.RetryTransient(ctx, func() error {
 		var err error
-		issueID, evt, err = d.createIssue(ctx, p)
-		return err
-	})
-	if err != nil {
-		return db.Issue{}, db.Event{}, err
-	}
-
-	var issue db.Issue
-	err = d.RetryTransient(ctx, func() error {
-		var err error
-		issue, err = readCreatedIssue(ctx, d, issueID)
+		issue, evt, err = d.createIssue(ctx, p)
 		return err
 	})
 	if err != nil {
@@ -544,7 +535,30 @@ func (d *Store) CreateIssue(ctx context.Context, p db.CreateIssueParams) (db.Iss
 	return issue, evt, nil
 }
 
-func (d *Store) createIssue(ctx context.Context, p db.CreateIssueParams) (int64, db.Event, error) {
+func (d *Store) createIssue(ctx context.Context, p db.CreateIssueParams) (db.Issue, db.Event, error) {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return db.Issue{}, db.Event{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	id, event, err := d.createIssueTx(ctx, tx, p)
+	if err != nil {
+		return db.Issue{}, db.Event{}, err
+	}
+	issue, err := issueByIDTx(ctx, tx, id)
+	if err != nil {
+		return db.Issue{}, db.Event{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return db.Issue{}, db.Event{}, err
+	}
+	return issue, event, nil
+}
+
+func (d *Store) createIssueTx(ctx context.Context, tx *sql.Tx, p db.CreateIssueParams) (int64, db.Event, error) {
+	if err := db.CheckRecurringMetadataWrite(ctx, p.Metadata); err != nil {
+		return 0, db.Event{}, err
+	}
 	// Normalize: a non-nil pointer to "" is treated as no owner. The payload
 	// already drops empty owner via omitempty; making the DB column NULL keeps
 	// the two views consistent and matches the unassigned semantic.
@@ -587,12 +601,6 @@ func (d *Store) createIssue(ctx context.Context, p db.CreateIssueParams) (int64,
 	if err != nil {
 		return 0, db.Event{}, err
 	}
-
-	tx, err := d.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		return 0, db.Event{}, fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	var (
 		projectName string
@@ -689,12 +697,18 @@ func (d *Store) createIssue(ctx context.Context, p db.CreateIssueParams) (int64,
 		if l.ExpectedProjectUID != "" && toProjectUID != l.ExpectedProjectUID {
 			return 0, db.Event{}, db.ErrInitialLinkTargetNotFound
 		}
+		if err := db.CheckProjectAccessTransaction(ctx, tx, toProjectUID); err != nil {
+			return 0, db.Event{}, err
+		}
 		if projectArchived {
 			return 0, db.Event{}, &db.LinkTargetArchivedError{Number: toIssueID, ShortID: toIssueShortID, Project: toProjectName}
 		}
 		resolvedTargets = append(resolvedTargets, createdLinkTarget{UID: toIssueUID, ShortID: toIssueShortID})
 		// Canonical ordering is a storage concern: the payload reports the
 		// peer's stable identity (UID + short_id), not a numeric ref.
+		if err := ensureRelayLinkBoundaryTx(ctx, tx, issueID, toIssueID); err != nil {
+			return 0, db.Event{}, err
+		}
 		fromID, toID := issueID, toIssueID
 		if l.Incoming && l.Type == "blocks" {
 			// "this issue is blocked by N" → link runs FROM N TO new issue.
@@ -745,9 +759,6 @@ func (d *Store) createIssue(ctx context.Context, p db.CreateIssueParams) (int64,
 		return 0, db.Event{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, db.Event{}, fmt.Errorf("commit: %w", err)
-	}
 	return issueID, evt, nil
 }
 
@@ -769,6 +780,9 @@ type createdLinkOut struct {
 }
 
 type issueSnapshotComment struct {
+	ReplyToUID string `json:"reply_to_uid,omitempty"`
+	ReplyKind  string `json:"reply_kind,omitempty"`
+	EditedAt   string `json:"edited_at,omitempty"`
 	CommentUID string `json:"comment_uid"`
 	Author     string `json:"author"`
 	Teammate   string `json:"teammate,omitempty"`
@@ -904,13 +918,15 @@ func sortStrings(in []string) {
 // (The destructive ladder and the idempotency-deleted path both need to see
 // soft-deleted rows, which is why the filter isn't pushed into the query.)
 func (d *Store) IssueByID(ctx context.Context, id int64) (db.Issue, error) {
-	row := d.QueryRowContext(ctx, issueSelect+` WHERE i.id = ?`, id)
-	return scanIssue(row)
+	args := []any{id}
+	query := issueSelect + ` WHERE i.id=? AND ` + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	row := d.QueryRowContext(ctx, query, args...)
+	return scanIssue(ctx, row)
 }
 
 func issueByIDTx(ctx context.Context, tx *sql.Tx, id int64) (db.Issue, error) {
 	row := tx.QueryRowContext(ctx, issueSelect+` WHERE i.id = ?`, id)
-	return scanIssue(row)
+	return scanIssue(ctx, row)
 }
 
 // IssueByShortID resolves a project-scoped short_id. Soft-deleted issues are
@@ -922,8 +938,10 @@ func (d *Store) IssueByShortID(ctx context.Context, projectID int64, shortID str
 	if include == db.IncludeDeletedNo {
 		q += ` AND i.deleted_at IS NULL`
 	}
-	row := d.QueryRowContext(ctx, q, projectID, shortID)
-	return scanIssue(row)
+	args := []any{projectID, shortID}
+	q += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	row := d.QueryRowContext(ctx, q, args...)
+	return scanIssue(ctx, row)
 }
 
 // IssueByUID fetches an issue by stable UID. Soft-deleted rows are returned
@@ -934,8 +952,48 @@ func (d *Store) IssueByUID(ctx context.Context, issueUID string, include db.Incl
 	if include == db.IncludeDeletedNo {
 		q += ` AND i.deleted_at IS NULL`
 	}
-	row := d.QueryRowContext(ctx, q, issueUID)
-	return scanIssue(row)
+	args := []any{issueUID}
+	q += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	row := d.QueryRowContext(ctx, q, args...)
+	return scanIssue(ctx, row)
+}
+
+// IssuesByUIDs applies IssueByUID's filters to a batch, keyed by UID.
+func (d *Store) IssuesByUIDs(ctx context.Context, issueUIDs []string, include db.IncludeDeleted) (map[string]db.Issue, error) {
+	out := make(map[string]db.Issue, len(issueUIDs))
+	const chunk = 500
+	for start := 0; start < len(issueUIDs); start += chunk {
+		slice := issueUIDs[start:min(start+chunk, len(issueUIDs))]
+		args := make([]any, 0, len(slice))
+		for _, uid := range slice {
+			args = append(args, uid)
+		}
+		q := issueSelect + ` WHERE i.uid IN (` + strings.TrimSuffix(strings.Repeat("?,", len(slice)), ",") + `)`
+		if include == db.IncludeDeletedNo {
+			q += ` AND i.deleted_at IS NULL`
+		}
+		q += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+		if err := d.scanIssuesByUID(ctx, out, q, args); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (d *Store) scanIssuesByUID(ctx context.Context, out map[string]db.Issue, q string, args []any) error {
+	rows, err := d.QueryContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("issues by uids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		issue, err := scanIssue(ctx, rows)
+		if err != nil {
+			return err
+		}
+		out[issue.UID] = issue
+	}
+	return rows.Err()
 }
 
 // IssueQualifiersByUIDs resolves each requested issue UID to its current
@@ -1000,15 +1058,18 @@ func (d *Store) IssueUIDPrefixMatch(ctx context.Context, prefix string, limit in
 	if include == db.IncludeDeletedNo {
 		q += ` AND i.deleted_at IS NULL`
 	}
+	args := []any{prefix}
+	q += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
 	q += ` ORDER BY i.uid ASC LIMIT ?`
-	rows, err := d.QueryContext(ctx, q, prefix, limit)
+	args = append(args, limit)
+	rows, err := d.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("issue uid prefix match: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []db.Issue
 	for rows.Next() {
-		issue, err := scanIssue(rows)
+		issue, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1017,16 +1078,23 @@ func (d *Store) IssueUIDPrefixMatch(ctx context.Context, prefix string, limit in
 	return out, rows.Err()
 }
 
-// ListIssues returns issues in the given project, excluding soft-deleted rows.
-func (d *Store) ListIssues(ctx context.Context, p db.ListIssuesParams) ([]db.Issue, error) {
+func buildListIssuesQuery(ctx context.Context, p db.ListIssuesParams, count bool) (string, []any) {
 	var q strings.Builder
-	q.WriteString(issueSelect + ` WHERE i.project_id = ? AND i.deleted_at IS NULL`)
+	selection := issueSelect
+	if count {
+		selection = `SELECT COUNT(*) FROM issues i JOIN projects p ON p.id = i.project_id`
+	}
+	q.WriteString(selection + ` WHERE i.project_id = ? AND i.deleted_at IS NULL`)
 	args := []any{p.ProjectID}
 	appendAllowedIssueIDsSQLite(&q, &args, p.AllowedIssueIDs)
+	q.WriteString(" AND " + authorizedIssuePredicate(ctx, "i.project_id", &args))
 	appendIssueScopeSQLite(&q, &args, p.IssueScope)
 	if p.Status != "" {
 		q.WriteString(` AND i.status = ?`)
 		args = append(args, p.Status)
+	}
+	if p.PriorityUnset {
+		q.WriteString(` AND i.priority IS NULL`)
 	}
 	if p.Priority != nil {
 		q.WriteString(` AND i.priority = ?`)
@@ -1075,22 +1143,44 @@ func (d *Store) ListIssues(ctx context.Context, p db.ListIssuesParams) ([]db.Iss
 			args = append(args, mf.Key)
 		}
 	}
+	if count {
+		return q.String(), args
+	}
+	if p.After != nil {
+		op := "<"
+		if p.OldestFirst {
+			op = ">"
+		}
+		key := creationKeySQL("i")
+		fmt.Fprintf(&q, " AND (%s %s ? OR (%s = ? AND i.id %s ?))", key, op, key, op)
+		stamp := p.After.CreatedAt.UTC().Format(creationCursorTimeFormat)
+		args = append(args, stamp, stamp, p.After.ID)
+	}
+
 	if p.OldestFirst {
-		q.WriteString(` ORDER BY i.created_at ASC, i.id ASC`)
+		q.WriteString(" ORDER BY " + creationKeySQL("i") + " ASC, i.id ASC")
+	} else if p.CreatedFirst {
+		q.WriteString(" ORDER BY " + creationKeySQL("i") + " DESC, i.id DESC")
 	} else {
 		q.WriteString(` ORDER BY i.updated_at DESC, i.id DESC`)
 	}
 	if p.Limit > 0 {
 		fmt.Fprintf(&q, ` LIMIT %d`, p.Limit)
 	}
-	rows, err := d.QueryContext(ctx, q.String(), args...)
+	return q.String(), args
+}
+
+// ListIssues returns active issues matching the project filters and requested order.
+func (d *Store) ListIssues(ctx context.Context, p db.ListIssuesParams) ([]db.Issue, error) {
+	query, args := buildListIssuesQuery(ctx, p, false)
+	rows, err := d.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []db.Issue
 	for rows.Next() {
-		i, err := scanIssue(rows)
+		i, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1099,16 +1189,41 @@ func (d *Store) ListIssues(ctx context.Context, p db.ListIssuesParams) ([]db.Iss
 	return out, rows.Err()
 }
 
-// ListAllIssues returns issues across one or every project, excluding
-// soft-deleted rows. Ordering is (created_at DESC, id DESC) per #22 — a
-// stable "newest first" feed across projects, distinct from the per-project
-// endpoint's updated_at-DESC ordering which leads with recent activity.
-func (d *Store) ListAllIssues(ctx context.Context, p db.ListAllIssuesParams) ([]db.Issue, error) {
+// CountIssues counts matching project issues independently of the cursor and limit.
+func (d *Store) CountIssues(ctx context.Context, p db.ListIssuesParams) (int64, error) {
+	query, args := buildListIssuesQuery(ctx, p, true)
+	var total int64
+	err := d.QueryRowContext(ctx, query, args...).Scan(&total)
+	return total, err
+}
+
+func buildListAllIssuesQuery(ctx context.Context, p db.ListAllIssuesParams, count bool) (string, []any) {
 	var q strings.Builder
-	q.WriteString(issueSelect + ` WHERE i.deleted_at IS NULL AND p.deleted_at IS NULL`)
+	selection := issueSelect
+	if count {
+		selection = `SELECT COUNT(*) FROM issues i JOIN projects p ON p.id = i.project_id`
+	}
+	q.WriteString(selection + ` WHERE i.deleted_at IS NULL AND p.deleted_at IS NULL`)
 	var args []any
 	appendAllowedIssueIDsSQLite(&q, &args, p.AllowedIssueIDs)
+	q.WriteString(" AND " + authorizedIssuePredicate(ctx, "i.project_id", &args))
 	appendIssueScopeSQLite(&q, &args, p.IssueScope)
+	if p.AllowedProjectIDs != nil {
+		if len(p.AllowedProjectIDs) == 0 {
+			q.WriteString(` AND 0=1`)
+		} else {
+			q.WriteString(` AND i.project_id IN (`)
+			for i, id := range p.AllowedProjectIDs {
+				if i > 0 {
+					q.WriteString(",")
+				}
+				q.WriteString("?")
+				args = append(args, id)
+			}
+			q.WriteString(")")
+		}
+	}
+
 	if p.ProjectID > 0 {
 		q.WriteString(` AND i.project_id = ?`)
 		args = append(args, p.ProjectID)
@@ -1116,6 +1231,9 @@ func (d *Store) ListAllIssues(ctx context.Context, p db.ListAllIssuesParams) ([]
 	if p.Status != "" {
 		q.WriteString(` AND i.status = ?`)
 		args = append(args, p.Status)
+	}
+	if p.PriorityUnset {
+		q.WriteString(` AND i.priority IS NULL`)
 	}
 	if p.Priority != nil {
 		q.WriteString(` AND i.priority = ?`)
@@ -1152,22 +1270,44 @@ func (d *Store) ListAllIssues(ctx context.Context, p db.ListAllIssuesParams) ([]
 			args = append(args, mf.Key)
 		}
 	}
+	if count {
+		return q.String(), args
+	}
+	if p.After != nil {
+		op := "<"
+		if p.OldestFirst {
+			op = ">"
+		}
+		key := creationKeySQL("i")
+		fmt.Fprintf(&q, " AND (%s %s ? OR (%s = ? AND i.id %s ?))", key, op, key, op)
+		stamp := p.After.CreatedAt.UTC().Format(creationCursorTimeFormat)
+		args = append(args, stamp, stamp, p.After.ID)
+	}
+
 	if p.OldestFirst {
-		q.WriteString(` ORDER BY i.created_at ASC, i.id ASC`)
+		q.WriteString(" ORDER BY " + creationKeySQL("i") + " ASC, i.id ASC")
+	} else if p.CreatedFirst || p.After != nil {
+		q.WriteString(" ORDER BY " + creationKeySQL("i") + " DESC, i.id DESC")
 	} else {
 		q.WriteString(` ORDER BY i.created_at DESC, i.id DESC`)
 	}
 	if p.Limit > 0 {
 		fmt.Fprintf(&q, ` LIMIT %d`, p.Limit)
 	}
-	rows, err := d.QueryContext(ctx, q.String(), args...)
+	return q.String(), args
+}
+
+// ListAllIssues returns active issues across the permitted projects in creation order.
+func (d *Store) ListAllIssues(ctx context.Context, p db.ListAllIssuesParams) ([]db.Issue, error) {
+	query, args := buildListAllIssuesQuery(ctx, p, false)
+	rows, err := d.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list all issues: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []db.Issue
 	for rows.Next() {
-		i, err := scanIssue(rows)
+		i, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1176,21 +1316,17 @@ func (d *Store) ListAllIssues(ctx context.Context, p db.ListAllIssuesParams) ([]
 	return out, rows.Err()
 }
 
-// readCreatedComment is a package-local test seam for post-commit readback
-// failures; production uses the direct comment query through this function.
-var readCreatedComment = func(ctx context.Context, d *Store, commentID int64) (db.Comment, error) {
-	c, err := scanComment(d.QueryRowContext(ctx,
-		`SELECT id, uid, issue_id, author, body, created_at, teammate FROM comments WHERE id = ?`,
-		commentID))
-	if err != nil {
-		return db.Comment{}, fmt.Errorf("read comment: %w", err)
-	}
-	return c, nil
+// CountAllIssues counts permitted matching issues independently of the cursor and limit.
+func (d *Store) CountAllIssues(ctx context.Context, p db.ListAllIssuesParams) (int64, error) {
+	query, args := buildListAllIssuesQuery(ctx, p, true)
+	var total int64
+	err := d.QueryRowContext(ctx, query, args...).Scan(&total)
+	return total, err
 }
 
 func commentByUIDForIssueTx(ctx context.Context, tx *sql.Tx, issueID int64, commentUID string) (db.Comment, error) {
 	c, err := scanComment(tx.QueryRowContext(ctx,
-		`SELECT id, uid, issue_id, author, body, created_at, teammate FROM comments WHERE issue_id = ? AND uid = ?`,
+		`SELECT `+commentColumns+` FROM comments WHERE issue_id = ? AND uid = ?`,
 		issueID, commentUID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Comment{}, db.ErrNotFound
@@ -1203,7 +1339,7 @@ func commentByUIDForIssueTx(ctx context.Context, tx *sql.Tx, issueID int64, comm
 
 func commentByIDTx(ctx context.Context, tx *sql.Tx, commentID int64) (db.Comment, error) {
 	c, err := scanComment(tx.QueryRowContext(ctx,
-		`SELECT id, uid, issue_id, author, body, created_at, teammate FROM comments WHERE id = ?`,
+		`SELECT `+commentColumns+` FROM comments WHERE id = ?`,
 		commentID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Comment{}, db.ErrNotFound
@@ -1220,18 +1356,11 @@ func (d *Store) CreateComment(ctx context.Context, p db.CreateCommentParams) (db
 	if err := teammate.Validate(p.Teammate); err != nil {
 		return db.Comment{}, db.Event{}, err
 	}
-	commentID, evt, err := retryWrite2(ctx, d, func() (int64, db.Event, error) {
-		return d.createComment(ctx, p)
-	})
-	if err != nil {
+	if err := db.ValidateCommentReply("", p.ReplyToUID, p.ReplyKind); err != nil {
 		return db.Comment{}, db.Event{}, err
 	}
-
-	var comment db.Comment
-	err = d.RetryTransient(ctx, func() error {
-		var err error
-		comment, err = readCreatedComment(ctx, d, commentID)
-		return err
+	comment, evt, err := retryWrite2(ctx, d, func() (db.Comment, db.Event, error) {
+		return d.createComment(ctx, p)
 	})
 	if err != nil {
 		return db.Comment{}, db.Event{}, err
@@ -1239,50 +1368,64 @@ func (d *Store) CreateComment(ctx context.Context, p db.CreateCommentParams) (db
 	return comment, evt, nil
 }
 
-func (d *Store) createComment(ctx context.Context, p db.CreateCommentParams) (int64, db.Event, error) {
+// createComment returns the committed row read inside the same transaction,
+// so the caller sees exactly what its authorized transaction committed.
+func (d *Store) createComment(ctx context.Context, p db.CreateCommentParams) (db.Comment, db.Event, error) {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, db.Event{}, err
+		return db.Comment{}, db.Event{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	projectUID, err := issueProjectUIDTx(ctx, tx, p.IssueID)
+	if err != nil {
+		return db.Comment{}, db.Event{}, err
+	}
+	if err := db.CheckProjectAccessTransaction(ctx, tx, projectUID); err != nil {
+		return db.Comment{}, db.Event{}, err
+	}
 	issue, projectName, err := lookupIssueForEvent(ctx, tx, p.IssueID)
 	if err != nil {
-		return 0, db.Event{}, err
+		return db.Comment{}, db.Event{}, err
 	}
 	if err := ensureProjectWritableTx(ctx, tx, issue.ProjectID); err != nil {
-		return 0, db.Event{}, err
+		return db.Comment{}, db.Event{}, err
 	}
 	p.Author, err = d.effectiveLocalMutationActorTx(ctx, tx, issue.ProjectID, p.Author)
 	if err != nil {
-		return 0, db.Event{}, err
+		return db.Comment{}, db.Event{}, err
 	}
 
 	commentUID, err := katauid.New()
 	if err != nil {
-		return 0, db.Event{}, fmt.Errorf("generate comment uid: %w", err)
+		return db.Comment{}, db.Event{}, fmt.Errorf("generate comment uid: %w", err)
+	}
+	if err := validateLocalCommentReplyTx(ctx, tx, commentUID, p, issue); err != nil {
+		return db.Comment{}, db.Event{}, err
 	}
 	commentAt := time.Now().UTC()
 	createdAt := commentAt.Format(sqliteCommentTimeFormat)
 	mutationAt := commentAt.Format(sqliteTimeFormat)
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO comments(uid, issue_id, author, body, created_at, teammate) VALUES(?, ?, ?, ?, ?, NULLIF(?, ''))`,
-		commentUID, p.IssueID, p.Author, p.Body, createdAt, p.Teammate)
+		`INSERT INTO comments(uid, issue_id, author, body, created_at, teammate, reply_to_uid, reply_kind) VALUES(?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))`,
+		commentUID, p.IssueID, p.Author, p.Body, createdAt, p.Teammate, p.ReplyToUID, p.ReplyKind)
 	if err != nil {
-		return 0, db.Event{}, fmt.Errorf("insert comment: %w", err)
+		return db.Comment{}, db.Event{}, fmt.Errorf("insert comment: %w", err)
 	}
 	commentID, err := res.LastInsertId()
 	if err != nil {
-		return 0, db.Event{}, err
+		return db.Comment{}, db.Event{}, err
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE issues SET updated_at = ? WHERE id = ?`,
 		mutationAt, p.IssueID); err != nil {
-		return 0, db.Event{}, fmt.Errorf("touch issue: %w", err)
+		return db.Comment{}, db.Event{}, fmt.Errorf("touch issue: %w", err)
 	}
 
 	payloadBytes, err := json.Marshal(struct {
+		ReplyToUID             string `json:"reply_to_uid,omitempty"`
+		ReplyKind              string `json:"reply_kind,omitempty"`
 		CommentUID             string `json:"comment_uid"`
 		Author                 string `json:"author"`
 		Teammate               string `json:"teammate,omitempty"`
@@ -1291,6 +1434,7 @@ func (d *Store) createComment(ctx context.Context, p db.CreateCommentParams) (in
 		IdempotencyKey         string `json:"idempotency_key,omitempty"`
 		IdempotencyFingerprint string `json:"idempotency_fingerprint,omitempty"`
 	}{
+		ReplyToUID: p.ReplyToUID, ReplyKind: p.ReplyKind,
 		CommentUID:             commentUID,
 		Author:                 p.Author,
 		Teammate:               p.Teammate,
@@ -1300,24 +1444,40 @@ func (d *Store) createComment(ctx context.Context, p db.CreateCommentParams) (in
 		IdempotencyFingerprint: p.IdempotencyFingerprint,
 	})
 	if err != nil {
-		return 0, db.Event{}, fmt.Errorf("marshal comment payload: %w", err)
+		return db.Comment{}, db.Event{}, fmt.Errorf("marshal comment payload: %w", err)
+	}
+	var relatedID *int64
+	if p.ReplyToUID != "" {
+		var targetIssueID int64
+		err := tx.QueryRowContext(ctx, `SELECT i.id FROM comments c JOIN issues i ON i.id=c.issue_id WHERE c.uid=? AND i.project_id=?`, p.ReplyToUID, issue.ProjectID).Scan(&targetIssueID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return db.Comment{}, db.Event{}, fmt.Errorf("lookup reply target issue: %w", err)
+		}
+		if err == nil && targetIssueID != issue.ID {
+			relatedID = &targetIssueID
+		}
 	}
 	evt, err := d.insertEventTx(ctx, tx, eventInsert{
-		ProjectID:   issue.ProjectID,
-		ProjectName: projectName,
-		IssueID:     &issue.ID,
-		Type:        "issue.commented",
-		Actor:       p.Author,
-		Payload:     string(payloadBytes),
+		ProjectID:      issue.ProjectID,
+		ProjectName:    projectName,
+		IssueID:        &issue.ID,
+		RelatedIssueID: relatedID,
+		Type:           "issue.commented",
+		Actor:          p.Author,
+		Payload:        string(payloadBytes),
 	})
 	if err != nil {
-		return 0, db.Event{}, err
+		return db.Comment{}, db.Event{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, db.Event{}, err
+	comment, err := commentByIDTx(ctx, tx, commentID)
+	if err != nil {
+		return db.Comment{}, db.Event{}, err
 	}
-	return commentID, evt, nil
+	if err := tx.Commit(); err != nil {
+		return db.Comment{}, db.Event{}, err
+	}
+	return comment, evt, nil
 }
 
 // EditComment overwrites one comment body in place and emits
@@ -1380,7 +1540,7 @@ func (d *Store) editComment(ctx context.Context, p db.EditCommentParams) (db.Com
 
 	editedAt := nowTimestamp()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE comments SET body = ? WHERE id = ?`, p.Body, comment.ID); err != nil {
+		`UPDATE comments SET body = ?, edited_at = ? WHERE id = ?`, p.Body, editedAt, comment.ID); err != nil {
 		return db.Comment{}, nil, false, fmt.Errorf("update comment: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -1425,7 +1585,7 @@ func (d *Store) editComment(ctx context.Context, p db.EditCommentParams) (db.Com
 // (created_at, then id as a stable tiebreaker).
 func (d *Store) CommentsByIssue(ctx context.Context, issueID int64) ([]db.Comment, error) {
 	rows, err := d.QueryContext(ctx,
-		`SELECT id, uid, issue_id, author, body, created_at, teammate FROM comments WHERE issue_id = ?`, issueID)
+		`SELECT `+commentColumns+` FROM comments WHERE issue_id = ?`, issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -1450,16 +1610,58 @@ func (d *Store) CommentsByIssue(ctx context.Context, issueID int64) ([]db.Commen
 	return out, nil
 }
 
+// CommentIssueIDsByUIDs maps existing comment UIDs to their owning issue IDs.
+func (d *Store) CommentIssueIDsByUIDs(ctx context.Context, uids []string) (map[string]int64, error) {
+	out := make(map[string]int64, len(uids))
+	const chunk = 500
+	for i := 0; i < len(uids); i += chunk {
+		end := min(i+chunk, len(uids))
+		slice := uids[i:end]
+		placeholders := make([]string, len(slice))
+		args := make([]any, 0, len(slice))
+		for j, commentUID := range slice {
+			placeholders[j] = "?"
+			args = append(args, commentUID)
+		}
+		rows, err := d.QueryContext(ctx,
+			`SELECT uid, issue_id FROM comments WHERE uid IN (`+strings.Join(placeholders, ",")+")", args...)
+		if err != nil {
+			return nil, fmt.Errorf("comment issue ids by uids: %w", err)
+		}
+		for rows.Next() {
+			var commentUID string
+			var issueID int64
+			if err := rows.Scan(&commentUID, &issueID); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan comment issue id: %w", err)
+			}
+			out[commentUID] = issueID
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("iterate comment issue ids: %w", err)
+		}
+		_ = rows.Close()
+	}
+	return out, nil
+}
+
 func scanComment(row rowScanner) (db.Comment, error) {
 	var comment db.Comment
-	var teammate sql.NullString
+	var teammate, replyTo, replyKind sql.NullString
+	var editedAt sql.NullTime
 	if err := row.Scan(
 		&comment.ID, &comment.UID, &comment.IssueID, &comment.Author, &comment.Body,
-		&comment.CreatedAt, &teammate,
+		&comment.CreatedAt, &teammate, &replyTo, &replyKind, &editedAt, &comment.AttributionView,
 	); err != nil {
 		return db.Comment{}, err
 	}
 	comment.Teammate = teammate.String
+	comment.ReplyToUID, comment.ReplyKind = replyTo.String, replyKind.String
+	if editedAt.Valid {
+		comment.EditedAt = &editedAt.Time
+	}
+	comment.SourceFallback(comment.Author, comment.Teammate)
 	return comment, nil
 }
 
@@ -1578,19 +1780,21 @@ func (d *Store) closeIssueGuarded(
 		*parentSIDForPayload = parentSID
 	}
 	payloadBytes, err := json.Marshal(struct {
-		Reason                 string        `json:"reason"`
-		ClosedAt               string        `json:"closed_at"`
-		Message                string        `json:"message,omitempty"`
-		Evidence               []db.Evidence `json:"evidence,omitempty"`
-		ParentUID              *string       `json:"parent_uid,omitzero"`
-		ParentShortID          *string       `json:"parent_short_id,omitzero"`
-		IdempotencyKey         string        `json:"idempotency_key,omitempty"`
-		IdempotencyFingerprint string        `json:"idempotency_fingerprint,omitempty"`
+		Reason                 string                 `json:"reason"`
+		ClosedAt               string                 `json:"closed_at"`
+		Message                string                 `json:"message,omitempty"`
+		Evidence               []db.Evidence          `json:"evidence,omitempty"`
+		Transcript             *transcript.Transcript `json:"transcript,omitempty"`
+		ParentUID              *string                `json:"parent_uid,omitzero"`
+		ParentShortID          *string                `json:"parent_short_id,omitzero"`
+		IdempotencyKey         string                 `json:"idempotency_key,omitempty"`
+		IdempotencyFingerprint string                 `json:"idempotency_fingerprint,omitempty"`
 	}{
 		Reason:                 p.Reason,
 		ClosedAt:               closedAt,
 		Message:                p.Message,
 		Evidence:               p.Evidence,
+		Transcript:             p.Transcript,
 		ParentUID:              parentUIDForPayload,
 		ParentShortID:          parentSIDForPayload,
 		IdempotencyKey:         p.IdempotencyKey,
@@ -1909,31 +2113,33 @@ func joinComma(parts []string) string {
 // lifecycle mutations (close/reopen/edit/comment) cannot operate on hidden
 // rows; callers see ErrNotFound for both nonexistent and deleted issues.
 func lookupIssueForEvent(ctx context.Context, tx *sql.Tx, issueID int64) (db.Issue, string, error) {
-	const q = `
-		SELECT i.id, i.uid, i.project_id, p.uid, i.short_id, i.title, i.body, i.status,
-		       i.closed_reason, i.owner, i.assignment_expires_on, i.priority, i.author, i.metadata, i.revision,
-		       i.recurrence_id, i.occurrence_key,
-		       i.created_at, i.updated_at, i.closed_at, i.deleted_at, p.name
+	const q = `SELECT ` + issueColumns + `, p.name
 		FROM issues i
 		JOIN projects p ON p.id = i.project_id
 		WHERE i.id = ? AND i.deleted_at IS NULL AND p.deleted_at IS NULL`
 	var i db.Issue
 	var projectName string
 	err := tx.QueryRowContext(ctx, q, issueID).
-		Scan(&i.ID, &i.UID, &i.ProjectID, &i.ProjectUID, &i.ShortID, &i.Title, &i.Body, &i.Status, &i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author, &i.Metadata, &i.Revision, &i.RecurrenceID, &i.OccurrenceKey, &i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &projectName)
+		Scan(&i.ID, &i.UID, &i.ProjectID, &i.ProjectUID, &i.ShortID, &i.Title, &i.Body, &i.Status, &i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author, &i.Metadata, &i.Revision, &i.RecurrenceID, &i.OccurrenceKey, &i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &i.AttributionView, &projectName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Issue{}, "", db.ErrNotFound
 	}
 	if err != nil {
 		return db.Issue{}, "", fmt.Errorf("lookup issue: %w", err)
 	}
+	if err := db.CheckProjectAccessTransaction(ctx, tx, i.ProjectUID); err != nil {
+		return db.Issue{}, "", err
+	}
 	if err := ensureProjectWritableTx(ctx, tx, i.ProjectID); err != nil {
 		return db.Issue{}, "", err
 	}
+	handle, _ := db.IssueTeammate(i.Metadata)
+	i.SourceFallback(i.Author, handle)
+	db.RecordExposedIssue(ctx, i.ID)
 	return i, projectName, nil
 }
 
-const issueColumns = `i.id, i.uid, i.project_id, p.uid, i.short_id, i.title, i.body, i.status, i.closed_reason, i.owner, i.assignment_expires_on, i.priority, i.author, i.metadata, i.revision, i.recurrence_id, i.occurrence_key, i.created_at, i.updated_at, i.closed_at, i.deleted_at`
+const issueColumns = `i.id, i.uid, i.project_id, p.uid, i.short_id, i.title, i.body, i.status, i.closed_reason, i.owner, i.assignment_expires_on, i.priority, i.author, i.metadata, i.revision, i.recurrence_id, i.occurrence_key, i.created_at, i.updated_at, i.closed_at, i.deleted_at, ` + issueAttributionColumn
 
 const issueSelect = `SELECT ` + issueColumns + ` FROM issues i JOIN projects p ON p.id = i.project_id`
 
@@ -1942,28 +2148,34 @@ const scheduledIssueSelect = `SELECT ` + issueColumns + `, schedule_recurrence.t
 	JOIN projects p ON p.id = i.project_id
 	LEFT JOIN recurrences schedule_recurrence ON schedule_recurrence.id = i.recurrence_id`
 
-func scanIssue(r rowScanner) (db.Issue, error) {
+func scanIssue(ctx context.Context, r rowScanner) (db.Issue, error) {
 	var i db.Issue
-	err := r.Scan(&i.ID, &i.UID, &i.ProjectID, &i.ProjectUID, &i.ShortID, &i.Title, &i.Body, &i.Status, &i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author, &i.Metadata, &i.Revision, &i.RecurrenceID, &i.OccurrenceKey, &i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt)
+	err := r.Scan(&i.ID, &i.UID, &i.ProjectID, &i.ProjectUID, &i.ShortID, &i.Title, &i.Body, &i.Status, &i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author, &i.Metadata, &i.Revision, &i.RecurrenceID, &i.OccurrenceKey, &i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &i.AttributionView)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Issue{}, db.ErrNotFound
 	}
 	if err != nil {
 		return db.Issue{}, fmt.Errorf("scan issue: %w", err)
 	}
+	handle, _ := db.IssueTeammate(i.Metadata)
+	i.SourceFallback(i.Author, handle)
+	db.RecordExposedIssue(ctx, i.ID)
 	return i, nil
 }
 
-func scanScheduledIssue(r rowScanner) (db.Issue, string, error) {
+func scanScheduledIssue(ctx context.Context, r rowScanner) (db.Issue, string, error) {
 	var i db.Issue
 	var recurrenceTimezone sql.NullString
-	err := r.Scan(&i.ID, &i.UID, &i.ProjectID, &i.ProjectUID, &i.ShortID, &i.Title, &i.Body, &i.Status, &i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author, &i.Metadata, &i.Revision, &i.RecurrenceID, &i.OccurrenceKey, &i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &recurrenceTimezone)
+	err := r.Scan(&i.ID, &i.UID, &i.ProjectID, &i.ProjectUID, &i.ShortID, &i.Title, &i.Body, &i.Status, &i.ClosedReason, &i.Owner, &i.AssignmentExpiresOn, &i.Priority, &i.Author, &i.Metadata, &i.Revision, &i.RecurrenceID, &i.OccurrenceKey, &i.CreatedAt, &i.UpdatedAt, &i.ClosedAt, &i.DeletedAt, &i.AttributionView, &recurrenceTimezone)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Issue{}, "", db.ErrNotFound
 	}
 	if err != nil {
 		return db.Issue{}, "", fmt.Errorf("scan scheduled issue: %w", err)
 	}
+	handle, _ := db.IssueTeammate(i.Metadata)
+	i.SourceFallback(i.Author, handle)
+	db.RecordExposedIssue(ctx, i.ID)
 	return i, recurrenceTimezone.String, nil
 }
 
@@ -1984,6 +2196,7 @@ type eventInsert struct {
 	HLC               *db.EventHLCTimestamp
 	CreatedAt         string
 	ContentHash       string
+	SkipRelay         bool
 }
 
 // UpdateOwner sets issues.owner to the new value and emits the matching
@@ -2248,6 +2461,7 @@ func (d *Store) ReadyIssues(ctx context.Context, projectID int64, limit int, fil
 	if at.IsZero() {
 		at = time.Now()
 	}
+	args := []any{projectID}
 	var q strings.Builder
 	q.WriteString(scheduledIssueSelect + `
 		WHERE i.project_id = ? AND i.status = 'open' AND i.deleted_at IS NULL
@@ -2257,11 +2471,12 @@ func (d *Store) ReadyIssues(ctx context.Context, projectID int64, limit int, fil
 		    JOIN issues blocker ON blocker.id = l.from_issue_id
 		    JOIN projects bp ON bp.id = blocker.project_id
 		    WHERE l.type = 'blocks' AND l.to_issue_id = i.id
+		      AND ` + authorizedLinkPredicate(ctx, "l.", &args) + `
 		      AND blocker.status = 'open' AND blocker.deleted_at IS NULL
 		      AND bp.deleted_at IS NULL
 		  )`)
-	args := []any{projectID}
 	appendAllowedIssueIDsSQLite(&q, &args, filter.AllowedIssueIDs)
+	q.WriteString(" AND " + authorizedIssuePredicate(ctx, "i.project_id", &args))
 	appendIssueScopeSQLite(&q, &args, filter.IssueScope)
 
 	// Apply owner filters
@@ -2293,7 +2508,7 @@ func (d *Store) ReadyIssues(ctx context.Context, projectID int64, limit int, fil
 	defer func() { _ = rows.Close() }()
 	var out []db.Issue
 	for rows.Next() {
-		i, recurrenceTimezone, err := scanScheduledIssue(rows)
+		i, recurrenceTimezone, err := scanScheduledIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -2332,6 +2547,7 @@ func (d *Store) ReadyIssuesGlobal(ctx context.Context, limit int, filter db.Read
 	if at.IsZero() {
 		at = time.Now()
 	}
+	args := []any{}
 	var q strings.Builder
 	q.WriteString(`SELECT ` + issueColumns + `, p.name AS project_name, schedule_recurrence.timezone
 		FROM issues i
@@ -2345,11 +2561,12 @@ func (d *Store) ReadyIssuesGlobal(ctx context.Context, limit int, filter db.Read
 		    JOIN issues blocker ON blocker.id = l.from_issue_id
 		    JOIN projects bp ON bp.id = blocker.project_id
 		    WHERE l.type = 'blocks' AND l.to_issue_id = i.id
+		      AND ` + authorizedLinkPredicate(ctx, "l.", &args) + `
 		      AND blocker.status = 'open' AND blocker.deleted_at IS NULL
 		      AND bp.deleted_at IS NULL
 		  )`)
-	args := []any{}
 	appendAllowedIssueIDsSQLite(&q, &args, filter.AllowedIssueIDs)
+	q.WriteString(" AND " + authorizedIssuePredicate(ctx, "i.project_id", &args))
 	appendIssueScopeSQLite(&q, &args, filter.IssueScope)
 
 	// Apply owner filters (same semantics as ReadyIssues)
@@ -2388,7 +2605,7 @@ func (d *Store) ReadyIssuesGlobal(ctx context.Context, limit int, filter db.Read
 			&r.ShortID, &r.Title, &r.Body, &r.Status,
 			&r.ClosedReason, &r.Owner, &r.AssignmentExpiresOn, &r.Priority, &r.Author,
 			&r.Metadata, &r.Revision, &r.RecurrenceID, &r.OccurrenceKey,
-			&r.CreatedAt, &r.UpdatedAt, &r.ClosedAt, &r.DeletedAt,
+			&r.CreatedAt, &r.UpdatedAt, &r.ClosedAt, &r.DeletedAt, &r.AttributionView,
 			&r.ProjectName, &recurrenceTimezone,
 		); err != nil {
 			return nil, fmt.Errorf("scan ready global issue: %w", err)
@@ -2406,6 +2623,9 @@ func (d *Store) ReadyIssuesGlobal(ctx context.Context, limit int, filter db.Read
 			r.Owner = nil
 			r.AssignmentExpiresOn = nil
 		}
+		handle, _ := db.IssueTeammate(r.Metadata)
+		r.SourceFallback(r.Author, handle)
+		db.RecordExposedIssue(ctx, r.ID)
 		out = append(out, r)
 		if limit > 0 && len(out) == limit {
 			break
@@ -2509,6 +2729,18 @@ func (d *Store) insertEventTx(ctx context.Context, tx *sql.Tx, in eventInsert) (
 	if err != nil {
 		return db.Event{}, fmt.Errorf("read event: %w", err)
 	}
+	if in.ContentHash == "" {
+		if err := d.recordNativeRootAttributionTx(ctx, tx, e); err != nil {
+			return db.Event{}, err
+		}
+	} else if err := d.attachStoredRootReceiptTx(ctx, tx, e); err != nil {
+		return db.Event{}, err
+	}
+	if !in.SkipRelay {
+		if err := d.queueRelaySourceTx(ctx, tx, e); err != nil {
+			return db.Event{}, err
+		}
+	}
 	return e, nil
 }
 
@@ -2579,14 +2811,16 @@ func eventIssueUIDTx(ctx context.Context, tx *sql.Tx, issueID *int64, issueUID *
 // LEFT JOINed from the live `issues` table so mutation responses (which
 // scan their inserted event through this query) carry the same wire shape
 // as events streamed via poll/SSE.
-const eventSelectByID = `SELECT e.id, e.uid, e.origin_instance_uid, e.project_id, p.uid, e.project_name,
+const eventSelectByID = eventSelect + `
+ WHERE e.id = ?`
+
+const eventSelect = `SELECT e.id, e.uid, e.origin_instance_uid, e.project_id, p.uid, e.project_name,
        e.issue_id, e.issue_uid, i.short_id, e.related_issue_id, e.related_issue_uid, ri.short_id,
        e.type, e.actor, e.payload, e.hlc_physical_ms, e.hlc_counter, e.content_hash, e.created_at
   FROM events e
   JOIN projects p ON p.id = e.project_id
   LEFT JOIN issues i ON i.id = e.issue_id OR (e.issue_id IS NULL AND e.issue_uid IS NOT NULL AND i.uid = e.issue_uid)
-  LEFT JOIN issues ri ON ri.id = e.related_issue_id OR (e.related_issue_id IS NULL AND e.related_issue_uid IS NOT NULL AND ri.uid = e.related_issue_uid)
- WHERE e.id = ?`
+  LEFT JOIN issues ri ON ri.id = e.related_issue_id OR (e.related_issue_id IS NULL AND e.related_issue_uid IS NOT NULL AND ri.uid = e.related_issue_uid)`
 
 func stringPtrValue(s *string) any {
 	if s == nil {

@@ -1324,6 +1324,12 @@ func checkExternalRootSafetyInvariants(t *testing.T, store db.Storage, backend B
 		assert.Empty(t, edited.Teammate)
 		require.NotNil(t, editEvent)
 		assert.Equal(t, "issue.comment_edited", editEvent.Type)
+		require.NotNil(t, edited.EditedAt)
+		var editPayload struct {
+			EditedAt time.Time `json:"edited_at"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(editEvent.Payload), &editPayload))
+		require.True(t, edited.EditedAt.Equal(editPayload.EditedAt))
 
 		_, _, _, err = store.ApplyExternalRootProjection(ctx, db.ExternalRootProjectionParams{
 			BindingID: fixture.binding.ID, ClaimToken: "wrong-claim",
@@ -1631,7 +1637,9 @@ func checkExternalRootSafetyInvariants(t *testing.T, store db.Storage, backend B
 		inserted, err := store.InsertRemoteEvent(ctx, spokeProject.ID, remoteEventFromStored(baseline[0]))
 		require.NoError(t, err)
 		require.True(t, inserted)
-		require.NoError(t, store.MaterializeFederatedProject(ctx, spokeProject.ID))
+		if err := store.MaterializeFederatedProject(ctx, spokeProject.ID); err != nil {
+			require.NoError(t, err)
+		}
 
 		observedAt := time.Date(2026, 8, 20, 12, 0, 0, 123456789, time.UTC)
 		binding, bindingEvent, err := store.CreateExternalRootBinding(ctx, db.CreateExternalRootBindingParams{

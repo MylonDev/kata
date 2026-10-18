@@ -18,7 +18,7 @@ import (
 
 const issueColumns = `i.id, i.uid, i.project_id, p.uid, i.short_id, i.title, i.body, i.status,
        i.closed_reason, i.owner, i.assignment_expires_on, i.priority, i.author, i.metadata, i.revision, i.recurrence_id,
-       i.occurrence_key, i.created_at, i.updated_at, i.closed_at, i.deleted_at`
+       i.occurrence_key, i.created_at, i.updated_at, i.closed_at, i.deleted_at, ` + issueAttributionColumn
 
 const issueSelect = `SELECT ` + issueColumns + `
   FROM issues i JOIN projects p ON p.id = i.project_id`
@@ -66,6 +66,9 @@ type createdLink struct {
 }
 
 type issueSnapshotComment struct {
+	ReplyToUID string `json:"reply_to_uid,omitempty"`
+	ReplyKind  string `json:"reply_kind,omitempty"`
+	EditedAt   string `json:"edited_at,omitempty"`
 	CommentUID string `json:"comment_uid"`
 	Author     string `json:"author"`
 	Teammate   string `json:"teammate,omitempty"`
@@ -76,6 +79,20 @@ type issueSnapshotComment struct {
 // CreateIssue persists the initial issue projection and its creation event in
 // one serializable transaction.
 func (s *Store) CreateIssue(ctx context.Context, params db.CreateIssueParams) (db.Issue, db.Event, error) {
+	var issue db.Issue
+	var event db.Event
+	err := s.withSerializableTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		issue, event, err = s.createIssueTx(ctx, tx, params)
+		return err
+	})
+	return issue, event, err
+}
+
+func (s *Store) createIssueTx(ctx context.Context, tx *sql.Tx, params db.CreateIssueParams) (db.Issue, db.Event, error) {
+	if err := db.CheckRecurringMetadataWrite(ctx, params.Metadata); err != nil {
+		return db.Issue{}, db.Event{}, err
+	}
 	metadataBlob, err := composeCreateMetadata(params.Metadata)
 	if err != nil {
 		return db.Issue{}, db.Event{}, err
@@ -95,7 +112,7 @@ func (s *Store) CreateIssue(ctx context.Context, params db.CreateIssueParams) (d
 
 	var issue db.Issue
 	var event db.Event
-	err = s.withSerializableTx(ctx, func(tx *sql.Tx) error {
+	err = func() error {
 		var project db.Project
 		project, err = scanProject(tx.QueryRowContext(ctx,
 			projectSelect+` WHERE id = $1 AND deleted_at IS NULL FOR SHARE`, params.ProjectID))
@@ -169,11 +186,17 @@ func (s *Store) CreateIssue(ctx context.Context, params db.CreateIssueParams) (d
 			if link.ExpectedProjectUID != "" && targetProjectUID != link.ExpectedProjectUID {
 				return db.ErrInitialLinkTargetNotFound
 			}
+			if err := db.CheckProjectAccessTransaction(ctx, tx, targetProjectUID); err != nil {
+				return err
+			}
 			if targetProjectArchived {
 				return &db.LinkTargetArchivedError{Number: targetID, ShortID: targetShortID, Project: targetProjectName}
 			}
 			if targetID == issueID {
 				return db.ErrSelfLink
+			}
+			if err := ensureRelayLinkBoundaryTx(ctx, tx, issueID, targetID); err != nil {
+				return err
 			}
 			fromID, toID := issueID, targetID
 			fromUID, toUID := issueUID, targetUID
@@ -213,15 +236,17 @@ func (s *Store) CreateIssue(ctx context.Context, params db.CreateIssueParams) (d
 		if err != nil {
 			return err
 		}
-		issue, err = scanIssue(tx.QueryRowContext(ctx, issueSelect+` WHERE i.id = $1`, issueID))
+		issue, err = scanIssue(ctx, tx.QueryRowContext(ctx, issueSelect+` WHERE i.id = $1`, issueID))
 		return err
-	})
+	}()
 	return issue, event, err
 }
 
 // IssueByID returns an issue regardless of soft-deletion state.
 func (s *Store) IssueByID(ctx context.Context, id int64) (db.Issue, error) {
-	return scanIssue(s.QueryRowContext(ctx, issueSelect+` WHERE i.id = $1`, id))
+	args := []any{id}
+	query := issueSelect + ` WHERE i.id=$1 AND ` + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	return scanIssue(ctx, s.QueryRowContext(ctx, query, args...))
 }
 
 // IssueByShortID resolves a project-local display identifier.
@@ -230,7 +255,9 @@ func (s *Store) IssueByShortID(ctx context.Context, projectID int64, value strin
 	if include == db.IncludeDeletedNo {
 		query += ` AND i.deleted_at IS NULL`
 	}
-	return scanIssue(s.QueryRowContext(ctx, query, projectID, value))
+	args := []any{projectID, value}
+	query += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	return scanIssue(ctx, s.QueryRowContext(ctx, query, args...))
 }
 
 // IssueByUID resolves a stable issue identifier.
@@ -239,7 +266,36 @@ func (s *Store) IssueByUID(ctx context.Context, uid string, include db.IncludeDe
 	if include == db.IncludeDeletedNo {
 		query += ` AND i.deleted_at IS NULL`
 	}
-	return scanIssue(s.QueryRowContext(ctx, query, uid))
+	args := []any{uid}
+	query += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	return scanIssue(ctx, s.QueryRowContext(ctx, query, args...))
+}
+
+// IssuesByUIDs applies IssueByUID's filters to a batch, keyed by UID.
+func (s *Store) IssuesByUIDs(ctx context.Context, uids []string, include db.IncludeDeleted) (map[string]db.Issue, error) {
+	issues := make(map[string]db.Issue, len(uids))
+	if len(uids) == 0 {
+		return issues, nil
+	}
+	query := issueSelect + ` WHERE i.uid = ANY($1::text[])`
+	if include == db.IncludeDeletedNo {
+		query += ` AND i.deleted_at IS NULL`
+	}
+	args := []any{uids}
+	query += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	rows, err := s.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapSQLError(err, nil)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		issue, err := scanIssue(ctx, rows)
+		if err != nil {
+			return nil, err
+		}
+		issues[issue.UID] = issue
+	}
+	return issues, mapSQLError(rows.Err(), nil)
 }
 
 // IssueUIDPrefixMatch returns deterministic UID-prefix matches.
@@ -256,15 +312,18 @@ func (s *Store) IssueUIDPrefixMatch(
 	if include == db.IncludeDeletedNo {
 		query += ` AND i.deleted_at IS NULL`
 	}
-	query += ` ORDER BY i.uid ASC LIMIT $2`
-	rows, err := s.QueryContext(ctx, query, prefix, limit)
+	args := []any{prefix}
+	query += " AND " + authorizedIssuePredicate(ctx, "i.project_id", &args)
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY i.uid ASC LIMIT $%d`, len(args))
+	rows, err := s.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, mapSQLError(err, nil)
 	}
 	defer func() { _ = rows.Close() }()
 	var issues []db.Issue
 	for rows.Next() {
-		issue, err := scanIssue(rows)
+		issue, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -273,8 +332,7 @@ func (s *Store) IssueUIDPrefixMatch(
 	return issues, mapSQLError(rows.Err(), nil)
 }
 
-// ListIssues returns active issues matching the project filters.
-func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]db.Issue, error) {
+func buildListIssuesQuery(ctx context.Context, params db.ListIssuesParams, count bool) (string, []any) {
 	conditions := []string{"i.project_id = $1", "i.deleted_at IS NULL"}
 	args := []any{params.ProjectID}
 	add := func(predicate string, value any) {
@@ -283,12 +341,16 @@ func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]d
 	}
 	appendAllowedIssueIDsPostgres(&conditions, &args, params.AllowedIssueIDs)
 	var scopeFilter strings.Builder
+	scopeFilter.WriteString(" AND " + authorizedIssuePredicate(ctx, "i.project_id", &args))
 	appendIssueScopePostgres(&scopeFilter, &args, params.IssueScope)
 	if scopeFilter.Len() > 0 {
 		conditions = append(conditions, strings.TrimPrefix(scopeFilter.String(), " AND "))
 	}
 	if params.Status != "" {
 		add("i.status = $%d", params.Status)
+	}
+	if params.PriorityUnset {
+		conditions = append(conditions, "i.priority IS NULL")
 	}
 	if params.Priority != nil {
 		add("i.priority = $%d", *params.Priority)
@@ -324,7 +386,22 @@ func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]d
 			conditions = append(conditions, fmt.Sprintf(`i.metadata::jsonb ? $%d`, keyPosition))
 		}
 	}
+	if count {
+		return `SELECT COUNT(*) FROM issues i JOIN projects p ON p.id = i.project_id WHERE ` + strings.Join(conditions, " AND "), args
+	}
+	if params.After != nil {
+		op := "<"
+		if params.OldestFirst {
+			op = ">"
+		}
+		args = append(args, formatStoredTime(params.After.CreatedAt), params.After.ID)
+		conditions = append(conditions, fmt.Sprintf("(i.created_at, i.id) %s ($%d, $%d)", op, len(args)-1, len(args)))
+	}
+
 	order := `i.updated_at DESC, i.id DESC`
+	if params.CreatedFirst {
+		order = `i.created_at DESC, i.id DESC`
+	}
 	if params.OldestFirst {
 		order = `i.created_at ASC, i.id ASC`
 	}
@@ -333,6 +410,12 @@ func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]d
 		args = append(args, params.Limit)
 		query += fmt.Sprintf(` LIMIT $%d`, len(args))
 	}
+	return query, args
+}
+
+// ListIssues returns active issues matching the project filters and requested order.
+func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]db.Issue, error) {
+	query, args := buildListIssuesQuery(ctx, params, false)
 	rows, err := s.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, mapSQLError(err, nil)
@@ -340,7 +423,7 @@ func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]d
 	defer func() { _ = rows.Close() }()
 	var issues []db.Issue
 	for rows.Next() {
-		issue, err := scanIssue(rows)
+		issue, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -352,8 +435,15 @@ func (s *Store) ListIssues(ctx context.Context, params db.ListIssuesParams) ([]d
 	return issues, nil
 }
 
-// ListAllIssues returns a newest-first cross-project issue page.
-func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams) ([]db.Issue, error) {
+// CountIssues counts matching project issues independently of the cursor and limit.
+func (s *Store) CountIssues(ctx context.Context, params db.ListIssuesParams) (int64, error) {
+	query, args := buildListIssuesQuery(ctx, params, true)
+	var total int64
+	err := s.QueryRowContext(ctx, query, args...).Scan(&total)
+	return total, err
+}
+
+func buildListAllIssuesQuery(ctx context.Context, params db.ListAllIssuesParams, count bool) (string, []any) {
 	conditions := []string{"i.deleted_at IS NULL", "p.deleted_at IS NULL"}
 	var args []any
 	add := func(predicate string, value any) {
@@ -362,15 +452,32 @@ func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams
 	}
 	appendAllowedIssueIDsPostgres(&conditions, &args, params.AllowedIssueIDs)
 	var scopeFilter strings.Builder
+	scopeFilter.WriteString(" AND " + authorizedIssuePredicate(ctx, "i.project_id", &args))
 	appendIssueScopePostgres(&scopeFilter, &args, params.IssueScope)
 	if scopeFilter.Len() > 0 {
 		conditions = append(conditions, strings.TrimPrefix(scopeFilter.String(), " AND "))
 	}
+	if params.AllowedProjectIDs != nil {
+		if len(params.AllowedProjectIDs) == 0 {
+			conditions = append(conditions, "FALSE")
+		} else {
+			var slots []string
+			for _, id := range params.AllowedProjectIDs {
+				args = append(args, id)
+				slots = append(slots, fmt.Sprintf("$%d", len(args)))
+			}
+			conditions = append(conditions, "i.project_id IN ("+strings.Join(slots, ",")+")")
+		}
+	}
+
 	if params.ProjectID > 0 {
 		add("i.project_id = $%d", params.ProjectID)
 	}
 	if params.Status != "" {
 		add("i.status = $%d", params.Status)
+	}
+	if params.PriorityUnset {
+		conditions = append(conditions, "i.priority IS NULL")
 	}
 	if params.Priority != nil {
 		add("i.priority = $%d", *params.Priority)
@@ -406,6 +513,18 @@ func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams
 			conditions = append(conditions, fmt.Sprintf(`i.metadata::jsonb ? $%d`, keyPosition))
 		}
 	}
+	if count {
+		return `SELECT COUNT(*) FROM issues i JOIN projects p ON p.id = i.project_id WHERE ` + strings.Join(conditions, " AND "), args
+	}
+	if params.After != nil {
+		op := "<"
+		if params.OldestFirst {
+			op = ">"
+		}
+		args = append(args, formatStoredTime(params.After.CreatedAt), params.After.ID)
+		conditions = append(conditions, fmt.Sprintf("(i.created_at, i.id) %s ($%d, $%d)", op, len(args)-1, len(args)))
+	}
+
 	order := `i.created_at DESC, i.id DESC`
 	if params.OldestFirst {
 		order = `i.created_at ASC, i.id ASC`
@@ -415,6 +534,12 @@ func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams
 		args = append(args, params.Limit)
 		query += fmt.Sprintf(` LIMIT $%d`, len(args))
 	}
+	return query, args
+}
+
+// ListAllIssues returns active issues across the permitted projects in creation order.
+func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams) ([]db.Issue, error) {
+	query, args := buildListAllIssuesQuery(ctx, params, false)
 	rows, err := s.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, mapSQLError(err, nil)
@@ -422,13 +547,21 @@ func (s *Store) ListAllIssues(ctx context.Context, params db.ListAllIssuesParams
 	defer func() { _ = rows.Close() }()
 	var issues []db.Issue
 	for rows.Next() {
-		issue, err := scanIssue(rows)
+		issue, err := scanIssue(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
 		issues = append(issues, issue)
 	}
 	return issues, mapSQLError(rows.Err(), nil)
+}
+
+// CountAllIssues counts permitted matching issues independently of the cursor and limit.
+func (s *Store) CountAllIssues(ctx context.Context, params db.ListAllIssuesParams) (int64, error) {
+	query, args := buildListAllIssuesQuery(ctx, params, true)
+	var total int64
+	err := s.QueryRowContext(ctx, query, args...).Scan(&total)
+	return total, err
 }
 
 func (s *Store) resolveShortIDTx(ctx context.Context, tx *sql.Tx, projectID int64, uid, override string) (string, error) {
@@ -542,7 +675,7 @@ func validateInitialLabels(labels []string) error {
 	return nil
 }
 
-// issueDestinations returns the twenty issueSelect destinations in SELECT
+// issueDestinations returns the issueSelect destinations in SELECT
 // order. The two nullable timestamps need caller-owned buffers because
 // storedNullTime cannot be a conversion over *time.Time.
 func issueDestinations(issue *db.Issue, assignmentExpiresOn, closedAt, deletedAt *storedNullTime) []any {
@@ -551,11 +684,11 @@ func issueDestinations(issue *db.Issue, assignmentExpiresOn, closedAt, deletedAt
 		&issue.Title, &issue.Body, &issue.Status, &issue.ClosedReason, &issue.Owner, assignmentExpiresOn,
 		&issue.Priority, &issue.Author, &issue.Metadata, &issue.Revision, &issue.RecurrenceID,
 		&issue.OccurrenceKey, (*storedTime)(&issue.CreatedAt), (*storedTime)(&issue.UpdatedAt),
-		closedAt, deletedAt,
+		closedAt, deletedAt, &issue.AttributionView,
 	}
 }
 
-func scanIssue(row rowScanner) (db.Issue, error) {
+func scanIssue(ctx context.Context, row rowScanner) (db.Issue, error) {
 	var issue db.Issue
 	var assignmentExpiresOn, closedAt, deletedAt storedNullTime
 	err := row.Scan(issueDestinations(&issue, &assignmentExpiresOn, &closedAt, &deletedAt)...)
@@ -568,10 +701,13 @@ func scanIssue(row rowScanner) (db.Issue, error) {
 	issue.AssignmentExpiresOn = assignmentExpiresOn.Time
 	issue.ClosedAt = closedAt.Time
 	issue.DeletedAt = deletedAt.Time
+	handle, _ := db.IssueTeammate(issue.Metadata)
+	issue.SourceFallback(issue.Author, handle)
+	db.RecordExposedIssue(ctx, issue.ID)
 	return issue, nil
 }
 
-func scanScheduledIssue(row rowScanner) (db.Issue, string, error) {
+func scanScheduledIssue(ctx context.Context, row rowScanner) (db.Issue, string, error) {
 	var issue db.Issue
 	var assignmentExpiresOn, closedAt, deletedAt storedNullTime
 	var recurrenceTimezone sql.NullString
@@ -586,5 +722,8 @@ func scanScheduledIssue(row rowScanner) (db.Issue, string, error) {
 	issue.AssignmentExpiresOn = assignmentExpiresOn.Time
 	issue.ClosedAt = closedAt.Time
 	issue.DeletedAt = deletedAt.Time
+	handle, _ := db.IssueTeammate(issue.Metadata)
+	issue.SourceFallback(issue.Author, handle)
+	db.RecordExposedIssue(ctx, issue.ID)
 	return issue, recurrenceTimezone.String, nil
 }

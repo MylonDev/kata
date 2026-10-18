@@ -1,7 +1,7 @@
 ---
 title: Model Context Protocol server
 description: Configure Kata's MCP server and use its typed issue, administration, and event tools.
-last_edited: 2026-09-20
+last_edited: 2026-10-17
 ---
 
 # Model Context Protocol server
@@ -74,6 +74,13 @@ reads; the token value does not appear in the process arguments. Every HTTP
 listener requires this inbound bearer, including a loopback listener. This
 credential protects the MCP listener and is separate from the daemon
 credential that the Kata process uses for its own API calls.
+
+Use `--http-token-file /run/secrets/mcp-token` to read the inbound bearer from
+an owner-only file instead. It wins over `--http-token-env`; a missing,
+unreadable, insecure, or empty selected file fails without falling back. The
+[daemon secret-file restrictions](configuration.md#daemon-config) apply.
+Both token-source flags require `--http`. The MCP listener does not inherit the
+daemon's generated owner token automatically.
 
 Loopback listeners require the exact configured Host and reject cross-origin
 requests. A non-loopback listener additionally requires
@@ -166,42 +173,101 @@ The MCP server still starts against its documented baseline daemon. A
 mutating and returns a tool error explaining the API requirement against an older daemon.
 Teammate-free calls retain their existing compatibility floor.
 
+With daemon API `0.28.0` or newer, `kata.comment` accepts `reply_to` (a comment
+handle or full UID), `kind` (`reply`, `confirm`, `refute`, or `supersede` (reply is a general response; confirm asserts verification or reproduction)),
+and optional `force` to bypass duplicate-reply rejection. The required
+`idempotency_key` includes the resolved target and kind in its request identity.
+`kata.show` accepts `thread`, `inbound`, `kind`, and `since` selectors and
+returns handles, reply lines, backlinks, and edit state. Thread results retain
+their root within the requested comment limit and report truncation.
+Endpoint identities and backlinks remain within the server's fixed startup
+project UID scope, including after project moves or renames. See the
+[CLI reference](cli.md#issue-lifecycle) for selector behavior, reply validation,
+and handle syntax.
+
 `kata.search` accepts optional `status: "open"` or `status: "closed"`; omit
 it to search both statuses. It combines with labels and the selected search
 mode across every project in scope. Empty and other status values are invalid.
 A status-filtered call checks for API 0.20.0 before searching and returns a
-tool error for an older daemon. Searches without status retain their existing
-compatibility floor.
+tool error for an older daemon. Other searches without status retain their existing
+compatibility floor, except the explicit single-project lexical pagination below.
+
+## Exhaustive issue discovery
+
+`kata.list` returns `issues`, `complete`, `truncated`, and `next_cursor` when
+another page exists. Its default limit is 20 and its maximum is 100. Pass
+`next_cursor` back as `cursor` with the same filters to continue. The default
+`sort: "created"` orders newest creation first; `sort: "oldest"` reverses it.
+Both use the issue ID to break creation-time ties. Ordinary edits do not move
+issues between pages. These calls require daemon API 0.27.0 or newer.
+
+Set `include_total: true` to request `total`, the count of all matching issues
+in the permitted projects, independent of the page limit and cursor. Counts
+use the same filters and authorization scope as the page. `priority_unset: true`
+selects issues with no priority and cannot be combined with `priority` or
+`max_priority`. `priority: null` still means no exact-priority filter.
+`max_priority` excludes issues with no priority.
+
+A single-project `kata.search` with explicit `mode: "lexical"` supports the
+same `cursor`, `next_cursor`, and `complete` fields in oldest-creation order,
+and requires API 0.27.0. Other search modes and multi-project searches use
+ranked, bounded results without continuation. Check `complete` before treating
+those results as exhaustive; truncation or degraded retrieval makes it false.
+On daemons older than API 0.27.0, searches without continuation retain the
+legacy extra-row probe to report truncation.
+
+Cursors are opaque and bound to the daemon, project selection, authorization
+scope, sort, and filters. Changing these rejects a cursor. The page size and
+`include_total` may change. Pages and totals are live reads, not a snapshot:
+restart a scan after changes to filter membership, project membership, deletion,
+or imported creation timestamps. Stop only when `complete` is true.
 
 ## Progressive tool catalog
 
-The initial catalog contains 14 read-only section loaders. Call the applicable
+The initial catalog exposes read-only section loaders. Call the applicable
 loader, then refresh the tool list when the server sends the standard
 `notifications/tools/list_changed` notification. This exposes only the detailed
-typed tools needed for the current task instead of placing all 67 tools in the
+typed tools needed for the current task instead of placing every detailed tool in the
 model context at startup.
 
 | Loader | Detailed tools |
 | --- | --- |
 | `kata.load_issue_discovery` | `kata.search`, `kata.list`, `kata.show`, `kata.ready`, `kata.next`, `kata.labels`, `kata.graph` |
 | `kata.load_issue_mutation` | `kata.create`, `kata.edit`, `kata.comment`, `kata.edit_comment`, `kata.claim`, `kata.set_label`, `kata.set_metadata`, `kata.set_schedule`, `kata.set_deadline`, `kata.move` |
+| `kata.load_coordination` | `kata.assign`, `kata.unassign`, `kata.inbox`, `kata.status` |
 | `kata.load_issue_lifecycle` | `kata.close`, `kata.reopen`, `kata.delete`, `kata.restore`, `kata.purge`, `kata.wait`, `kata.audit_closes` |
 | `kata.load_leases` | `kata.lease_status`, `kata.lease`, `kata.lease_force_release`, `kata.lease_steal` |
-| `kata.load_projects` | `kata.projects`, `kata.project_create`, `kata.project_update`, `kata.project_merge`, `kata.project_remove`, `kata.project_restore`, `kata.project_purge` |
+| `kata.load_projects` | `kata.projects`, `kata.project_show`, `kata.project_create`, `kata.project_update`, `kata.project_merge`, `kata.project_remove`, `kata.project_restore`, `kata.project_purge` |
+| `kata.load_teams` | `kata.teams`, `kata.team_create`, `kata.team_show`, `kata.team_delete`, `kata.team_member_set`, `kata.project_access_show`, `kata.project_access_set` with the same explicit daemon-wide administration capability |
 | `kata.load_tokens` | `kata.tokens`, `kata.token_create`, `kata.token_revoke` when `--enable-token-admin` is set in daemon-wide mode |
 | `kata.load_system` | `kata.system` |
-| `kata.load_federation` | `kata.federation_status`, `kata.federation_enrollment_revoke`, `kata.federation_rebind`, `kata.federation_leave`, `kata.federation_quarantine` |
+| `kata.load_federation` | `kata.federation_bridge_connect`, `kata.federation_bridge_status`, `kata.federation_bridge_disconnect`, `kata.federation_status`, `kata.federation_enrollment_revoke`, `kata.federation_rebind`, `kata.federation_leave`, `kata.federation_quarantine`, `kata.federation_root_key_repin` |
 | `kata.load_sync` | `kata.sync_status`, `kata.sync_update`, `kata.sync_once` |
 | `kata.load_recurrence` | `kata.recurrences`, `kata.recurrence_update`, `kata.recurrence_delete` |
 | `kata.load_activity` | `kata.digest`, `kata.events` |
 | `kata.load_import` | `kata.import_issues` |
 | `kata.load_external_roots` | `kata.connectors`, `kata.connector_fields`, `kata.connector_field_map`, `kata.connector_field_unmap`, `kata.bridge_bind`, `kata.bridge_show`, `kata.bridge_reconcile`, `kata.bridge_pause`, `kata.bridge_resume`, `kata.bridge_resolve_field`, `kata.bridge_resolve_comment`, `kata.bridge_unbind` |
 | `kata.load_storage` | `kata.storage_export`, `kata.storage_import` when host storage is enabled |
+| `kata.load_docs` | `kata.search_docs`, `kata.read_doc` |
 
 `kata.connectors`, `kata.connector_fields`, `kata.connector_field_map`,
 `kata.connector_field_unmap`, and `kata.bridge_bind` require the
 `--all` daemon-wide scope. The remaining bridge tools operate on
 already-bound issues inside the startup project scope.
+
+`kata.inbox` lists open issues that carry a request for one recipient's
+attention, the same requests `kata inbox` shows, and never clears them. It
+reads up to `limit` issues and sets `truncated` when more carry requests.
+`kata.status` reports an issue's owner, hold, and lease along with the actor
+the server writes as. `kata.unassign` accepts `expected_owner` so a handoff
+clears ownership only while that actor still holds the issue.
+`kata.project_show` returns one project's metadata and workspace aliases.
+
+`kata.search_docs` and `kata.read_doc` search and read the user documentation
+bundled into the `kata` binary: the overview, getting-started, guide,
+workflow, reference, and operations pages. Search returns section ids and
+short excerpts; `kata.read_doc` returns one section's Markdown. They work
+without network access and describe the documentation of the running build.
 
 Loaders are idempotent. A loader reports `available=false` when its optional
 startup dependency is absent. Loaded tools keep their individual input and
@@ -273,6 +339,35 @@ Set the key to JSON `null` to remove it. Do not write `someday=false`. The same
 null-removal rule applies to `kata.set_metadata` and other generic metadata
 patches.
 
+## Team and project access administration
+
+Start with `--all --enable-token-admin`, then load `kata.load_teams`.
+The startup capability allows the tools to appear; the daemon still checks the
+credential's owner authority on every call. An ordinary account does not gain
+administrative access through an MCP actor label.
+
+Use `kata.team_create` with `name`, and select teams by `team_uid` for
+`kata.team_show` or `kata.team_delete`. Set membership through
+`kata.team_member_set` with `team_uid`, `member_actor`, and `present`.
+The member actor is the account being enrolled, separate from the authenticated
+actor making the change. Deleting a team keeps its projects restricted.
+
+`kata.project_access_show` reads policy by project name.
+`kata.project_access_set` accepts `project`, `visibility` (`all` or `teams`),
+and `team_uids`. An optional `revision` guards against a stale edit; omitting
+it captures the current revision before the write. A concurrent change returns
+a conflict. See [team visibility](../operations/federation.md#team-visibility)
+for the authorization rules.
+
+## Read relay attribution
+
+Issue and comment results retain `author` and `teammate`, alongside
+`accountable_actor`, `source_actor`, `authority_uid`, and `verification` when
+available. The accountable actor identifies the authenticated account;
+source fields retain original attribution across relay hops. Keep `pending`,
+`verified`, and `legacy` verification states distinct. Source labels do not
+grant access, and an omitted verification field makes no verified claim.
+
 ## Events, tokens, and federation
 
 `kata.events` supports immediate `poll` and bounded `wait` modes. It returns a
@@ -288,6 +383,10 @@ the explicit `--enable-token-admin` startup capability. A default workspace
 server, a one-project server, and a fixed-allowlist server cannot read, create,
 or revoke global daemon tokens.
 
+`kata.token_create` accepts `team_uids` to commit initial account membership
+with token issuance. This works for ordinary and scoped credentials; invalid
+teams leave neither a new token nor partial membership.
+
 In daemon-wide token-admin mode, `kata.token_create` also accepts `issue`,
 `expires_in_seconds`, and `token_file` together. This creates an
 `issue_subtree` credential and writes its plaintext once to a new owner-only
@@ -299,11 +398,39 @@ with an accessible parent. The file belongs to the MCP host. See the
 for consuming it and the [scope guide](../design/issue-scoped-credentials.md)
 for membership and revocation rules.
 
-Federation topology changes stay CLI/operator workflows: MCP has no tool to
-create an enrollment, read its token, or join a hub as a spoke.
+Project bridges require Kata 0.19.0 or later. Use
+[Share projects between hubs](../guide/project-relays.md) for setup and target
+selection. The
+[operator reference](../operations/federation.md#connect-a-project-through-the-daemon-catalog)
+owns the credential, URL and daemon-side source requirements.
+
+MCP can connect one project through a catalog account, but it
+never handles enrollment secrets. It has no tool to issue an enrollment from
+this daemon, accept an enrollment token, or run a full `kata federation join`;
+the bridge's enrollment token stays in the daemon's credential store.
+`kata.federation_bridge_connect` selects `project`, `hub_catalog` and
+`hub_project`; the local daemon uses that catalog account to enroll the narrow
+bridge. `preflight=true` previews without enrollment. Set `serve_downstream=true`
+only when this daemon will also relay the project to its own spokes; it defaults
+to false. `signing_key_id` with `signing_key_env` or an absolute
+`signing_key_file` selects the daemon-side signing source that a
+required-signing hub needs. The local actor comes from MCP startup state.
+`kata.federation_bridge_status` reads one selected project's recorded bridge
+state, including a pending enrollment. `kata.federation_bridge_disconnect`
+accepts `project` and optional `preflight`, preserving local data during detach
+and retaining retry state after interrupted cleanup. `local_only=true` detaches
+from a hub that is gone for good without revoking its grant; the result's
+`warning` says the hub operator must revoke it. These tools require
+`--all` and daemon-owner authority at the API. They return no token values or
+credential inventory and accept no caller-supplied actor or token override.
+
+`kata.federation_root_key_repin` accepts `project`, optional `preflight`,
+optional `previous_key_file`, and optional `strand_relays`, and calls the
+[root key repin endpoint](../operations/federation.md#root-signing-key). It
+requires `--all` and daemon-owner authority at the API.
+
 `kata.federation_status` lists secret-free enrollment records, and
-`kata.federation_enrollment_revoke` can revoke one, but no MCP tool creates,
-accepts, or returns enrollment secrets.
+`kata.federation_enrollment_revoke` can revoke one.
 
 Enabling issue synchronization selects which external repository the daemon's
 configured GitHub credentials read, so `kata.sync_update` with
@@ -357,8 +484,11 @@ available through MCP.
 
 Kata delegates protocol negotiation to the official Go MCP SDK. Stateless
 clients can use `server/discover`; session clients can use `initialize` and
-`notifications/initialized`. JSON-RPC batches are rejected. Each compact JSON
-message is limited to 8 MiB.
+`notifications/initialized`. Stdio accepts both. The Streamable HTTP listener
+keeps sessions so section loaders can send tool-list changes, so it answers
+other calls that carry 2026-07-28 per-request metadata with an
+unsupported-version error listing the session versions it accepts. JSON-RPC
+batches are rejected. Each compact JSON message is limited to 8 MiB.
 
 Kata advertises tools only, including tool-list changes. It does not advertise prompts, resources, roots,
 logging, sampling, subscriptions, or server-to-client requests. Discovery uses

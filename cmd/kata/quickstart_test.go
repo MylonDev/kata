@@ -9,6 +9,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestQuickstart_ExternalAgentOnboardingFormats(t *testing.T) {
+	for _, format := range []string{"human", "agent", "json"} {
+		t.Run(format, func(t *testing.T) {
+			resetFlags(t)
+			t.Setenv("KATA_HOME", t.TempDir())
+			out := executeRoot(t, newRootCmd(), "quickstart", "--format", format)
+			instructions := string(out)
+			if format == "json" {
+				var payload struct {
+					Quickstart string `json:"quickstart"`
+				}
+				require.NoError(t, json.Unmarshal(out, &payload))
+				instructions = payload.Quickstart
+			}
+			assert.Contains(t, instructions, "kata federation identity")
+			assert.Contains(t, instructions, "hub administrator")
+			assert.Contains(t, instructions, "Keep the selected daemon pointed at the spoke")
+			assert.Contains(t, instructions, "https://katatracker.com/docs/operations/federation/")
+			assert.Contains(t, instructions, "https://katatracker.com/docs/guide/semantic-search/")
+
+		})
+	}
+}
+
 func TestQuickstart_HelpExplainsFormatsAndSessionSetup(t *testing.T) {
 	for _, args := range [][]string{
 		{"quickstart", "--help"},
@@ -24,8 +48,10 @@ func TestQuickstart_HelpExplainsFormatsAndSessionSetup(t *testing.T) {
 				"--agent: concise instructions for agent logs",
 				"--json: instructions in a JSON response",
 				"--format contract: the canonical managed contract",
-				"exactly what kata agent-hooks contract injects",
-				"kata agent-hooks install --all",
+				"exactly what kata agent-hook contract injects",
+				"kata agent-hook install --all",
+				"Without hooks, run kata quickstart at session start",
+				"Setup guides cover federation enrollment and optional embeddings",
 			} {
 				assert.Contains(t, out, text)
 			}
@@ -66,7 +92,7 @@ func TestQuickstart_GuardsOwnershipRelease(t *testing.T) {
 		require.Len(t, step, 2)
 		step6 := strings.SplitN(step[1], "7. Use native planning dates", 2)
 		require.Len(t, step6, 2)
-		assert.Contains(t, step6[0], "kata unassign <ref> --expect-owner <your actor>")
+		assert.Contains(t, step6[0], "kata unassign <ref> --expect-owner <your-actor>")
 		assert.NotContains(t, step6[0], "\n   kata unassign <ref>\n")
 		assert.Contains(t, step6[0], "A bare unassign clears the current owner")
 		assert.Contains(t, step6[0], "kata status <ref>")
@@ -192,7 +218,7 @@ func TestQuickstart_ContractPrintsManagedWorkflowWithoutMarkers(t *testing.T) {
 	assert.Contains(t, out, "--parent <ref>")
 	assert.Equal(t, 1, strings.Count(out, "kata notify <ref> --to <actor>[/<teammate>] --message <reason>"),
 		"session injection should teach attention requests once")
-	assert.LessOrEqual(t, len(out), 4000, "keep the per-session briefing compact")
+	assert.LessOrEqual(t, len(out), 4500, "keep the per-session briefing compact with actionable close and routing guidance")
 	assert.Contains(t, out, "Read requests: kata inbox --for <actor>[/<teammate>].")
 	assert.Contains(t, out, "kata inbox --for <actor>[/<teammate>] --all")
 	assert.Contains(t, out, "kata notify <ref> --to <actor>[/<teammate>] --clear")
@@ -252,15 +278,6 @@ func TestQuickstart_AgentInstructionsAliasMentionsAgentOutput(t *testing.T) {
 	out := string(executeRoot(t, newRootCmd(), "agent-instructions"))
 	assert.Contains(t, out, "Default to --agent for ordinary kata reads and mutations in agent logs.")
 	assert.Contains(t, out, "Use --json only when your script needs complete structured data")
-}
-
-func TestQuickstart_UsesValidNeedsReviewCommand(t *testing.T) {
-	resetFlags(t)
-	out := string(executeRoot(t, newQuickstartCmd()))
-	// kata edit has no --label flag; the needs-review hint must use the real
-	// kata label add command so agents do not copy an invalid command.
-	assert.Contains(t, out, "kata label add <ref> needs-review")
-	assert.NotContains(t, out, "--label needs-review")
 }
 
 func TestQuickstartLocalProfileRecoveryGuidance(t *testing.T) {

@@ -4,13 +4,77 @@ import type { ShowIssueResponseBody } from '../../../web/src/lib/api/generated/m
 import { projectIssueDetail } from './projectIssueDetail.js'
 import type { KataIssueDetailWire } from './types.js'
 
-function acceptCanonicalWire(
-  wire: ShowIssueResponseBody,
-): KataIssueDetailWire {
+function acceptCanonicalWire(wire: ShowIssueResponseBody): KataIssueDetailWire {
   return wire
 }
 
 describe('projectIssueDetail', () => {
+  it.each(['verified', 'pending', 'legacy'])(
+    'preserves %s creation attribution without inventing accountability',
+    (verification) => {
+      const wire = {
+        issue: {
+          uid: '01TASK',
+          title: 'Example issue',
+          status: 'open',
+          author: 'source-agent',
+          source_actor: 'source-agent',
+          teammate: 'example-worker',
+          verification,
+          accountable_actor: 'member-one',
+        },
+        comments: [
+          {
+            id: 1,
+            author: 'comment-agent',
+            source_actor: 'comment-agent',
+            teammate: 'comment-worker',
+            verification,
+            accountable_actor: 'member-two',
+            body: 'Example comment',
+            created_at: '2026-08-01T12:00:00Z',
+          },
+        ],
+      }
+      const model = projectIssueDetail(wire)
+      expect(model.issue).toHaveProperty('creation', {
+        verification,
+        sourceActor: 'source-agent',
+        teammate: 'example-worker',
+        ...(verification === 'verified' ? { accountableActor: 'member-one' } : {}),
+      })
+      expect(model.comments[0]).toHaveProperty('creation', {
+        verification,
+        sourceActor: 'comment-agent',
+        teammate: 'comment-worker',
+        ...(verification === 'verified' ? { accountableActor: 'member-two' } : {}),
+      })
+    },
+  )
+
+  it('does not assert proof for older daemons and treats unknown states as legacy', () => {
+    const wire = {
+      issue: {
+        uid: '01TASK',
+        title: 'Example issue',
+        status: 'open',
+        author: 'source-agent',
+      },
+    }
+    expect(projectIssueDetail(wire).issue).not.toHaveProperty('creation')
+    const unknown = {
+      issue: {
+        ...wire.issue,
+        verification: 'unknown',
+        accountable_actor: 'unverified-account',
+      },
+    }
+    expect(projectIssueDetail(unknown).issue).toHaveProperty('creation', {
+      verification: 'legacy',
+      sourceActor: 'source-agent',
+    })
+  })
+
   it('accepts the generated canonical issue-detail response type', () => {
     expect(acceptCanonicalWire).toBeTypeOf('function')
   })
@@ -230,5 +294,39 @@ describe('projectIssueDetail', () => {
     expect(model.children[0]?.title).toBe('Child')
     expect(model.claim?.holder).toBe('agent-a')
     expect(model.pendingClaims[0]?.holder).toBe('agent-b')
+  })
+})
+
+it('preserves canonical comment links and edit state for navigation', () => {
+  const reply = {
+    uid: 'target-comment',
+    issue_uid: 'other-issue',
+    handle: 'abcd:abc123',
+    kind: 'reply',
+    author: 'finder',
+    target_edited: true,
+  }
+  const model = projectIssueDetail({
+    issue: { uid: 'source-issue', title: 'Source', status: 'open' },
+    comments: [
+      {
+        id: 1,
+        uid: 'source-comment',
+        author: 'worker',
+        body: 'Answer',
+        created_at: '2030-01-01T00:00:00Z',
+        handle: 'c:def456',
+        reply,
+        backlinks: [],
+        edited_at: '2030-01-02T00:00:00Z',
+      },
+    ],
+  })
+  expect(model.comments[0]).toMatchObject({
+    uid: 'source-comment',
+    handle: 'c:def456',
+    reply,
+    backlinks: [],
+    editedAt: '2030-01-02T00:00:00Z',
   })
 })

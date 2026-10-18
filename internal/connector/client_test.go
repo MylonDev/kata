@@ -818,7 +818,7 @@ func TestAwaitCommandOutcomeReapWaitIsBounded(t *testing.T) {
 
 func TestConnectorContextErrorKeepsChildTimeoutAfterParentEnds(t *testing.T) {
 	parent, cancelParent := context.WithCancel(t.Context())
-	commandCtx, cancelCommand := context.WithTimeoutCause(
+	commandCtx, cancelCommand := context.WithTimeoutCause( //nolint:kennlint // the deadline is the expected result; the test waits on commandCtx.Done for it
 		parent, time.Nanosecond, errConnectorChildTimeout,
 	)
 	defer cancelCommand()
@@ -854,7 +854,7 @@ func TestProcessClientBoundsTimeoutAndDoesNotExposeSettings(t *testing.T) {
 		ID: "notes", Command: helperBinary(t), Args: []string{"-test.run=^TestProcessClientHelper$"}, TimeoutSeconds: 1,
 		Env: map[string]string{"MODE": "HELPER_MODE"}, Settings: map[string]any{"private": "not-for-errors"},
 	})
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the sleeping helper holds Describe until it fires
 	defer cancel()
 	_, err := client.Describe(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -1673,4 +1673,49 @@ func mustJSON(v any) jsontext.Value {
 		panic(err)
 	}
 	return b
+}
+
+func TestProcessClientPortableTextFields(t *testing.T) {
+	for _, wire := range []string{`{"kind":"string","value":"  café\n東京  "}`, `{"kind":"string"}`, `{"kind":"string_set","values":["","a","東京"]}`, `{"kind":"string_set"}`} {
+		t.Run(wire, func(t *testing.T) {
+			t.Setenv("HELPER_MODE", "raw-result")
+			t.Setenv("HELPER_RESULT", `{"fields":{"field-1":`+wire+`}}`)
+			client := newHelperClient(t, config.ConnectorConfig{ID: "example-instance", Command: helperBinary(t), Args: []string{"-test.run=^TestProcessClientHelper$"}, Env: map[string]string{"MODE": "HELPER_MODE", "RESULT": "HELPER_RESULT"}})
+			result, err := client.ReadFields(t.Context(), protocol.ReadFieldsParams{RootKey: "root-1", FieldIDs: []string{"field-1"}})
+			require.NoError(t, err)
+			encoded, err := json.Marshal(result.Fields["field-1"])
+			require.NoError(t, err)
+			assert.JSONEq(t, wire, string(encoded))
+			_, err = client.WriteFields(t.Context(), protocol.WriteFieldsParams{RootKey: "root-1", Fields: result.Fields})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestProcessClientPortableFieldDescriptors(t *testing.T) {
+	for _, kind := range []string{"string", "string_set", "unknown", "null"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("HELPER_MODE", "raw-result")
+			t.Setenv("HELPER_RESULT", `{"fields":[{"id":"field-1","display_name":"Text","accepted_kinds":["`+kind+`"],"nullable":true,"writable":true,"schema_revision":"schema-1"}]}`)
+			client := newHelperClient(t, config.ConnectorConfig{ID: "example-instance", Command: helperBinary(t), Args: []string{"-test.run=^TestProcessClientHelper$"}, Env: map[string]string{"MODE": "HELPER_MODE", "RESULT": "HELPER_RESULT"}})
+			_, err := client.ListFields(t.Context())
+			if kind == "string" || kind == "string_set" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrProtocolFailure)
+			}
+		})
+	}
+}
+
+func TestProcessClientRejectsMalformedPortableFieldResults(t *testing.T) {
+	for _, wire := range []string{`{"kind":"string_set","values":["z","a"]}`, `{"kind":"string_set","values":["a","a"]}`, `{"kind":"string_set","value":"a"}`, `{"kind":"string","values":["a"]}`, `{"kind":"string","timezone":"UTC"}`, `{"kind":"string","value":"\u0000"}`, `{"kind":"unknown"}`, `{"kind":"string_set","values":["\u0000"]}`} {
+		t.Run(wire, func(t *testing.T) {
+			t.Setenv("HELPER_MODE", "raw-result")
+			t.Setenv("HELPER_RESULT", `{"fields":{"field-1":`+wire+`}}`)
+			client := newHelperClient(t, config.ConnectorConfig{ID: "example-instance", Command: helperBinary(t), Args: []string{"-test.run=^TestProcessClientHelper$"}, Env: map[string]string{"MODE": "HELPER_MODE", "RESULT": "HELPER_RESULT"}})
+			_, err := client.ReadFields(t.Context(), protocol.ReadFieldsParams{RootKey: "root-1", FieldIDs: []string{"field-1"}})
+			require.ErrorIs(t, err, ErrProtocolFailure)
+		})
+	}
 }

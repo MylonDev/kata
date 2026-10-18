@@ -13,9 +13,12 @@ const UISnapshotContractVersion = "2"
 
 // UICapabilities describes the browser behavior authorized for this request.
 type UICapabilities struct {
+	AccessAdmin           bool           `json:"access_admin,omitempty,omitzero"`
 	Writable              bool           `json:"writable"`
 	Updates               string         `json:"updates" enum:"sse,poll"`
 	ActorPolicy           string         `json:"actor_policy"`
+	Account               string         `json:"account,omitempty"`
+	AuthKind              string         `json:"auth_kind,omitempty" doc:"How this request authenticated; matches the instance auth kind. Never contains credentials."`
 	Scope                 *TokenScopeOut `json:"scope,omitempty"`
 	ExpiresAt             *time.Time     `json:"expires_at,omitempty"`
 	AllowedActions        []string       `json:"allowed_actions,omitempty"`
@@ -59,7 +62,7 @@ func (in *UISnapshotRequest) Resolve(ctx huma.Context) []error {
 type UISelectedAuthority struct {
 	State       string          `json:"state"`
 	Issue       *db.UIIssue     `json:"issue,omitempty"`
-	Comments    []db.Comment    `json:"comments"`
+	Comments    []CommentOut    `json:"comments"`
 	Labels      []db.IssueLabel `json:"labels"`
 	Links       []db.UILink     `json:"links"`
 	Recurrences []db.Recurrence `json:"recurrences"`

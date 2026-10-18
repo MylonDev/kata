@@ -89,8 +89,9 @@ func (s *Store) ExportSequences(ctx context.Context) iter.Seq2[db.SequenceExport
 ('projects'),('project_aliases'),('recurrences'),('issue_sync_bindings'),('issues'),
 ('comments'),('links'),('import_mappings'),('events'),('purge_log'),
 ('project_purge_log'),('api_tokens'),('federation_quarantine'),
-('federation_enrollments'),('issue_claims'),('pending_claim_requests'),
-('external_root_bindings'),('external_field_mappings')
+('federation_enrollments'),('federation_relay_outbox'),('issue_claims'),('pending_claim_requests'),
+('external_root_bindings'),('external_field_mappings'),
+('cron_jobs'),('cron_workflows'),('cron_runs')
 )
 SELECT t.name, COALESCE(s.last_value,0)
 FROM identity_tables t
@@ -271,17 +272,18 @@ SELECT DISTINCT recurrence_id FROM issues WHERE recurrence_id IS NOT NULL AND de
 func (s *Store) ExportComments(ctx context.Context, filter db.ExportFilter) iter.Seq2[db.CommentExport, error] {
 	where, args := pgExportWhere("issues", filter)
 	query := `SELECT comments.id, comments.uid, comments.issue_id, comments.author,
-	       comments.body, comments.created_at, comments.teammate
+	       comments.body, comments.created_at, comments.teammate, comments.reply_to_uid, comments.reply_kind, CAST(comments.edited_at AS TEXT)
   FROM comments JOIN issues ON issues.id = comments.issue_id` + where + ` ORDER BY comments.id ASC`
 	return streamExportRows(ctx, s, "comments", query, args,
 		func(rows *sql.Rows) (db.CommentExport, error) {
 			var record db.CommentExport
-			var teammate sql.NullString
+			var teammate, replyTo, replyKind, editedAt sql.NullString
 			if err := rows.Scan(&record.ID, &record.UID, &record.IssueID, &record.Author,
-				&record.Body, &record.CreatedAt, &teammate); err != nil {
+				&record.Body, &record.CreatedAt, &teammate, &replyTo, &replyKind, &editedAt); err != nil {
 				return db.CommentExport{}, pgExportScanError("comment", err)
 			}
 			record.Teammate = teammate.String
+			record.ReplyToUID, record.ReplyKind, record.EditedAt = replyTo.String, replyKind.String, editedAt.String
 			return record, nil
 		})
 }
@@ -629,18 +631,27 @@ func (s *Store) ExportFederationBindings(ctx context.Context, filter db.ExportFi
 	query, args := pgProjectFilter(`SELECT project_id, role, hub_url, hub_project_id,
        hub_project_uid, replay_horizon_event_id, pull_cursor_event_id, push_enabled,
        push_cursor_event_id, bound_actor, allow_insecure, enabled, created_at,
-       updated_at, last_sync_at FROM federation_bindings`, "project_id", filter)
+       updated_at, last_sync_at, relay_config FROM federation_bindings`, "project_id", filter)
 	query += ` ORDER BY project_id ASC`
 	return streamExportRows(ctx, s, "federation_bindings", query, args,
 		func(rows *sql.Rows) (db.FederationBindingExport, error) {
 			var record db.FederationBindingExport
+			var relayConfig *string
 			var pushEnabled, allowInsecure, enabled int
 			if err := rows.Scan(&record.ProjectID, &record.Role, &record.HubURL,
 				&record.HubProjectID, &record.HubProjectUID, &record.ReplayHorizonEventID,
 				&record.PullCursorEventID, &pushEnabled, &record.PushCursorEventID,
 				&record.Actor, &allowInsecure, &enabled, &record.CreatedAt,
-				&record.UpdatedAt, &record.LastSyncAt); err != nil {
+				&record.UpdatedAt, &record.LastSyncAt, &relayConfig); err != nil {
 				return db.FederationBindingExport{}, pgExportScanError("federation_binding", err)
+			}
+			var err error
+			record.RelayConfig, err = db.DecodeRelayBindingConfig(relayConfig)
+			if err != nil {
+				return db.FederationBindingExport{}, err
+			}
+			if filter.ProjectID != nil {
+				record.RelayConfig = nil
 			}
 			record.PushEnabled = pushEnabled == 1
 			record.AllowInsecure = allowInsecure == 1
@@ -696,26 +707,27 @@ func (s *Store) ExportFederationEnrollments(ctx context.Context, filter db.Expor
 	query := `SELECT id, token_hash, spoke_instance_uid, project_id, capabilities,
        bound_actor, allow_adoption_snapshot_authors, adoption_baseline_open,
        adoption_baseline_next_source_event_id, adoption_baseline_end_source_event_id,
-       created_at, updated_at, revoked_at FROM federation_enrollments`
+       created_at, updated_at, revoked_at,relay_binding_uid,relay_protocol_version,parent_token_id,relay_reset_epoch,relay_serve_downstream FROM federation_enrollments`
 	var args []any
 	if filter.ProjectID != nil {
-		query += ` WHERE project_id=$1`
+		query += ` WHERE project_id=$1 AND relay_protocol_version=0 AND parent_token_id IS NULL AND relay_binding_uid IS NULL`
 		args = append(args, *filter.ProjectID)
 	}
 	query += ` ORDER BY id ASC`
 	return streamExportRows(ctx, s, "federation_enrollments", query, args,
 		func(rows *sql.Rows) (db.FederationEnrollmentExport, error) {
 			var record db.FederationEnrollmentExport
-			var allowAuthors, baselineOpen int
+			var allowAuthors, baselineOpen, serveDownstream int
 			if err := rows.Scan(&record.ID, &record.TokenHash, &record.SpokeInstanceUID,
 				&record.ProjectID, &record.Capabilities, &record.Actor, &allowAuthors,
 				&baselineOpen, &record.AdoptionBaselineNextSourceEventID,
 				&record.AdoptionBaselineEndSourceEventID, &record.CreatedAt,
-				&record.UpdatedAt, &record.RevokedAt); err != nil {
+				&record.UpdatedAt, &record.RevokedAt, &record.RelayBindingUID, &record.RelayProtocolVersion, &record.ParentTokenID, &record.RelayResetEpoch, &serveDownstream); err != nil {
 				return db.FederationEnrollmentExport{}, pgExportScanError("federation_enrollment", err)
 			}
 			record.AllowAdoptionSnapshotAuthors = allowAuthors == 1
 			record.AdoptionBaselineOpen = baselineOpen == 1
+			record.RelayServeDownstream = serveDownstream == 1
 			return record, nil
 		})
 }
@@ -789,18 +801,28 @@ func (s *Store) ExportPendingClaimRequests(ctx context.Context, filter db.Export
 // ExportEvents streams replay-safe event envelopes under the export visibility rules.
 func (s *Store) ExportEvents(ctx context.Context, filter db.ExportFilter) iter.Seq2[db.EventExport, error] {
 	issueIDExpression := `events.issue_id`
-	relatedScrub := `(peer.id IS NULL AND (events.related_issue_id IS NOT NULL OR events.related_issue_uid IS NOT NULL))`
+	relatedIDScrub := `(peer.id IS NULL AND (events.related_issue_id IS NOT NULL OR events.related_issue_uid IS NOT NULL))`
+	relatedUIDScrub := `(peer.id IS NULL AND (events.related_issue_id IS NOT NULL OR events.related_issue_uid IS NOT NULL) AND events.type NOT IN ('issue.commented', 'issue.links_changed'))`
 	var args []any
 	if filter.ProjectID != nil {
 		issueIDExpression = `CASE WHEN subject_issue.id IS NOT NULL AND subject_issue.project_id <> $1 THEN NULL ELSE events.issue_id END`
-		relatedScrub += ` OR (peer.id IS NOT NULL AND peer.project_id <> $1)`
+		relatedIDScrub += ` OR (peer.id IS NOT NULL AND peer.project_id <> $1)`
+		relatedUIDScrub += ` OR (peer.id IS NOT NULL AND peer.project_id <> $1)`
 		args = append(args, *filter.ProjectID)
 	}
 	if !filter.IncludeDeleted {
-		relatedScrub += ` OR (events.type = 'issue.links_changed' AND peer.deleted_at IS NOT NULL)`
+		relatedIDScrub += ` OR (events.type = 'issue.links_changed' AND peer.deleted_at IS NOT NULL) OR (events.type = 'issue.commented' AND peer.deleted_at IS NOT NULL)`
+		relatedUIDScrub += ` OR (events.type = 'issue.links_changed' AND peer.deleted_at IS NOT NULL)`
 	}
-	relatedIDExpression := `CASE WHEN ` + relatedScrub + ` THEN NULL ELSE events.related_issue_id END`
-	relatedUIDExpression := `CASE WHEN ` + relatedScrub + ` THEN NULL ELSE events.related_issue_uid END`
+	relatedIDExpression := `CASE WHEN ` + relatedIDScrub + ` THEN NULL ELSE events.related_issue_id END`
+	// Root receipts sign related_issue_uid as part of the event hash. Keep that
+	// value when a signed event's peer is omitted, while clearing its local FK.
+	relatedUIDScrub = `(` + relatedUIDScrub + `) AND NOT EXISTS (
+		SELECT 1 FROM federation_event_provenance signed_receipt
+		 WHERE signed_receipt.project_uid=export_project.uid
+		   AND signed_receipt.event_uid=events.uid
+		   AND signed_receipt.content_hash=events.content_hash)`
+	relatedUIDExpression := `CASE WHEN ` + relatedUIDScrub + ` THEN NULL ELSE events.related_issue_uid END`
 	subjectLive := `(events.issue_id IS NULL OR subject_issue.id IS NOT NULL)`
 	if !filter.IncludeDeleted {
 		subjectLive = `((events.issue_id IS NULL AND subject_issue.id IS NULL)
@@ -825,7 +847,7 @@ OR (subject_issue.id IS NOT NULL AND subject_issue.deleted_at IS NULL))`
 		clauses = append(clauses,
 			`(events.issue_id IS NULL OR EXISTS (
 SELECT 1 FROM issues WHERE issues.id = events.issue_id AND issues.deleted_at IS NULL))`,
-			`(events.type = 'issue.links_changed' OR (
+			`(events.type IN ('issue.links_changed', 'issue.commented') OR (
 (events.related_issue_id IS NULL OR NOT EXISTS (
   SELECT 1 FROM issues WHERE issues.id = events.related_issue_id AND issues.deleted_at IS NOT NULL))
 AND (events.related_issue_uid IS NULL OR NOT EXISTS (

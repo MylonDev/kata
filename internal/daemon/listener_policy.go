@@ -17,6 +17,8 @@ type ListenerKind string
 const (
 	// ListenerSocket preserves the owner-local Unix-socket browser-Origin ban.
 	ListenerSocket ListenerKind = "socket"
+	// ListenerFederation exposes only scoped native federation operations.
+	ListenerFederation ListenerKind = "federation"
 	// ListenerBrowser is a dedicated browser-facing TCP listener.
 	ListenerBrowser ListenerKind = "browser"
 	// ListenerSharedTCP serves both ordinary daemon clients and browsers.
@@ -69,7 +71,7 @@ func ApplyListenerPolicy(next http.Handler, policy ListenerPolicy) (http.Handler
 				api.WriteEnvelope(w, http.StatusBadRequest, "host_invalid", "Host header does not match listener authority")
 				return
 			}
-			if policy.Kind == ListenerBrowser || isBrowserRequest(r) {
+			if (policy.Kind == ListenerBrowser && !ordinaryAPIBearerRequest(r)) || isBrowserRequest(r) {
 				if isMutation(r.Method) && !browserMutationOriginAllowed(r, policy.Origin) {
 					api.WriteEnvelope(w, http.StatusForbidden, "origin_forbidden", "Origin header does not match browser origin")
 					return
@@ -162,8 +164,11 @@ func addAllowedAuthority(allowed map[string]struct{}, authority string) {
 }
 
 func isBrowserRequest(r *http.Request) bool {
-	if strings.HasPrefix(r.URL.Path, "/api/v1/ui/") ||
-		r.Header.Get("Origin") != "" || r.Header.Get(webSessionHeader) != "" {
+	// Terminal telemetry uses the browser's operation, so this path alone marks nothing.
+	uiPath := strings.HasPrefix(r.URL.Path, "/api/v1/ui/") &&
+		(r.Method != http.MethodPost || r.URL.Path != "/api/v1/ui/telemetry")
+	if uiPath || r.Header.Get("Origin") != "" || r.Header.Get(webSessionHeader) != "" ||
+		r.Header.Get(webCSRFHeader) != "" || r.Header.Get("Sec-Fetch-Site") != "" {
 		return true
 	}
 	for _, cookie := range r.Cookies() {
@@ -175,11 +180,29 @@ func isBrowserRequest(r *http.Request) bool {
 	return !strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/openapi.yaml"
 }
 
+// ordinaryAPIBearerRequest classifies CLI, TUI and federation traffic, leaving
+// credential validation to the normal daemon authentication stack. Browser
+// evidence always takes precedence over a bearer header.
+func ordinaryAPIBearerRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/api/v1/") &&
+		hasBearerHeader(r.Header.Get(authHeader)) &&
+		r.Header.Get("Cookie") == "" && !isBrowserRequest(r)
+}
+
 // CheckWebStartup applies the daemon's existing remote-access policy to a
-// configured browser bind and additionally refuses public literals/hostnames.
-func CheckWebStartup(listen string, auth config.AuthConfig, insecureReadonly bool) error {
+// configured browser bind, additionally refuses public literals/hostnames,
+// and accepts a tokenless listener only when its trusted-proxy session is
+// configured on an explicitly trusted private network.
+func CheckWebStartup(listen string, auth config.AuthConfig, insecureReadonly, trustedProxySession bool) error {
 	if err := ValidateNonPublicAddress(listen); err != nil {
 		return err
 	}
-	return CheckAuthStartup(listen, auth, insecureReadonly)
+	return checkAuthStartup(listen, authPolicy{
+		Token:                                    auth.Token,
+		TrustPrivateNetwork:                      auth.TrustPrivateNetwork,
+		AllowUnauthenticatedPrivateNetworkWrites: auth.AllowUnauthenticatedPrivateNetworkWrites,
+		InsecureReadonly:                         insecureReadonly,
+		RequireTokenIdentity:                     auth.RequireTokenIdentity,
+		TrustedProxySession:                      trustedProxySession,
+	})
 }

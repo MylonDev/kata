@@ -19,12 +19,16 @@ func FederationTokenHash(token string) string {
 }
 
 // CanonicalFederationCapabilities validates and normalizes supported
-// capabilities as sorted, de-duplicated comma-separated text.
+// capabilities as sorted, de-duplicated comma-separated text. The human-facing
+// lease alias is accepted and stored as claim.
 func CanonicalFederationCapabilities(raw string) (string, error) {
 	parts := strings.Split(raw, ",")
 	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		capability := strings.TrimSpace(part)
+		if capability == "lease" {
+			capability = "claim"
+		}
 		if capability == "" {
 			return "", fmt.Errorf("empty federation capability")
 		}
@@ -65,6 +69,8 @@ func FederationEnrollmentAuthorizationMatches(
 ) bool {
 	if current.ID != admitted.ID || current.RevokedAt != nil ||
 		current.SpokeInstanceUID != admitted.SpokeInstanceUID ||
+		current.RelayBindingUID != admitted.RelayBindingUID || current.RelayProtocolVersion != admitted.RelayProtocolVersion ||
+		!sameOptionalInt64(current.ParentTokenID, admitted.ParentTokenID) || current.RelayResetEpoch != admitted.RelayResetEpoch || current.RelayServeDownstream != admitted.RelayServeDownstream ||
 		current.Capabilities != admitted.Capabilities || current.Actor != admitted.Actor ||
 		current.AllowAdoptionSnapshotAuthors != admitted.AllowAdoptionSnapshotAuthors ||
 		current.AdoptionBaselineOpen != admitted.AdoptionBaselineOpen ||

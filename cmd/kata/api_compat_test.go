@@ -186,6 +186,10 @@ func TestListSortDaemonCompatibility(t *testing.T) {
 		{name: "malformed version rejects oldest", version: "development", args: []string{"list", "--all", "--sort", "oldest"}, wantError: "requires daemon API 0.21.0 or newer", wantHealthCalls: 1},
 		{name: "old version rejects oldest", version: "0.20.0", args: []string{"list", "--all", "--sort", "oldest"}, wantError: "requires daemon API 0.21.0 or newer", wantHealthCalls: 1},
 		{name: "current version sends oldest", version: "0.21.0", args: []string{"list", "--all", "--sort", "oldest"}, wantListCalls: 1, wantHealthCalls: 1, wantSort: "oldest"},
+		{name: "old version rejects created", version: "0.26.0", args: []string{"list", "--all", "--sort", "created"}, wantError: "requires daemon API 0.27.0 or newer", wantHealthCalls: 1},
+		{name: "current version sends created", version: "0.27.0", args: []string{"list", "--all", "--sort", "created"}, wantListCalls: 1, wantHealthCalls: 1, wantSort: "created"},
+		{name: "old version rejects unset", version: "0.26.0", args: []string{"list", "--all", "--priority-unset"}, wantError: "requires daemon API 0.27.0 or newer", wantHealthCalls: 1},
+		{name: "old version rejects total", version: "0.26.0", args: []string{"list", "--all", "--include-total"}, wantError: "requires daemon API 0.27.0 or newer", wantHealthCalls: 1},
 		{name: "invalid value fails locally", version: "0.21.0", args: []string{"list", "--all", "--sort", "newest"}, wantError: "--sort must be oldest"},
 	}
 	for _, tt := range tests {
@@ -236,9 +240,9 @@ func TestListParentDaemonCompatibility(t *testing.T) {
 		wantListCalls int32
 		wantParentUID string
 	}{
-		{name: "missing version rejects parent", version: "", wantError: "list --parent requires daemon API 0.25.0 or newer"},
-		{name: "old version rejects parent", version: "0.24.0", wantError: "list --parent requires daemon API 0.25.0 or newer"},
-		{name: "current version sends parent uid", version: "0.25.0", wantLookups: 1, wantListCalls: 1, wantParentUID: parentUID},
+		{name: "missing version rejects parent", version: "", wantError: "list --parent requires daemon API 0.30.0 or newer"},
+		{name: "old version rejects parent", version: "0.29.0", wantError: "list --parent requires daemon API 0.30.0 or newer"},
+		{name: "current version sends parent uid", version: "0.30.0", wantLookups: 1, wantListCalls: 1, wantParentUID: parentUID},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
